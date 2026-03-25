@@ -1,0 +1,21 @@
+{
+  "permissions": {
+    "allow": [
+      "Read(//Users/**)",
+      "Bash(find . -type d -name *STM32U5*)",
+      "Bash(find /d/ChengKe/Sensor_1/Test_Project/01-1_stm32u575_freertos_blink/MDK-ARM/.pack -type f \\\\\\(-name *.xml -o -name *.xlsx -o -name *.pdf \\\\\\))",
+      "Bash(find /d/ChengKe/Sensor_1/Test_Project/01-1_stm32u575_freertos_blink/MDK-ARM/.pack/Keil/STM32U5xx_DFP.3.2.0/CMSIS -type f -name *STM32U575*)",
+      "Bash(find /d/ChengKe/Sensor_1/Test_Project/01-1_stm32u575_freertos_blink -type f \\\\\\(-name *map* -o -name *pin* -o -name *table* \\\\\\))",
+      "Bash(del:*)",
+      "Bash(find d:/ChengKe/Sensor_1/Test_Project/01-1_stm32u575_freertos_blink/MDK-ARM/.pack/Keil/STM32U5xx_DFP.3.2.0 -name *.xml -o -name *.json)",
+      "Bash(find /d/ChengKe/Sensor_1/Test_Project/01-1_stm32u575_freertos_blink/BSP -type f \\\\\\(-name *.c -o -name *.h \\\\\\))",
+      "Bash(grep -v -E \"\\\\.o$|\\\\.d$\")",
+      "Bash(find /d/ChengKe -type f -path *stm32u575* -iname *spi*)",
+      "Bash(grep -v -E \"\\\\.o$|\\\\.d$|\\\\.a$\")",
+      "Bash(find /d/ChengKe -type f -iname *h3lis* -o -iname *sensor*)",
+      "Bash(grep -E \"\\\\.\\(c|h\\)$\")",
+      "Bash(find /d/ChengKe/Sensor_1/Test_Project/01-1_stm32u575_freertos_blink/Drivers -type f -path *HAL* -iname *spi*)",
+      "Bash(find /d/ChengKe/Sensor_1/CUBEMX_DRIVER_Reference -type f -iname *spi* -o -iname *h3lis*)"
+    ]
+  }
+}
