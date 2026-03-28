@@ -1,19 +1,16 @@
 /**
   ******************************************************************************
   * @file    qma6100p.c
-  * @brief   QMA6100P 锟斤拷锟斤拷实锟街ｏ拷SPI2 + 锟斤拷锟狡★拷锟斤拷锟�
+  * @brief   QMA6100P accelerometer driver (SPI2 + mutex protected)
   *
-  * 说锟斤拷锟斤拷
-  *   1) 锟斤拷锟斤拷锟斤拷锟叫讹拷锟斤拷 API 锟斤拷锟戒。
-  *   2) 锟阶诧拷通锟脚达拷 I2C 迁锟斤拷为 SPI2 锟斤拷锟斤拷锟斤拷锟竭★拷
-  *   3) 片选锟斤拷 PB0 锟斤拷锟斤拷侄锟斤拷锟斤拷啤锟�
+  *   Bus  : SPI2  SCK=PB13  MISO=PB14  MOSI=PB15
+  *   CS   : PB0 (GPIO, active low)
   ******************************************************************************
   */
 
 #include "qma6100p.h"
 #include <string.h>
 
-/* 锟斤拷锟斤拷 SPI 锟斤拷锟斤拷时时锟戒（锟斤拷锟诫） */
 #define QMA6100P_SPI_TIMEOUT_MS  SENSOR_SPI2_TIMEOUT_MS
 
 typedef struct {
@@ -64,31 +61,11 @@ static HAL_StatusTypeDef QMA6100P_ReadReg(uint8_t reg, uint8_t *buf, uint16_t le
 
   return ret;
 }
+
 static void QMA6100P_DebugHardware(void)
 {
   QMA_SPI2_CS_HIGH();
   HAL_Delay(1U);
-
-//  printf("[QMA6100P] === HW DIAG ===\r\n");
-//  printf("[QMA6100P] CS(PB0) readback: %u (expect 1)\r\n",
-//         (unsigned int)HAL_GPIO_ReadPin(QMA_SPI2_CS_GPIO_PORT, QMA_SPI2_CS_PIN));
-//  printf("[QMA6100P] MISO(PB14) idle level: %u (pull-up expect 1)\r\n",
-//         (unsigned int)HAL_GPIO_ReadPin(SENSOR_SPI2_MISO_PORT, SENSOR_SPI2_MISO_PIN));
-//  printf("[QMA6100P] GPIOB->MODER  = 0x%08lX\r\n", (unsigned long)GPIOB->MODER);
-//  printf("[QMA6100P] GPIOB->AFR[0] = 0x%08lX (PB0-PB7 AF)\r\n", (unsigned long)GPIOB->AFR[0]);
-//  printf("[QMA6100P] GPIOB->AFR[1] = 0x%08lX (PB8-PB15 AF)\r\n", (unsigned long)GPIOB->AFR[1]);
-//  printf("[QMA6100P] GPIOB->PUPDR  = 0x%08lX\r\n", (unsigned long)GPIOB->PUPDR);
-//  printf("[QMA6100P] GPIOB->IDR    = 0x%08lX\r\n", (unsigned long)GPIOB->IDR);
-//  printf("[QMA6100P] GPIOB->ODR    = 0x%08lX\r\n", (unsigned long)GPIOB->ODR);
-//  printf("[QMA6100P] SPI2 State=0x%02X Error=0x%08lX\r\n",
-//         (unsigned int)HAL_SPI_GetState(&hspi2),
-//         (unsigned long)HAL_SPI_GetError(&hspi2));
-//  printf("[QMA6100P] SPI2 CR1=0x%08lX CFG1=0x%08lX CFG2=0x%08lX SR=0x%08lX\r\n",
-//         (unsigned long)SPI2->CR1,
-//         (unsigned long)SPI2->CFG1,
-//         (unsigned long)SPI2->CFG2,
-//         (unsigned long)SPI2->SR);
-//  printf("[QMA6100P] === HW DIAG END ===\r\n\r\n");
 }
 
 static void QMA6100P_DumpKeyRegs(void)
@@ -149,19 +126,15 @@ static HAL_StatusTypeDef QMA6100P_SetRange(QMA6100P_Range_t range)
 
 static HAL_StatusTypeDef QMA6100P_SetBW(QMA6100P_Bandwidth_t bw)
 {
-  /* 锟节碉拷前锟斤拷锟斤拷锟叫ｏ拷BW/ODR 锟侥达拷锟斤拷 bit[2:0] 锟斤拷示锟斤拷锟斤拷锟斤拷锟� */
   return QMA6100P_WriteReg(QMA6100P_REG_BW_ODR, (uint8_t)bw);
 }
 
 static HAL_StatusTypeDef QMA6100P_SetActiveMode(void)
 {
-  /* 0x84 = 锟斤拷锟斤拷模式 + MCLK 51.2kHz锟斤拷锟斤拷锟矫筹拷锟教筹拷始锟斤拷时锟斤拷 */
+  /* 0x84 = active mode + MCLK 51.2kHz */
   return QMA6100P_WriteReg(QMA6100P_REG_POWER_MANAGE, 0x84U);
 }
 
-/**
-  * @brief  锟斤拷锟斤拷锟轿伙拷锟街达拷锟� OTP 锟斤拷锟截ｏ拷锟斤拷源锟节筹拷锟教参匡拷锟斤拷锟斤拷锟斤拷锟教ｏ拷锟斤拷
-  */
 static HAL_StatusTypeDef QMA6100P_SoftReset(void)
 {
   uint8_t reg_val = 0U;
@@ -221,6 +194,7 @@ static HAL_StatusTypeDef QMA6100P_SoftReset(void)
 
   return HAL_OK;
 }
+
 static HAL_StatusTypeDef QMA6100P_Initialize(void)
 {
   if (QMA6100P_SoftReset() != HAL_OK)
@@ -228,7 +202,6 @@ static HAL_StatusTypeDef QMA6100P_Initialize(void)
     return HAL_ERROR;
   }
 
-  /* 锟斤拷锟斤拷要锟斤拷某锟绞硷拷锟斤拷锟斤拷校锟剿筹拷虿豢筛谋洌� */
   if (QMA6100P_WriteReg(0x11U, 0x80U) != HAL_OK) return HAL_ERROR;
   if (QMA6100P_WriteReg(0x11U, 0x84U) != HAL_OK) return HAL_ERROR;
   if (QMA6100P_WriteReg(0x4AU, 0x20U) != HAL_OK) return HAL_ERROR;
@@ -238,7 +211,6 @@ static HAL_StatusTypeDef QMA6100P_Initialize(void)
   if (QMA6100P_WriteReg(0x5FU, 0x00U) != HAL_OK) return HAL_ERROR;
   HAL_Delay(10U);
 
-  /* 默锟斤拷锟斤拷锟矫ｏ拷锟斤拷4g锟斤拷100Hz锟斤拷锟斤拷锟斤拷模式 */
   if (QMA6100P_SetRange(QMA6100P_RANGE_4G) != HAL_OK) return HAL_ERROR;
   if (QMA6100P_SetBW(QMA6100P_BW_100) != HAL_OK) return HAL_ERROR;
   if (QMA6100P_SetActiveMode() != HAL_OK) return HAL_ERROR;
@@ -273,11 +245,6 @@ HAL_StatusTypeDef QMA6100P_Init(void)
   {
     chip_id_raw = 0U;
     ret = QMA6100P_ReadReg(QMA6100P_REG_CHIP_ID, &chip_id_raw, 1U);
-//    printf("[QMA6100P] CHIP_ID read #%u: ret=%d val=0x%02X (expect high nibble=0x%X)\r\n",
-//           (unsigned int)(i + 1U),
-//           (int)ret,
-//           chip_id_raw,
-//           QMA6100P_DEVICE_ID);
 
     if (ret == HAL_OK)
     {
@@ -285,8 +252,7 @@ HAL_StatusTypeDef QMA6100P_Init(void)
       if (g_qma.chip_id == QMA6100P_DEVICE_ID)
       {
 //        printf("[QMA6100P] CHIP_ID OK: raw=0x%02X, high=0x%X\r\n",
-//               chip_id_raw,
-//               g_qma.chip_id);
+//               chip_id_raw, g_qma.chip_id);
         return HAL_OK;
       }
     }
@@ -304,19 +270,14 @@ HAL_StatusTypeDef QMA6100P_Init(void)
       (power_manage == 0x84U))
   {
     g_qma.chip_id = QMA6100P_DEVICE_ID;
-//    printf("[QMA6100P] CHIP_ID abnormal (0x%02X), but CHIP_STATE=0x%02X and key regs look valid. Continue.\r\n",
-//           chip_id_raw,
-//           chip_state);
     return HAL_OK;
   }
 
-//  printf("[QMA6100P] CHIP_ID mismatch: raw=0x%02X, expect high nibble=0x%X\r\n",
-//         chip_id_raw,
-//         QMA6100P_DEVICE_ID);
   QMA6100P_DumpKeyRegs();
   QMA6100P_DumpRegs();
   return HAL_ERROR;
 }
+
 HAL_StatusTypeDef QMA6100P_Configure(const QMA6100P_Config_t *cfg)
 {
   if (cfg == NULL)
@@ -326,26 +287,18 @@ HAL_StatusTypeDef QMA6100P_Configure(const QMA6100P_Config_t *cfg)
 
   if (QMA6100P_SetRange(cfg->range) != HAL_OK)
   {
-//    printf("[QMA6100P] Set range failed.\r\n");
     return HAL_ERROR;
   }
 
   if (QMA6100P_SetBW(cfg->bw) != HAL_OK)
   {
-//    printf("[QMA6100P] Set bandwidth failed.\r\n");
     return HAL_ERROR;
   }
 
   if (QMA6100P_SetActiveMode() != HAL_OK)
   {
-//    printf("[QMA6100P] Set active mode failed.\r\n");
     return HAL_ERROR;
   }
-
-//  printf("[QMA6100P] Configure done: range=%d, bw=%d, lsb_1g=%ld\r\n",
-//         cfg->range,
-//         cfg->bw,
-//         (long)g_qma.lsb_1g);
 
   return HAL_OK;
 }
@@ -370,7 +323,7 @@ HAL_StatusTypeDef QMA6100P_ReadRawXYZ(QMA6100P_Data_t *data)
     HAL_Delay(2U);
   }
 
-  /* 14 位锟叫凤拷锟斤拷锟斤拷锟捷凤拷装锟斤拷 16 位锟斤拷锟斤拷锟叫ｏ拷锟斤拷锟� 2 bit 锟斤拷效 */
+  /* 14-bit signed, packed in 16-bit, lower 2 bits unused */
   data->raw[0] = (int16_t)((((int16_t)buf[1]) << 8) | buf[0]) >> 2;
   data->raw[1] = (int16_t)((((int16_t)buf[3]) << 8) | buf[2]) >> 2;
   data->raw[2] = (int16_t)((((int16_t)buf[5]) << 8) | buf[4]) >> 2;

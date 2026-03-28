@@ -235,11 +235,10 @@ void MX_FREERTOS_Init(void) {
   lsm6dsoxTaskHandle = osThreadNew(StartLsm6dsoxTask, NULL, &lsm6dsoxTask_attributes);
   osThreadSuspend(lsm6dsoxTaskHandle);
 
-  /* H3LIS100DL thread - suspended during QMA6100P validation */
+  /* H3LIS100DL thread - ACTIVE */
   h3lis100dlTaskHandle = osThreadNew(StartH3lis100dlTask, NULL, &h3lis100dlTask_attributes);
-  osThreadSuspend(h3lis100dlTaskHandle);
 
-  /* QMA6100P thread - ACTIVE for driver testing */
+  /* QMA6100P thread - ACTIVE (shared SPI2 bus, mutex protected) */
   qma6100pTaskHandle = osThreadNew(StartQma6100pTask, NULL, &qma6100pTask_attributes);
 
   /* USER CODE END RTOS_THREADS */
@@ -259,9 +258,24 @@ void MX_FREERTOS_Init(void) {
 void StartDefaultTask(void *argument)
 {
   /* USER CODE BEGIN defaultTask */
+  uint32_t monitor_tick = 0;
+
+  /* 一次性打印系统时钟，用于确认 SPI2 实际速率 */
+  printf("\r\n========================================\r\n");
+  printf("[SYS] SYSCLK     = %lu Hz\r\n", SystemCoreClock);
+  printf("[SYS] SPI2 CLK   = %lu Hz  (SYSCLK / 16, H3LIS100DL max=10MHz)\r\n",
+         SystemCoreClock / 16UL);
+  printf("[SYS] 双传感器并发测试启动 (H3LIS100DL + QMA6100P @ SPI2)\r\n");
+  printf("========================================\r\n\r\n");
+
   for(;;)
   {
-    osDelay(1);
+    osDelay(5000);   /* 每 5 秒打印一次 SPI2 健康状态 */
+    monitor_tick++;
+    printf("[SPI2-MON] t=%lus  ErrorCode=0x%08lX  State=0x%02X\r\n",
+           (unsigned long)(monitor_tick * 5UL),
+           (unsigned long)hspi2.ErrorCode,
+           (unsigned int)hspi2.State);
   }
   /* USER CODE END defaultTask */
 }

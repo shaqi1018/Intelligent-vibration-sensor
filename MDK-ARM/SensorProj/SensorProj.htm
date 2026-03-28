@@ -3,7 +3,7 @@
 <title>Static Call Graph - [SensorProj\SensorProj.axf]</title></head>
 <body><HR>
 <H1>Static Call Graph for image SensorProj\SensorProj.axf</H1><HR>
-<BR><P>#&#060CALLGRAPH&#062# ARM Linker, 6160001: Last Updated: Wed Mar 25 23:16:30 2026
+<BR><P>#&#060CALLGRAPH&#062# ARM Linker, 6160001: Last Updated: Sat Mar 28 18:27:37 2026
 <BR><P>
 <H3>Maximum Stack Usage =        440 bytes + Unknown(Cycles, Untraceable Function Pointers)</H3><H3>
 Call chain for Maximum Stack Depth:</H3>
@@ -17,7 +17,6 @@ Mutually Recursive functions
  <LI><a href="#[2]">HardFault_Handler</a>&nbsp;&nbsp;&nbsp;&rArr;&nbsp;&nbsp;&nbsp;<a href="#[2]">HardFault_Handler</a><BR>
  <LI><a href="#[3]">MemManage_Handler</a>&nbsp;&nbsp;&nbsp;&rArr;&nbsp;&nbsp;&nbsp;<a href="#[3]">MemManage_Handler</a><BR>
  <LI><a href="#[1]">NMI_Handler</a>&nbsp;&nbsp;&nbsp;&rArr;&nbsp;&nbsp;&nbsp;<a href="#[1]">NMI_Handler</a><BR>
- <LI><a href="#[87]">StartDefaultTask</a>&nbsp;&nbsp;&nbsp;&rArr;&nbsp;&nbsp;&nbsp;<a href="#[87]">StartDefaultTask</a><BR>
  <LI><a href="#[5]">UsageFault_Handler</a>&nbsp;&nbsp;&nbsp;&rArr;&nbsp;&nbsp;&nbsp;<a href="#[5]">UsageFault_Handler</a><BR>
 </UL>
 <P>
@@ -1254,7 +1253,7 @@ Global Symbols
 <BR>[Called By]<UL><LI><a href="#[8a]">&gt;&gt;</a>&nbsp;&nbsp;&nbsp;StartLsm6dsoxTask
 </UL>
 
-<P><STRONG><a name="[ea]"></a>MX_FREERTOS_Init</STRONG> (Thumb, 178 bytes, Stack size 8 bytes, app_freertos.o(.text.MX_FREERTOS_Init))
+<P><STRONG><a name="[ea]"></a>MX_FREERTOS_Init</STRONG> (Thumb, 174 bytes, Stack size 8 bytes, app_freertos.o(.text.MX_FREERTOS_Init))
 <BR><BR>[Stack]<UL><LI>Max Depth = 176<LI>Call Chain = MX_FREERTOS_Init &rArr; osThreadNew &rArr; xTaskCreate &rArr; pvPortMalloc &rArr; xTaskResumeAll &rArr; xTaskIncrementTick
 </UL>
 <BR>[Calls]<UL><LI><a href="#[ed]">&gt;&gt;</a>&nbsp;&nbsp;&nbsp;osThreadSuspend
@@ -1399,14 +1398,12 @@ Global Symbols
 </UL>
 <BR>[Address Reference Count : 1]<UL><LI> app_freertos.o(.text.MX_FREERTOS_Init)
 </UL>
-<P><STRONG><a name="[87]"></a>StartDefaultTask</STRONG> (Thumb, 8 bytes, Stack size 0 bytes, app_freertos.o(.text.StartDefaultTask))
-<BR><BR>[Stack]<UL><LI>Max Depth = 88 + In Cycle
-<LI>Call Chain = StartDefaultTask &rArr;  StartDefaultTask (Cycle)
+<P><STRONG><a name="[87]"></a>StartDefaultTask</STRONG> (Thumb, 104 bytes, Stack size 0 bytes, app_freertos.o(.text.StartDefaultTask))
+<BR><BR>[Stack]<UL><LI>Max Depth = 88<LI>Call Chain = StartDefaultTask &rArr; osDelay &rArr; vTaskDelay &rArr; xTaskResumeAll &rArr; xTaskIncrementTick
 </UL>
 <BR>[Calls]<UL><LI><a href="#[fd]">&gt;&gt;</a>&nbsp;&nbsp;&nbsp;osDelay
-<LI><a href="#[87]">&gt;&gt;</a>&nbsp;&nbsp;&nbsp;StartDefaultTask
-</UL>
-<BR>[Called By]<UL><LI><a href="#[87]">&gt;&gt;</a>&nbsp;&nbsp;&nbsp;StartDefaultTask
+<LI><a href="#[a6]">&gt;&gt;</a>&nbsp;&nbsp;&nbsp;puts
+<LI><a href="#[aa]">&gt;&gt;</a>&nbsp;&nbsp;&nbsp;__2printf
 </UL>
 <BR>[Address Reference Count : 1]<UL><LI> app_freertos.o(.text.MX_FREERTOS_Init)
 </UL>
@@ -1880,11 +1877,11 @@ Global Symbols
 <P><STRONG><a name="[108]"></a>vTaskDelay</STRONG> (Thumb, 100 bytes, Stack size 16 bytes, tasks.o(.text.vTaskDelay))
 <BR><BR>[Stack]<UL><LI>Max Depth = 80<LI>Call Chain = vTaskDelay &rArr; xTaskResumeAll &rArr; xTaskIncrementTick
 </UL>
-<BR>[Calls]<UL><LI><a href="#[116]">&gt;&gt;</a>&nbsp;&nbsp;&nbsp;vListInsert
-<LI><a href="#[115]">&gt;&gt;</a>&nbsp;&nbsp;&nbsp;uxListRemove
-<LI><a href="#[11e]">&gt;&gt;</a>&nbsp;&nbsp;&nbsp;xTaskResumeAll
+<BR>[Calls]<UL><LI><a href="#[11e]">&gt;&gt;</a>&nbsp;&nbsp;&nbsp;xTaskResumeAll
 <LI><a href="#[11b]">&gt;&gt;</a>&nbsp;&nbsp;&nbsp;vPortYield
 <LI><a href="#[11f]">&gt;&gt;</a>&nbsp;&nbsp;&nbsp;ulSetInterruptMask
+<LI><a href="#[116]">&gt;&gt;</a>&nbsp;&nbsp;&nbsp;vListInsert
+<LI><a href="#[115]">&gt;&gt;</a>&nbsp;&nbsp;&nbsp;uxListRemove
 </UL>
 <BR>[Called By]<UL><LI><a href="#[fd]">&gt;&gt;</a>&nbsp;&nbsp;&nbsp;osDelay
 </UL>
@@ -1902,9 +1899,9 @@ Global Symbols
 <P><STRONG><a name="[134]"></a>vTaskPlaceOnEventList</STRONG> (Thumb, 42 bytes, Stack size 8 bytes, tasks.o(.text.vTaskPlaceOnEventList))
 <BR><BR>[Stack]<UL><LI>Max Depth = 40<LI>Call Chain = vTaskPlaceOnEventList &rArr; prvAddCurrentTaskToDelayedList &rArr; vListInsert
 </UL>
-<BR>[Calls]<UL><LI><a href="#[116]">&gt;&gt;</a>&nbsp;&nbsp;&nbsp;vListInsert
-<LI><a href="#[11f]">&gt;&gt;</a>&nbsp;&nbsp;&nbsp;ulSetInterruptMask
+<BR>[Calls]<UL><LI><a href="#[11f]">&gt;&gt;</a>&nbsp;&nbsp;&nbsp;ulSetInterruptMask
 <LI><a href="#[114]">&gt;&gt;</a>&nbsp;&nbsp;&nbsp;prvAddCurrentTaskToDelayedList
+<LI><a href="#[116]">&gt;&gt;</a>&nbsp;&nbsp;&nbsp;vListInsert
 </UL>
 <BR>[Called By]<UL><LI><a href="#[10a]">&gt;&gt;</a>&nbsp;&nbsp;&nbsp;xQueueSemaphoreTake
 <LI><a href="#[128]">&gt;&gt;</a>&nbsp;&nbsp;&nbsp;xQueueReceive
@@ -1914,10 +1911,10 @@ Global Symbols
 <P><STRONG><a name="[133]"></a>vTaskPlaceOnEventListRestricted</STRONG> (Thumb, 132 bytes, Stack size 16 bytes, tasks.o(.text.vTaskPlaceOnEventListRestricted))
 <BR><BR>[Stack]<UL><LI>Max Depth = 48<LI>Call Chain = vTaskPlaceOnEventListRestricted &rArr; prvAddCurrentTaskToDelayedList &rArr; vListInsert
 </UL>
-<BR>[Calls]<UL><LI><a href="#[116]">&gt;&gt;</a>&nbsp;&nbsp;&nbsp;vListInsert
-<LI><a href="#[115]">&gt;&gt;</a>&nbsp;&nbsp;&nbsp;uxListRemove
-<LI><a href="#[11f]">&gt;&gt;</a>&nbsp;&nbsp;&nbsp;ulSetInterruptMask
+<BR>[Calls]<UL><LI><a href="#[11f]">&gt;&gt;</a>&nbsp;&nbsp;&nbsp;ulSetInterruptMask
 <LI><a href="#[114]">&gt;&gt;</a>&nbsp;&nbsp;&nbsp;prvAddCurrentTaskToDelayedList
+<LI><a href="#[116]">&gt;&gt;</a>&nbsp;&nbsp;&nbsp;vListInsert
+<LI><a href="#[115]">&gt;&gt;</a>&nbsp;&nbsp;&nbsp;uxListRemove
 </UL>
 <BR>[Called By]<UL><LI><a href="#[127]">&gt;&gt;</a>&nbsp;&nbsp;&nbsp;vQueueWaitForMessageRestricted
 </UL>
@@ -1925,8 +1922,8 @@ Global Symbols
 <P><STRONG><a name="[135]"></a>vTaskPriorityDisinheritAfterTimeout</STRONG> (Thumb, 156 bytes, Stack size 24 bytes, tasks.o(.text.vTaskPriorityDisinheritAfterTimeout))
 <BR><BR>[Stack]<UL><LI>Max Depth = 24<LI>Call Chain = vTaskPriorityDisinheritAfterTimeout
 </UL>
-<BR>[Calls]<UL><LI><a href="#[115]">&gt;&gt;</a>&nbsp;&nbsp;&nbsp;uxListRemove
-<LI><a href="#[11f]">&gt;&gt;</a>&nbsp;&nbsp;&nbsp;ulSetInterruptMask
+<BR>[Calls]<UL><LI><a href="#[11f]">&gt;&gt;</a>&nbsp;&nbsp;&nbsp;ulSetInterruptMask
+<LI><a href="#[115]">&gt;&gt;</a>&nbsp;&nbsp;&nbsp;uxListRemove
 </UL>
 <BR>[Called By]<UL><LI><a href="#[10a]">&gt;&gt;</a>&nbsp;&nbsp;&nbsp;xQueueSemaphoreTake
 </UL>
@@ -1957,12 +1954,12 @@ Global Symbols
 <BR><BR>[Stack]<UL><LI>Max Depth = 24<LI>Call Chain = vTaskSuspend &rArr; vPortExitCritical
 </UL>
 <BR>[Calls]<UL><LI><a href="#[13b]">&gt;&gt;</a>&nbsp;&nbsp;&nbsp;getRunTimeCounterValue
-<LI><a href="#[115]">&gt;&gt;</a>&nbsp;&nbsp;&nbsp;uxListRemove
 <LI><a href="#[11b]">&gt;&gt;</a>&nbsp;&nbsp;&nbsp;vPortYield
 <LI><a href="#[11a]">&gt;&gt;</a>&nbsp;&nbsp;&nbsp;vPortExitCritical
 <LI><a href="#[118]">&gt;&gt;</a>&nbsp;&nbsp;&nbsp;vPortEnterCritical
 <LI><a href="#[11f]">&gt;&gt;</a>&nbsp;&nbsp;&nbsp;ulSetInterruptMask
 <LI><a href="#[13a]">&gt;&gt;</a>&nbsp;&nbsp;&nbsp;vListInsertEnd
+<LI><a href="#[115]">&gt;&gt;</a>&nbsp;&nbsp;&nbsp;uxListRemove
 </UL>
 <BR>[Called By]<UL><LI><a href="#[ed]">&gt;&gt;</a>&nbsp;&nbsp;&nbsp;osThreadSuspend
 </UL>
@@ -2197,8 +2194,8 @@ Global Symbols
 <P><STRONG><a name="[143]"></a>xTaskPriorityDisinherit</STRONG> (Thumb, 138 bytes, Stack size 16 bytes, tasks.o(.text.xTaskPriorityDisinherit))
 <BR><BR>[Stack]<UL><LI>Max Depth = 16<LI>Call Chain = xTaskPriorityDisinherit
 </UL>
-<BR>[Calls]<UL><LI><a href="#[115]">&gt;&gt;</a>&nbsp;&nbsp;&nbsp;uxListRemove
-<LI><a href="#[11f]">&gt;&gt;</a>&nbsp;&nbsp;&nbsp;ulSetInterruptMask
+<BR>[Calls]<UL><LI><a href="#[11f]">&gt;&gt;</a>&nbsp;&nbsp;&nbsp;ulSetInterruptMask
+<LI><a href="#[115]">&gt;&gt;</a>&nbsp;&nbsp;&nbsp;uxListRemove
 </UL>
 <BR>[Called By]<UL><LI><a href="#[10f]">&gt;&gt;</a>&nbsp;&nbsp;&nbsp;xQueueGenericSend
 </UL>
@@ -2268,6 +2265,7 @@ Global Symbols
 <BR>[Called By]<UL><LI><a href="#[8c]">&gt;&gt;</a>&nbsp;&nbsp;&nbsp;StartQma6100pTask
 <LI><a href="#[8a]">&gt;&gt;</a>&nbsp;&nbsp;&nbsp;StartLsm6dsoxTask
 <LI><a href="#[8b]">&gt;&gt;</a>&nbsp;&nbsp;&nbsp;StartH3lis100dlTask
+<LI><a href="#[87]">&gt;&gt;</a>&nbsp;&nbsp;&nbsp;StartDefaultTask
 <LI><a href="#[e6]">&gt;&gt;</a>&nbsp;&nbsp;&nbsp;LSM6DSOX_Init
 <LI><a href="#[a5]">&gt;&gt;</a>&nbsp;&nbsp;&nbsp;H3LIS100DL_Init
 <LI><a href="#[f8]">&gt;&gt;</a>&nbsp;&nbsp;&nbsp;QMA6100P_DumpRegs
@@ -2292,6 +2290,7 @@ Global Symbols
 <BR>[Called By]<UL><LI><a href="#[8c]">&gt;&gt;</a>&nbsp;&nbsp;&nbsp;StartQma6100pTask
 <LI><a href="#[8a]">&gt;&gt;</a>&nbsp;&nbsp;&nbsp;StartLsm6dsoxTask
 <LI><a href="#[8b]">&gt;&gt;</a>&nbsp;&nbsp;&nbsp;StartH3lis100dlTask
+<LI><a href="#[87]">&gt;&gt;</a>&nbsp;&nbsp;&nbsp;StartDefaultTask
 <LI><a href="#[e6]">&gt;&gt;</a>&nbsp;&nbsp;&nbsp;LSM6DSOX_Init
 <LI><a href="#[a5]">&gt;&gt;</a>&nbsp;&nbsp;&nbsp;H3LIS100DL_Init
 <LI><a href="#[84]">&gt;&gt;</a>&nbsp;&nbsp;&nbsp;main
@@ -2364,24 +2363,24 @@ Local Symbols
 <P><STRONG><a name="[8f]"></a>prvIdleTask</STRONG> (Thumb, 190 bytes, Stack size 0 bytes, tasks.o(.text.prvIdleTask))
 <BR><BR>[Stack]<UL><LI>Max Depth = 80<LI>Call Chain = prvIdleTask &rArr; vPortFree &rArr; xTaskResumeAll &rArr; xTaskIncrementTick
 </UL>
-<BR>[Calls]<UL><LI><a href="#[115]">&gt;&gt;</a>&nbsp;&nbsp;&nbsp;uxListRemove
-<LI><a href="#[11e]">&gt;&gt;</a>&nbsp;&nbsp;&nbsp;xTaskResumeAll
+<BR>[Calls]<UL><LI><a href="#[11e]">&gt;&gt;</a>&nbsp;&nbsp;&nbsp;xTaskResumeAll
 <LI><a href="#[11b]">&gt;&gt;</a>&nbsp;&nbsp;&nbsp;vPortYield
 <LI><a href="#[11c]">&gt;&gt;</a>&nbsp;&nbsp;&nbsp;vPortFree
 <LI><a href="#[11a]">&gt;&gt;</a>&nbsp;&nbsp;&nbsp;vPortExitCritical
 <LI><a href="#[118]">&gt;&gt;</a>&nbsp;&nbsp;&nbsp;vPortEnterCritical
 <LI><a href="#[11f]">&gt;&gt;</a>&nbsp;&nbsp;&nbsp;ulSetInterruptMask
 <LI><a href="#[11d]">&gt;&gt;</a>&nbsp;&nbsp;&nbsp;vPortSuppressTicksAndSleep
+<LI><a href="#[115]">&gt;&gt;</a>&nbsp;&nbsp;&nbsp;uxListRemove
 </UL>
 <BR>[Address Reference Count : 1]<UL><LI> tasks.o(.text.vTaskStartScheduler)
 </UL>
 <P><STRONG><a name="[120]"></a>prvInitialiseNewTask</STRONG> (Thumb, 306 bytes, Stack size 32 bytes, tasks.o(.text.prvInitialiseNewTask))
 <BR><BR>[Stack]<UL><LI>Max Depth = 48<LI>Call Chain = prvInitialiseNewTask &rArr; pxPortInitialiseStack
 </UL>
-<BR>[Calls]<UL><LI><a href="#[122]">&gt;&gt;</a>&nbsp;&nbsp;&nbsp;vListInitialiseItem
-<LI><a href="#[11f]">&gt;&gt;</a>&nbsp;&nbsp;&nbsp;ulSetInterruptMask
+<BR>[Calls]<UL><LI><a href="#[11f]">&gt;&gt;</a>&nbsp;&nbsp;&nbsp;ulSetInterruptMask
 <LI><a href="#[121]">&gt;&gt;</a>&nbsp;&nbsp;&nbsp;__aeabi_memset4
 <LI><a href="#[123]">&gt;&gt;</a>&nbsp;&nbsp;&nbsp;pxPortInitialiseStack
+<LI><a href="#[122]">&gt;&gt;</a>&nbsp;&nbsp;&nbsp;vListInitialiseItem
 </UL>
 <BR>[Called By]<UL><LI><a href="#[111]">&gt;&gt;</a>&nbsp;&nbsp;&nbsp;xTaskCreateStatic
 <LI><a href="#[112]">&gt;&gt;</a>&nbsp;&nbsp;&nbsp;xTaskCreate
@@ -2391,9 +2390,9 @@ Local Symbols
 <P><STRONG><a name="[124]"></a>prvSampleTimeNow</STRONG> (Thumb, 156 bytes, Stack size 32 bytes, timers.o(.text.prvSampleTimeNow))
 <BR><BR>[Stack]<UL><LI>Max Depth = 40<LI>Call Chain = prvSampleTimeNow &rArr; vListInsert
 </UL>
-<BR>[Calls]<UL><LI><a href="#[116]">&gt;&gt;</a>&nbsp;&nbsp;&nbsp;vListInsert
+<BR>[Calls]<UL><LI><a href="#[125]">&gt;&gt;</a>&nbsp;&nbsp;&nbsp;xTaskGetTickCount
+<LI><a href="#[116]">&gt;&gt;</a>&nbsp;&nbsp;&nbsp;vListInsert
 <LI><a href="#[115]">&gt;&gt;</a>&nbsp;&nbsp;&nbsp;uxListRemove
-<LI><a href="#[125]">&gt;&gt;</a>&nbsp;&nbsp;&nbsp;xTaskGetTickCount
 </UL>
 <BR>[Called By]<UL><LI><a href="#[90]">&gt;&gt;</a>&nbsp;&nbsp;&nbsp;prvTimerTask
 </UL>
@@ -2401,9 +2400,7 @@ Local Symbols
 <P><STRONG><a name="[90]"></a>prvTimerTask</STRONG> (Thumb, 510 bytes, Stack size 24 bytes, timers.o(.text.prvTimerTask))
 <BR><BR>[Stack]<UL><LI>Max Depth = 136<LI>Call Chain = prvTimerTask &rArr; xQueueReceive &rArr; xTaskResumeAll &rArr; xTaskIncrementTick
 </UL>
-<BR>[Calls]<UL><LI><a href="#[116]">&gt;&gt;</a>&nbsp;&nbsp;&nbsp;vListInsert
-<LI><a href="#[115]">&gt;&gt;</a>&nbsp;&nbsp;&nbsp;uxListRemove
-<LI><a href="#[11e]">&gt;&gt;</a>&nbsp;&nbsp;&nbsp;xTaskResumeAll
+<BR>[Calls]<UL><LI><a href="#[11e]">&gt;&gt;</a>&nbsp;&nbsp;&nbsp;xTaskResumeAll
 <LI><a href="#[126]">&gt;&gt;</a>&nbsp;&nbsp;&nbsp;vTaskSuspendAll
 <LI><a href="#[11b]">&gt;&gt;</a>&nbsp;&nbsp;&nbsp;vPortYield
 <LI><a href="#[11c]">&gt;&gt;</a>&nbsp;&nbsp;&nbsp;vPortFree
@@ -2411,6 +2408,8 @@ Local Symbols
 <LI><a href="#[124]">&gt;&gt;</a>&nbsp;&nbsp;&nbsp;prvSampleTimeNow
 <LI><a href="#[128]">&gt;&gt;</a>&nbsp;&nbsp;&nbsp;xQueueReceive
 <LI><a href="#[127]">&gt;&gt;</a>&nbsp;&nbsp;&nbsp;vQueueWaitForMessageRestricted
+<LI><a href="#[116]">&gt;&gt;</a>&nbsp;&nbsp;&nbsp;vListInsert
+<LI><a href="#[115]">&gt;&gt;</a>&nbsp;&nbsp;&nbsp;uxListRemove
 </UL>
 <BR>[Address Reference Count : 1]<UL><LI> timers.o(.text.xTimerCreateTimerTask)
 </UL>
