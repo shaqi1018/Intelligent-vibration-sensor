@@ -1,4 +1,4 @@
-﻿/* USER CODE BEGIN Header */
+/* USER CODE BEGIN Header */
 /**
   ******************************************************************************
   * File Name          : app_freertos.c
@@ -38,7 +38,7 @@
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
 
-/** Key polling period (ms) - all sensor threads share this */
+/** Key polling period (ms) */
 #define KEY_POLL_PERIOD_MS    10U
 
 /** Sensor sampling interval (ms) */
@@ -46,6 +46,12 @@
 
 /** Number of polling ticks per sample interval */
 #define SAMPLE_INTERVAL_TICKS (SAMPLE_PERIOD_MS / KEY_POLL_PERIOD_MS)
+
+/** Sensor ready bits for g_sensor_ready_mask */
+#define SENSOR_MASK_LSM6DSOX   (1U << 0)
+#define SENSOR_MASK_H3LIS100DL (1U << 1)
+#define SENSOR_MASK_QMA6100P   (1U << 2)
+#define SENSOR_MASK_ALL        (0x07U)
 
 /* USER CODE END PD */
 
@@ -59,20 +65,33 @@
 
 /* ======================== Bus architecture ================================
  *
- *   SPI1 (PA5/PA6/PA7 + PA4 CS)        -> LSM6DSOX (dedicated bus, no mutex)
- *   SPI2 (PB13/PB14/PB15 + PB12/PB0 CS) -> H3LIS100DL + QMA6100P (shared bus)
+ *   SPI1 (PA5/PA6/PA7 + PA4 CS)          -> LSM6DSOX   (dedicated bus)
+ *   SPI2 (PB13/PB14/PB15 + PB12/PB0 CS)  -> H3LIS100DL + QMA6100P (shared)
  *
- *   SPI2 is shared: a mutex is required before every CS assert/deassert
- *   sequence so that H3LIS100DL and QMA6100P threads cannot interleave on
- *   the same physical bus.
+ *   SPI2 is shared: a mutex is required before every CS sequence.
  */
 
-/** Mutex protecting the SPI2 shared bus (H3LIS100DL + QMA6100P) */
+/** Mutex protecting the SPI2 shared bus */
 static osMutexId_t spi2_mutex;
 static const osMutexAttr_t spi2_mutex_attr = {
   .name      = "spi2Mutex",
-  .attr_bits = osMutexPrioInherit,   /* priority inheritance: avoid inversion */
+  .attr_bits = osMutexPrioInherit,
 };
+
+/**
+ * @brief  Sensor init ready flags.
+ *         Bit 0 = LSM6DSOX, Bit 1 = H3LIS100DL, Bit 2 = QMA6100P.
+ *         Set by each sensor task after successful init.
+ *         Read by defaultTask to determine when to enable key control.
+ */
+static volatile uint8_t g_sensor_ready_mask = 0U;
+
+/**
+ * @brief  Global sampling enable flag.
+ *         Toggled by defaultTask when PA12 is pressed (only after all 3 sensors ready).
+ *         Read by all sensor tasks.
+ */
+static volatile uint8_t g_sampling_enable = 0U;
 
 /* USER CODE END Variables */
 
@@ -102,8 +121,7 @@ const osThreadAttr_t greenBlinkTask_attributes = {
 /* ======================== Sensor threads ================================== */
 
 /**
- * @brief  LSM6DSOX thread (currently the only active sensor)
- * @note   Uses SPI1 (PA5/PA6/PA7 + PA4 CS) dedicated bus
+ * @brief  LSM6DSOX thread  (SPI1 dedicated bus, no mutex needed)
  *         Stack: 2048 bytes (for float printf)
  */
 osThreadId_t lsm6dsoxTaskHandle;
@@ -114,9 +132,8 @@ const osThreadAttr_t lsm6dsoxTask_attributes = {
 };
 
 /**
- * @brief  QMA6100P thread (SPI2, PB13/PB14/PB15 + PB0 CS)
- * @note   Shares SPI2 with H3LIS100DL; access protected by spi2_mutex.
- *         Stack 256*4=1024 bytes: covers float printf and sensor init frames.
+ * @brief  QMA6100P thread  (SPI2 shared bus, mutex protected)
+ *         Stack: 1024 bytes
  */
 osThreadId_t qma6100pTaskHandle;
 const osThreadAttr_t qma6100pTask_attributes = {
@@ -126,9 +143,8 @@ const osThreadAttr_t qma6100pTask_attributes = {
 };
 
 /**
- * @brief  H3LIS100DL thread (SPI2, PB13/PB14/PB15 + PB12 CS)
- * @note   Shares SPI2 with QMA6100P; access protected by spi2_mutex.
- *         Stack 256*4=1024 bytes: covers float printf and sensor init frames.
+ * @brief  H3LIS100DL thread  (SPI2 shared bus, mutex protected)
+ *         Stack: 1024 bytes
  */
 osThreadId_t h3lis100dlTaskHandle;
 const osThreadAttr_t h3lis100dlTask_attributes = {
@@ -145,9 +161,9 @@ const osThreadAttr_t h3lis100dlTask_attributes = {
 void StartDefaultTask(void *argument);
 void StartBlueBlinkTask(void *argument);
 void StartGreenBlinkTask(void *argument);
-void StartLsm6dsoxTask(void *argument);    /* LSM6DSOX  (suspended)  */
-void StartQma6100pTask(void *argument);    /* QMA6100P  (active)     */
-void StartH3lis100dlTask(void *argument);  /* H3LIS100DL (suspended) */
+void StartLsm6dsoxTask(void *argument);
+void StartQma6100pTask(void *argument);
+void StartH3lis100dlTask(void *argument);
 
 void MX_FREERTOS_Init(void); /* (MISRA C 2004 rule 8.1) */
 
@@ -192,23 +208,19 @@ void MX_FREERTOS_Init(void) {
   /* USER CODE END Init */
 
   /* USER CODE BEGIN RTOS_MUTEX */
-  /* SPI1 is dedicated to LSM6DSOX - no mutex needed.
-     SPI2 is shared by H3LIS100DL and QMA6100P - must create mutex first,
-     before the sensor threads start, so it is valid when they acquire it. */
+  /* SPI2 is shared by H3LIS100DL and QMA6100P - create mutex before sensor threads */
   spi2_mutex = osMutexNew(&spi2_mutex_attr);
   /* USER CODE END RTOS_MUTEX */
 
   /* USER CODE BEGIN RTOS_SEMAPHORES */
-  /* add semaphores, ... */
   /* USER CODE END RTOS_SEMAPHORES */
 
   /* USER CODE BEGIN RTOS_TIMERS */
-  /* start timers, add new ones, ... */
   /* USER CODE END RTOS_TIMERS */
 
   /* USER CODE BEGIN RTOS_QUEUES */
-  /* add queues, ... */
   /* USER CODE END RTOS_QUEUES */
+
   /* creation of defaultTask */
   defaultTaskHandle = osThreadNew(StartDefaultTask, NULL, &defaultTask_attributes);
 
@@ -220,37 +232,62 @@ void MX_FREERTOS_Init(void) {
 
   /* USER CODE BEGIN RTOS_THREADS */
 
-  /*
-   * ========== Sensor thread creation ==========
-   *
-   * Current phase: QMA6100P driver validation only.
-   *   - LSM6DSOX  : created then SUSPENDED (SPI1)
-   *   - QMA6100P  : ACTIVE                 (SPI2, mutex protected)
-   *   - H3LIS100DL: created then SUSPENDED (SPI2)
-   *
-   * To activate a suspended thread call osThreadResume(handle).
-   */
-
-  /* LSM6DSOX thread - suspended during QMA6100P validation */
-  lsm6dsoxTaskHandle = osThreadNew(StartLsm6dsoxTask, NULL, &lsm6dsoxTask_attributes);
-  osThreadSuspend(lsm6dsoxTaskHandle);
-
-  /* H3LIS100DL thread - ACTIVE */
+  /* Three sensor threads, all active concurrently.
+   * Each thread initializes its own sensor, then sets its ready bit in
+   * g_sensor_ready_mask.  The defaultTask starts key-controlled sampling
+   * only after all three bits are set (SENSOR_MASK_ALL). */
+  lsm6dsoxTaskHandle  = osThreadNew(StartLsm6dsoxTask,  NULL, &lsm6dsoxTask_attributes);
   h3lis100dlTaskHandle = osThreadNew(StartH3lis100dlTask, NULL, &h3lis100dlTask_attributes);
-
-  /* QMA6100P thread - ACTIVE (shared SPI2 bus, mutex protected) */
-  qma6100pTaskHandle = osThreadNew(StartQma6100pTask, NULL, &qma6100pTask_attributes);
+  qma6100pTaskHandle  = osThreadNew(StartQma6100pTask,  NULL, &qma6100pTask_attributes);
 
   /* USER CODE END RTOS_THREADS */
 
   /* USER CODE BEGIN RTOS_EVENTS */
-  /* add events, ... */
   /* USER CODE END RTOS_EVENTS */
-
 }
+
+/* Private application code --------------------------------------------------*/
+/* USER CODE BEGIN Application */
+
+/* ============================================================================
+ *  Key press detection helper
+ * ============================================================================
+ *  PA12: idle=pull-up HIGH, pressed=GND LOW
+ *  Detects falling edge + 10ms debounce + waits for release.
+ *
+ * @param  p_key_last  pointer to previous key state variable (caller owns)
+ * @retval 1 = confirmed press-and-release cycle, 0 = no event
+ */
+static uint8_t Key_DetectPress(GPIO_PinState *p_key_last)
+{
+  GPIO_PinState key_now = HAL_GPIO_ReadPin(KEY1_GPIO_Port, KEY1_Pin);
+
+  if (*p_key_last == GPIO_PIN_SET && key_now == GPIO_PIN_RESET)
+  {
+    /* Falling edge detected - debounce */
+    osDelay(10);
+    if (HAL_GPIO_ReadPin(KEY1_GPIO_Port, KEY1_Pin) == GPIO_PIN_RESET)
+    {
+      /* Wait for release */
+      while (HAL_GPIO_ReadPin(KEY1_GPIO_Port, KEY1_Pin) == GPIO_PIN_RESET)
+      {
+        osDelay(10);
+      }
+      *p_key_last = GPIO_PIN_SET;
+      return 1U;
+    }
+  }
+
+  *p_key_last = key_now;
+  return 0U;
+}
+
 /* USER CODE BEGIN Header_StartDefaultTask */
 /**
 * @brief Function implementing the defaultTask thread.
+*        Handles PA12 key detection and broadcasts g_sampling_enable to all
+*        sensor threads.  Sampling is only allowed after all three sensors
+*        have successfully initialized (g_sensor_ready_mask == SENSOR_MASK_ALL).
 * @param argument: Not used
 * @retval None
 */
@@ -258,24 +295,34 @@ void MX_FREERTOS_Init(void) {
 void StartDefaultTask(void *argument)
 {
   /* USER CODE BEGIN defaultTask */
-  uint32_t monitor_tick = 0;
+  GPIO_PinState key_last        = GPIO_PIN_SET;
+  uint8_t       all_ready_notified = 0U;
 
-  /* 一次性打印系统时钟，用于确认 SPI2 实际速率 */
-  printf("\r\n========================================\r\n");
-  printf("[SYS] SYSCLK     = %lu Hz\r\n", SystemCoreClock);
-  printf("[SYS] SPI2 CLK   = %lu Hz  (SYSCLK / 16, H3LIS100DL max=10MHz)\r\n",
-         SystemCoreClock / 16UL);
-  printf("[SYS] 双传感器并发测试启动 (H3LIS100DL + QMA6100P @ SPI2)\r\n");
-  printf("========================================\r\n\r\n");
+  (void)argument;
+
+  printf("[SYS] 系统启动, 等待三个传感器初始化...\r\n\r\n");
 
   for(;;)
   {
-    osDelay(5000);   /* 每 5 秒打印一次 SPI2 健康状态 */
-    monitor_tick++;
-    printf("[SPI2-MON] t=%lus  ErrorCode=0x%08lX  State=0x%02X\r\n",
-           (unsigned long)(monitor_tick * 5UL),
-           (unsigned long)hspi2.ErrorCode,
-           (unsigned int)hspi2.State);
+    /* Notify once when all sensors are ready */
+    if (!all_ready_notified && (g_sensor_ready_mask == SENSOR_MASK_ALL))
+    {
+      all_ready_notified = 1U;
+      printf("[SYS] 所有传感器初始化完成! 按下PA12开始采集\r\n\r\n");
+    }
+
+    /* Key detection - only effective after all sensors ready */
+    if (all_ready_notified)
+    {
+      if (Key_DetectPress(&key_last))
+      {
+        g_sampling_enable = !g_sampling_enable;
+        printf("[按键] PA12 按下, 采集: %s\r\n\r\n",
+               g_sampling_enable ? ">> 开始" : ">> 停止");
+      }
+    }
+
+    osDelay(KEY_POLL_PERIOD_MS);
   }
   /* USER CODE END defaultTask */
 }
@@ -314,99 +361,48 @@ __weak void StartGreenBlinkTask(void *argument)
   /* USER CODE END greenBlinkTask */
 }
 
-/* Private application code --------------------------------------------------*/
-/* USER CODE BEGIN Application */
-
 /* ============================================================================
- *  Key press detection helper
+ *  LSM6DSOX sampling thread
  * ============================================================================
- *  PA12 key: idle=pull-up HIGH, pressed=GND LOW
- *  Detect falling edge + 10ms debounce + wait release, return 1 if confirmed
- *
- * @param  p_key_last: pointer to previous key state variable
- * @retval 1=confirmed press (and release waited), 0=no event
- */
-static uint8_t Key_DetectPress(GPIO_PinState *p_key_last)
-{
-  GPIO_PinState key_now = HAL_GPIO_ReadPin(KEY1_GPIO_Port, KEY1_Pin);
-
-  if (*p_key_last == GPIO_PIN_SET && key_now == GPIO_PIN_RESET)
-  {
-    /* Falling edge detected, debounce */
-    osDelay(10);
-    if (HAL_GPIO_ReadPin(KEY1_GPIO_Port, KEY1_Pin) == GPIO_PIN_RESET)
-    {
-      /* Wait for key release */
-      while (HAL_GPIO_ReadPin(KEY1_GPIO_Port, KEY1_Pin) == GPIO_PIN_RESET)
-      {
-        osDelay(10);
-      }
-      *p_key_last = GPIO_PIN_SET;
-      return 1U;
-    }
-  }
-
-  *p_key_last = key_now;
-  return 0U;
-}
-
-/* ============================================================================
- *  LSM6DSOX sampling thread (currently the only active sensor)
- * ============================================================================
- *  Uses SPI1 (PA5/PA6/PA7 + PA4 CS) dedicated bus, no mutex needed.
- *  Features:
- *    1. Sensor init + configure (accel +/-4g/104Hz, gyro +/-2000dps/104Hz)
- *    2. PA12 key control: press=start sampling, press again=stop
- *    3. STATUS_REG XLDA flag check
- *    4. Burst read accel + gyro + temp (14 bytes)
- *    5. Loop period 10ms, key response is fast; sample interval 500ms
+ *  SPI1 dedicated bus (PA5/PA6/PA7 + PA4 CS) - no mutex needed.
+ *  Waits for g_sampling_enable (set by defaultTask via PA12 key).
+ *  Sample interval: 500 ms.
  */
 void StartLsm6dsoxTask(void *argument)
 {
-  LSM6DSOX_AllData_t  all_data;                /* 完整数据 (加速度+陀螺仪+温度) */
-  uint8_t  sampling_enable = 0;                /* 采样标志: 0=停止 1=运行 */
-  uint32_t sample_tick_count = 0;              /* 采样间隔计数器 */
-  GPIO_PinState key_last = GPIO_PIN_SET;       /* 上次按键状态 */
+  LSM6DSOX_AllData_t all_data;
+  uint32_t           sample_tick_count = 0U;
 
   (void)argument;
 
-  /* ---- 传感器初始化 (SPI1专用总线, 无需互斥) ---- */
-  printf("[LSM6DSOX] 正在初始化传感器...\r\n");
-
+  /* Sensor init */
   if (LSM6DSOX_Init() != HAL_OK)
   {
-    printf("[LSM6DSOX] 初始化失败, 请检查接线!\r\n");
+    /* Driver already printed the error */
+    osThreadTerminate(NULL);
+    return;
   }
 
-  printf("[LSM6DSOX] 任务已启动. 按键PA12: 按下=开始采集, 再按=停止采集\r\n\r\n");
+  /* Signal init complete */
+  taskENTER_CRITICAL();
+  g_sensor_ready_mask |= SENSOR_MASK_LSM6DSOX;
+  taskEXIT_CRITICAL();
 
   /* ====================== Main loop (10ms period) ====================== */
   for (;;)
   {
-    /* ---- Key detection ---- */
-    if (Key_DetectPress(&key_last))
-    {
-      sampling_enable = !sampling_enable;
-      sample_tick_count = 0;
-      printf("[按键] PA12 按下, LSM6DSOX采集: %s\r\n\r\n",
-             sampling_enable ? ">> 开始" : ">> 停止");
-    }
-
-    /* ---- Data sampling (500ms interval) ---- */
-    if (sampling_enable)
+    if (g_sampling_enable)
     {
       sample_tick_count++;
 
       if (sample_tick_count >= SAMPLE_INTERVAL_TICKS)
       {
-        sample_tick_count = 0;
-        uint8_t status_reg = 0;
+        sample_tick_count = 0U;
+        uint8_t status_reg = 0U;
 
-        /* 检查数据就绪标志 */
         if (LSM6DSOX_ReadStatus(&status_reg) == HAL_OK &&
             (status_reg & LSM6DSOX_STATUS_XLDA))
         {
-          /* 批量读取全部数据 (加速度 + 陀螺仪 + 温度) */
           if (LSM6DSOX_ReadAllData(&all_data) == HAL_OK)
           {
             printf("LSM6DSOX: 加速度(mg) X:%7.1f Y:%7.1f Z:%7.1f | "
@@ -420,7 +416,7 @@ void StartLsm6dsoxTask(void *argument)
     }
     else
     {
-      sample_tick_count = 0;
+      sample_tick_count = 0U;
     }
 
     osDelay(KEY_POLL_PERIOD_MS);
@@ -430,57 +426,44 @@ void StartLsm6dsoxTask(void *argument)
 /* ============================================================================
  *  H3LIS100DL sampling thread
  * ============================================================================
- *  Uses SPI2 (PB13/PB14/PB15 + PB12 CS), shared with QMA6100P.
- *  Every SPI2 access sequence is bracketed by spi2_mutex acquire/release.
- *  Features:
- *    1. Sensor init (100g, 100Hz, XYZ all-axis)
- *    2. PA12 key control: press=start sampling, press again=stop
- *    3. Burst read X/Y/Z acceleration (3 bytes)
- *    4. Loop period 10ms (key responsive); sample interval 500ms
+ *  SPI2 shared bus (PB13/PB14/PB15 + PB12 CS), protected by spi2_mutex.
+ *  Waits for g_sampling_enable (set by defaultTask via PA12 key).
+ *  Sample interval: 500 ms.
  */
 void StartH3lis100dlTask(void *argument)
 {
   H3LIS100DL_Data_t data;
-  uint8_t           sampling_enable  = 0;
-  uint32_t          sample_tick_count = 0;
-  GPIO_PinState     key_last         = GPIO_PIN_SET;
+  uint32_t          sample_tick_count = 0U;
 
   (void)argument;
 
-  /* ---- Sensor init (hold mutex for the whole init sequence) ---- */
-  printf("[H3LIS100DL] 正在初始化传感器 (SPI2)...\r\n");
-
+  /* Sensor init - hold mutex for the whole init sequence */
   osMutexAcquire(spi2_mutex, osWaitForever);
   int init_ret = H3LIS100DL_Init();
   osMutexRelease(spi2_mutex);
 
   if (init_ret != 0)
   {
-    printf("[H3LIS100DL] 初始化失败, 请检查接线!\r\n");
+    /* Driver already printed the error */
+    osThreadTerminate(NULL);
+    return;
   }
 
-  printf("[H3LIS100DL] 任务已启动. 按键PA12: 按下=开始采集, 再按=停止采集\r\n\r\n");
+  /* Signal init complete */
+  taskENTER_CRITICAL();
+  g_sensor_ready_mask |= SENSOR_MASK_H3LIS100DL;
+  taskEXIT_CRITICAL();
 
   /* ====================== Main loop (10ms period) ====================== */
   for (;;)
   {
-    /* ---- Key detection ---- */
-    if (Key_DetectPress(&key_last))
-    {
-      sampling_enable = !sampling_enable;
-      sample_tick_count = 0;
-      printf("[按键] PA12 按下, H3LIS100DL采集: %s\r\n\r\n",
-             sampling_enable ? ">> 开始" : ">> 停止");
-    }
-
-    /* ---- Data sampling (500ms interval) ---- */
-    if (sampling_enable)
+    if (g_sampling_enable)
     {
       sample_tick_count++;
 
       if (sample_tick_count >= SAMPLE_INTERVAL_TICKS)
       {
-        sample_tick_count = 0;
+        sample_tick_count = 0U;
 
         osMutexAcquire(spi2_mutex, osWaitForever);
         int ret = H3LIS100DL_ReadAccXYZ(&data);
@@ -492,15 +475,11 @@ void StartH3lis100dlTask(void *argument)
                  data.raw[0], data.raw[1], data.raw[2],
                  data.acc_mg[0], data.acc_mg[1], data.acc_mg[2]);
         }
-        else if (ret == -2)
-        {
-          printf("[H3LIS100DL] 数据未就绪 (STATUS ZYXDA=0)\r\n");
-        }
       }
     }
     else
     {
-      sample_tick_count = 0;
+      sample_tick_count = 0U;
     }
 
     osDelay(KEY_POLL_PERIOD_MS);
@@ -510,57 +489,44 @@ void StartH3lis100dlTask(void *argument)
 /* ============================================================================
  *  QMA6100P sampling thread
  * ============================================================================
- *  Uses SPI2 (PB13/PB14/PB15 + PB0 CS), shared with H3LIS100DL.
- *  Every SPI2 access sequence is bracketed by spi2_mutex acquire/release.
- *  Features:
- *    1. Sensor init (4g, 100Hz, active mode)
- *    2. PA12 key control: press=start sampling, press again=stop
- *    3. Burst read X/Y/Z acceleration (6 bytes, 14-bit)
- *    4. Loop period 10ms (key responsive); sample interval 500ms
+ *  SPI2 shared bus (PB13/PB14/PB15 + PB0 CS), protected by spi2_mutex.
+ *  Waits for g_sampling_enable (set by defaultTask via PA12 key).
+ *  Sample interval: 500 ms.
  */
 void StartQma6100pTask(void *argument)
 {
   QMA6100P_Data_t data;
-  uint8_t         sampling_enable   = 0;
-  uint32_t        sample_tick_count = 0;
-  GPIO_PinState   key_last          = GPIO_PIN_SET;
+  uint32_t        sample_tick_count = 0U;
 
   (void)argument;
 
-  /* ---- Sensor init (hold mutex for the whole init sequence) ---- */
-  printf("[QMA6100P] 正在初始化传感器 (SPI2)...\r\n");
-
+  /* Sensor init - hold mutex for the whole init sequence */
   osMutexAcquire(spi2_mutex, osWaitForever);
   HAL_StatusTypeDef init_ret = QMA6100P_Init();
   osMutexRelease(spi2_mutex);
 
   if (init_ret != HAL_OK)
   {
-    printf("[QMA6100P] 初始化失败, 请检查接线!\r\n");
+    /* Driver already printed the error */
+    osThreadTerminate(NULL);
+    return;
   }
 
-  printf("[QMA6100P] 任务已启动. 按键PA12: 按下=开始采集, 再按=停止采集\r\n\r\n");
+  /* Signal init complete */
+  taskENTER_CRITICAL();
+  g_sensor_ready_mask |= SENSOR_MASK_QMA6100P;
+  taskEXIT_CRITICAL();
 
   /* ====================== Main loop (10ms period) ====================== */
   for (;;)
   {
-    /* ---- Key detection ---- */
-    if (Key_DetectPress(&key_last))
-    {
-      sampling_enable = !sampling_enable;
-      sample_tick_count = 0;
-      printf("[按键] PA12 按下, QMA6100P采集: %s\r\n\r\n",
-             sampling_enable ? ">> 开始" : ">> 停止");
-    }
-
-    /* ---- Data sampling (500ms interval) ---- */
-    if (sampling_enable)
+    if (g_sampling_enable)
     {
       sample_tick_count++;
 
       if (sample_tick_count >= SAMPLE_INTERVAL_TICKS)
       {
-        sample_tick_count = 0;
+        sample_tick_count = 0U;
 
         osMutexAcquire(spi2_mutex, osWaitForever);
         HAL_StatusTypeDef ret = QMA6100P_ReadAccXYZ(&data);
@@ -575,7 +541,7 @@ void StartQma6100pTask(void *argument)
     }
     else
     {
-      sample_tick_count = 0;
+      sample_tick_count = 0U;
     }
 
     osDelay(KEY_POLL_PERIOD_MS);

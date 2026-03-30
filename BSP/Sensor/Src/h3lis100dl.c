@@ -120,38 +120,14 @@ int H3LIS100DL_Init(void)
 
   memset(&g_h3lis, 0, sizeof(g_h3lis));
 
-  printf("[H3LIS100DL] === HW DIAG ===\r\n");
   H3_SPI2_CS_HIGH();
-  HAL_Delay(1U);
-  printf("[H3LIS100DL] CS(PB12) readback: %u (expect 1)\r\n",
-         (unsigned int)HAL_GPIO_ReadPin(H3_SPI2_CS_GPIO_PORT, H3_SPI2_CS_PIN));
-  printf("[H3LIS100DL] MISO(PB14) idle level: %u (pull-up expect 1)\r\n",
-         (unsigned int)HAL_GPIO_ReadPin(GPIOB, SENSOR_SPI2_MISO_PIN));
-  printf("[H3LIS100DL] GPIOB->MODER  = 0x%08lX\r\n", (unsigned long)GPIOB->MODER);
-  printf("[H3LIS100DL] GPIOB->AFR[1] = 0x%08lX (PB8-PB15 AF)\r\n", (unsigned long)GPIOB->AFR[1]);
-  printf("[H3LIS100DL] GPIOB->PUPDR  = 0x%08lX\r\n", (unsigned long)GPIOB->PUPDR);
-  printf("[H3LIS100DL] GPIOB->IDR    = 0x%08lX\r\n", (unsigned long)GPIOB->IDR);
-  printf("[H3LIS100DL] SPI2 State=0x%02X Error=0x%08lX\r\n",
-         (unsigned int)hspi2.State,
-         (unsigned long)hspi2.ErrorCode);
-  printf("[H3LIS100DL] SPI2 CR1=0x%08lX CFG1=0x%08lX CFG2=0x%08lX\r\n",
-         (unsigned long)hspi2.Instance->CR1,
-         (unsigned long)hspi2.Instance->CFG1,
-         (unsigned long)hspi2.Instance->CFG2);
-  printf("[H3LIS100DL] === HW DIAG END ===\r\n\r\n");
-
   HAL_Delay(10U);
 
+  /* Read WHO_AM_I with up to 3 retries */
   for (retry = 0U; retry < 3U; retry++)
   {
     who = 0U;
     ret = H3LIS100DL_ReadReg(H3LIS100DL_REG_WHO_AM_I, &who);
-    printf("[H3LIS100DL] WHO_AM_I read #%u: ret=%d val=0x%02X (expect=0x%02X)\r\n",
-           (unsigned int)(retry + 1U),
-           (int)ret,
-           who,
-           H3LIS100DL_WHO_AM_I_VALUE);
-
     if ((ret == HAL_OK) && (who == H3LIS100DL_WHO_AM_I_VALUE))
     {
       break;
@@ -161,55 +137,48 @@ int H3LIS100DL_Init(void)
 
   if (who != H3LIS100DL_WHO_AM_I_VALUE)
   {
-    printf("[H3LIS100DL] WHO_AM_I mismatch!\r\n");
-    printf("  0xFF/0x00 -> MISO/MOSI swapped or sensor not powered\r\n");
-    printf("  other     -> SPI timing or CS issue\r\n");
+    printf("[H3LIS100DL] 初始化失败 (WHO_AM_I=0x%02X)\r\n", who);
     return -1;
   }
 
   g_h3lis.who_am_i = who;
-  printf("[H3LIS100DL] WHO_AM_I OK (0x%02X)\r\n", who);
 
+  /* Boot sequence */
   ret = H3LIS100DL_WriteReg(H3LIS100DL_REG_CTRL_REG2, 0x80U);
   if (ret != HAL_OK)
   {
-    printf("[H3LIS100DL] BOOT command failed.\r\n");
+    printf("[H3LIS100DL] 初始化失败 (BOOT)\r\n");
     return -1;
   }
   HAL_Delay(10U);
-  printf("[H3LIS100DL] BOOT done.\r\n");
 
+  /* Configure: normal mode 100Hz, XYZ enabled */
   ret = H3LIS100DL_WriteReg(H3LIS100DL_REG_CTRL_REG1, 0x2FU);
   if (ret != HAL_OK)
   {
-    printf("[H3LIS100DL] CTRL_REG1 write failed.\r\n");
+    printf("[H3LIS100DL] 初始化失败 (CTRL_REG1)\r\n");
     return -1;
   }
 
   ret = H3LIS100DL_WriteReg(H3LIS100DL_REG_CTRL_REG4, 0x00U);
   if (ret != HAL_OK)
   {
-    printf("[H3LIS100DL] CTRL_REG4 write failed.\r\n");
+    printf("[H3LIS100DL] 初始化失败 (CTRL_REG4)\r\n");
     return -1;
   }
 
+  /* Verify configuration */
   {
     uint8_t v1 = 0U;
-    uint8_t v4 = 0U;
     H3LIS100DL_ReadReg(H3LIS100DL_REG_CTRL_REG1, &v1);
-    H3LIS100DL_ReadReg(H3LIS100DL_REG_CTRL_REG4, &v4);
-    printf("[H3LIS100DL] CTRL_REG1=0x%02X (expect 0x2F) CTRL_REG4=0x%02X (expect 0x00)\r\n",
-           v1,
-           v4);
     if (v1 != 0x2FU)
     {
-      printf("[H3LIS100DL] CTRL_REG1 verify failed.\r\n");
+      printf("[H3LIS100DL] 初始化失败 (CTRL_REG1 verify)\r\n");
       return -1;
     }
   }
 
-  printf("[H3LIS100DL] Init success: +/-100g, 100Hz, XYZ enabled\r\n");
-  printf("[H3LIS100DL] Sensitivity: 780 mg/LSB (8-bit signed)\r\n\r\n");
+  printf("[H3LIS100DL] 初始化成功 (+/-100g 100Hz)\r\n");
   return 0;
 }
 
@@ -242,11 +211,9 @@ int H3LIS100DL_Configure(const H3LIS100DL_Config_t *config)
 
   if (H3LIS100DL_WriteReg(H3LIS100DL_REG_CTRL_REG1, reg_val) != HAL_OK)
   {
-    printf("[H3LIS100DL] Configure CTRL_REG1 failed.\r\n");
     return -1;
   }
 
-  printf("[H3LIS100DL] Configure done: CTRL_REG1=0x%02X\r\n", reg_val);
   return 0;
 }
 

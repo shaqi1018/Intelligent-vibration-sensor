@@ -235,9 +235,7 @@ HAL_StatusTypeDef QMA6100P_Init(void)
   ret = QMA6100P_Initialize();
   if (ret != HAL_OK)
   {
-//    printf("[QMA6100P] Init sequence failed.\r\n");
-    QMA6100P_DumpKeyRegs();
-    QMA6100P_DumpRegs();
+    printf("[QMA6100P] 初始化失败\r\n");
     return HAL_ERROR;
   }
 
@@ -251,8 +249,7 @@ HAL_StatusTypeDef QMA6100P_Init(void)
       g_qma.chip_id = (uint8_t)(chip_id_raw >> 4);
       if (g_qma.chip_id == QMA6100P_DEVICE_ID)
       {
-//        printf("[QMA6100P] CHIP_ID OK: raw=0x%02X, high=0x%X\r\n",
-//               chip_id_raw, g_qma.chip_id);
+        printf("[QMA6100P] 初始化成功 (+/-4g 100Hz)\r\n");
         return HAL_OK;
       }
     }
@@ -270,11 +267,11 @@ HAL_StatusTypeDef QMA6100P_Init(void)
       (power_manage == 0x84U))
   {
     g_qma.chip_id = QMA6100P_DEVICE_ID;
+    printf("[QMA6100P] 初始化成功 (+/-4g 100Hz)\r\n");
     return HAL_OK;
   }
 
-  QMA6100P_DumpKeyRegs();
-  QMA6100P_DumpRegs();
+  printf("[QMA6100P] 初始化失败 (CHIP_ID=0x%02X)\r\n", chip_id_raw);
   return HAL_ERROR;
 }
 
@@ -317,7 +314,6 @@ HAL_StatusTypeDef QMA6100P_ReadRawXYZ(QMA6100P_Data_t *data)
   {
     if (++retry > 1U)
     {
-      printf("[QMA6100P] Read raw XYZ failed.\r\n");
       return HAL_ERROR;
     }
     HAL_Delay(2U);
