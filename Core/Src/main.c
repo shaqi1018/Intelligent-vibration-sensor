@@ -99,23 +99,46 @@ int main(void)
   MX_ICACHE_Init();
   MX_USART1_UART_Init();
 
-  /* SPI1(PA5/PA6/PA7 + PA4(CS)) -> LSM6DSOX */
+  /* SPI1(PA5/PA6/PA7 + PC4(CS)) -> LSM6DSOX */
+#if (APP_SENSOR_TEST_TARGET == APP_SENSOR_TEST_NONE) || \
+    (APP_SENSOR_TEST_TARGET == APP_SENSOR_TEST_LSM6DSOX)
   MX_SPI1_Init();
   printf("[初始化] SPI1 初始化完成\r\n");
+#endif
 
-  /* SPI2(PB13/PB14/PB15 + PB12/PB0(CS)) -> H3LIS100DL + QMA6100P */
+  /* SPI2(PB10/PC2/PC1 + PC5/PA4(CS)) -> H3LIS100DL + QMA6100P */
+#if (APP_SENSOR_TEST_TARGET == APP_SENSOR_TEST_NONE) || \
+    (APP_SENSOR_TEST_TARGET == APP_SENSOR_TEST_H3LIS100DL) || \
+    (APP_SENSOR_TEST_TARGET == APP_SENSOR_TEST_QMA6100P)
   MX_SPI2_Init();
   printf("[初始化] SPI2 初始化完成\r\n");
+#endif
 
   /* USER CODE BEGIN 2 */
 
   printf("\r\n========================================\r\n");
-  printf("  STM32U575 FreeRTOS 三传感器平台\r\n");
-  printf("  SPI1: PA5/PA6/PA7 + PA4(CS) (LSM6DSOX)\r\n");
-  printf("  SPI2: PB13/PB14/PB15 + PB12(CS) (H3LIS100DL)\r\n");
-  printf("  SPI2: PB13/PB14/PB15 + PB0(CS) (QMA6100P)\r\n");
+#if APP_SENSOR_TEST_TARGET == APP_SENSOR_TEST_LSM6DSOX
+  printf("  STM32U575 LSM6DSOX 单测模式\r\n");
+  printf("  SPI1: PA5/PA6/PA7 + PC4(CS) (LSM6DSOX)\r\n");
   printf("  串口: PA9/PA10 115200bps\r\n");
-  printf("  按键: PA12\r\n");
+  printf("  说明: 已跳过 SPI2 与其它线程\r\n");
+#elif APP_SENSOR_TEST_TARGET == APP_SENSOR_TEST_H3LIS100DL
+  printf("  STM32U575 H3LIS100DL 单测模式\r\n");
+  printf("  SPI2: PB10/PC2/PC1 + PC5(CS) (H3LIS100DL)\r\n");
+  printf("  串口: PA9/PA10 115200bps\r\n");
+  printf("  说明: 已跳过 LSM6DSOX、QMA6100P 与其它线程\r\n");
+#elif APP_SENSOR_TEST_TARGET == APP_SENSOR_TEST_QMA6100P
+  printf("  STM32U575 QMA6100P 单测模式\r\n");
+  printf("  SPI2: PB10/PC2/PC1 + PA4(CS) (QMA6100P)\r\n");
+  printf("  串口: PA9/PA10 115200bps\r\n");
+  printf("  说明: 已跳过 LSM6DSOX、H3LIS100DL 与其它线程\r\n");
+#else
+  printf("  STM32U575 FreeRTOS 三传感器平台\r\n");
+  printf("  SPI1: PA5/PA6/PA7 + PC4(CS) (LSM6DSOX)\r\n");
+  printf("  SPI2: PB10/PC2/PC1 + PC5(CS) (H3LIS100DL)\r\n");
+  printf("  SPI2: PB10/PC2/PC1 + PA4(CS) (QMA6100P)\r\n");
+  printf("  串口: PA9/PA10 115200bps\r\n");
+#endif
   printf("========================================\r\n\r\n");
 
   /* USER CODE END 2 */

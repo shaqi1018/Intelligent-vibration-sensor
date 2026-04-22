@@ -1,7 +1,7 @@
 /**
   ******************************************************************************
   * @file    lsm6dsox.c
-  * @brief   LSM6DSOX driver (SPI1, PA5=SCK, PA6=MISO, PA7=MOSI, PA4=CS)
+ * @brief   LSM6DSOX driver (SPI1, PA5=SCK, PA6=MISO, PA7=MOSI, PC4=CS)
   *          Default: accel +/-4g 104Hz, gyro +/-2000dps 104Hz
   ******************************************************************************
   */

@@ -57,15 +57,19 @@ void Error_Handler(void);
 /* USER CODE END EFP */
 
 /* Private defines -----------------------------------------------------------*/
-#define BLUE_LED_Pin GPIO_PIN_13
-#define BLUE_LED_GPIO_Port GPIOC
-#define GREEN_LED_Pin GPIO_PIN_5
-#define GREEN_LED_GPIO_Port GPIOC
-
 /* USER CODE BEGIN Private defines */
-/* 用户按键引脚: 空闲为上拉高电平(3.3V), 按下后接地为低电平 */
-#define KEY1_Pin GPIO_PIN_12
-#define KEY1_GPIO_Port GPIOA
+/* Temporary single-sensor bring-up target:
+ * 0 = normal multi-thread, three-sensor behavior
+ * 1 = LSM6DSOX single-sensor test
+ * 2 = H3LIS100DL single-sensor test
+ * 3 = QMA6100P single-sensor test
+ */
+#define APP_SENSOR_TEST_NONE        0U
+#define APP_SENSOR_TEST_LSM6DSOX    1U
+#define APP_SENSOR_TEST_H3LIS100DL  2U
+#define APP_SENSOR_TEST_QMA6100P    3U
+
+#define APP_SENSOR_TEST_TARGET APP_SENSOR_TEST_NONE
 
 /* USER CODE END Private defines */
 

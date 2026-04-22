@@ -36,32 +36,7 @@
 */
 void MX_GPIO_Init(void)
 {
-
-  GPIO_InitTypeDef GPIO_InitStruct = {0};
-
-  /* GPIO Ports Clock Enable */
-  __HAL_RCC_GPIOC_CLK_ENABLE();
-  __HAL_RCC_GPIOA_CLK_ENABLE();
-
-  /* Configure GPIO pin Output Level */
-  HAL_GPIO_WritePin(GPIOC, BLUE_LED_Pin|GREEN_LED_Pin, GPIO_PIN_RESET);
-
-  /* Configure GPIO pins : PC13 PC5 (板载LED) */
-  GPIO_InitStruct.Pin = BLUE_LED_Pin|GREEN_LED_Pin;
-  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
-  GPIO_InitStruct.Pull = GPIO_NOPULL;
-  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
-  HAL_GPIO_Init(GPIOC, &GPIO_InitStruct);
-
-  /* Configure GPIO pin : PA12 (用户按键输入)
-   * 空闲状态: 3.3V 上拉 (高电平)
-   * 按下状态: 接地 (低电平)
-   */
-  GPIO_InitStruct.Pin = KEY1_Pin;
-  GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
-  GPIO_InitStruct.Pull = GPIO_PULLUP;
-  HAL_GPIO_Init(KEY1_GPIO_Port, &GPIO_InitStruct);
-
+  /* No standalone GPIO is needed in the current sensor test flow. */
 }
 
 /* USER CODE BEGIN 2 */

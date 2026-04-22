@@ -1,0 +1,402 @@
+# SD卡记录与USB大容量存储功能计划书
+
+## 1. 需求理解
+
+目标是在当前 `STM32U575 + FreeRTOS + 三传感器` 工程上新增两类能力：
+
+1. 使用 `SDMMC1` 驱动 TF/SD 卡，持续保存三路传感器数据。
+2. 当 `Type-C` 接到电脑时，单片机以 `USB Mass Storage Class (MSC)` 设备响应，让电脑把这张 SD 卡识别为一个 U 盘。
+
+本次计划默认继续保留当前三传感器线程：
+
+- `LSM6DSOX` 线程
+- `H3LIS100DL` 线程
+- `QMA6100P` 线程
+
+并新增一个独立的存储管理层，用来协调：
+
+- 传感器采集
+- SD 文件系统写入
+- USB MSC 块设备导出
+
+## 2. 已知硬件信息
+
+### 2.1 SD 卡引脚
+
+- `PC8  -> SDMMC1_D0`
+- `PC9  -> SDMMC1_D1`
+- `PC10 -> SDMMC1_D2`
+- `PC11 -> SDMMC1_D3`
+- `PC12 -> SDMMC1_CK`
+- `PD2  -> SDMMC1_CMD`
+- `PC13 -> SDMMC1_DET`
+
+按你提供的原理图，`PC13` 通过 `10K` 上拉到 `3V3`，插卡检测脚来自卡座 `CD`。这通常意味着：
+
+- `未插卡 = 高`
+- `插卡 = 低`
+
+但这个极性在真正执行前仍建议再用板上实测确认一次。
+
+### 2.2 USB Type-C 引脚
+
+- `PA11 -> USB_N`
+- `PA12 -> USB_P`
+
+原理图里 `CC1/CC2` 各接 `5.1K` 下拉，符合 `UFP/Device` 角色，也就是这块板子作为 USB 设备接电脑。
+
+### 2.3 一个重要注意点
+
+你给的 Type-C 图里没有看到一根明确接到 MCU 的 `VBUS sense` GPIO。
+
+这不一定阻止 USB MSC 功能实现，但会影响“如何感知插线”这件事。当前计划先按下面这个假设推进：
+
+- USB 设备栈常驻初始化或在系统准备好后启动
+- 不依赖独立 `VBUS` 检测脚
+- 通过 USB 设备连接/枚举事件来切换到 MSC 模式
+
+如果后面你板上实际上还有一根 `VBUS` 接到了 MCU，只是没在这两张图里体现，那我们执行时可以把切换做得更干净。
+
+## 3. 当前工程现状分析
+
+结合当前工程代码，现状是：
+
+1. 已经有稳定的三传感器 `SPI + FreeRTOS` 基础框架。
+2. 当前工程里还没有现成的 `SDMMC1/FATFS/USB_DEVICE MSC` 工程骨架。
+3. `stm32u5xx_hal_conf.h` 里目前 `HAL_SD_MODULE_ENABLED` 和 `HAL_PCD_MODULE_ENABLED` 还是注释状态。
+4. 当前 `SystemClock_Config()` 还没有专门配置 `USB/SDMMC` 所需的 `48MHz` 外设时钟方案。
+5. 当前工程里也还没有：
+   - `MX_SDMMC1_Init()`
+   - `sd_diskio.c`
+   - `ff.c / diskio.c / ffconf.h`
+   - `usb_device.c / usbd_conf.c / usbd_desc.c / usbd_storage_if.c`
+   - `OTG_FS_IRQHandler / SDMMC1_IRQHandler`
+
+这意味着本次不是“接个 API”就能完成，而是要补齐一整套底座。
+
+## 4. 参考工程可复用内容
+
+你给的参考路径：
+
+`D:\ChengKe\Vibration_sensor\sofeware\V8.5\V8.5\STM32CubeFunctionPack_DATALOG1_V1.5.1`
+
+我已经确认其中可直接借鉴的关键文件主要有：
+
+- `Projects\STM32L4R9ZI-SensorTile.box\Applications\HSDatalog\Src\sd_diskio.c`
+- `Projects\STM32L4R9ZI-SensorTile.box\Applications\HSDatalog\ADD\usb_storage\usbd_storage_if.c`
+- `Projects\STM32L4R9ZI-SensorTile.box\Applications\HSDatalog\Src\usbd_conf.c`
+- `Projects\STM32L4R9ZI-SensorTile.box\Applications\HSDatalog\Inc\ffconf.h`
+- `Middlewares\ST\STM32_USB_Device_Library\Class\MSC\*`
+- `Middlewares\Third_Party\FatFs\src\*`
+
+但要注意两点：
+
+1. 参考工程是 `STM32L4` 平台，不是 `STM32U5`，外设寄存器、HAL 源文件、时钟配置和 MSP 细节不能生搬硬套。
+2. 参考工程里的 `BSP_SD_*` 封装与当前工程不同，执行时需要改成适合你这块板子的 `HAL_SD` 或新的 `BSP_SD` 封装。
+
+## 5. 推荐总体方案
+
+### 5.1 总体架构
+
+建议采用“采集层”和“存储层”解耦的结构：
+
+1. 三个传感器线程只负责采样与更新最新数据。
+2. 新增一个 `logger/storage task` 负责：
+   - 挂载/卸载 FATFS
+   - 创建日志文件
+   - 周期写入 SD
+   - 响应 USB MSC 模式切换
+3. 新增一个 `storage manager` 状态机，统一管理：
+   - `NO_CARD`
+   - `LOGGING`
+   - `SWITCH_TO_MSC`
+   - `MSC_EXPOSED`
+   - `SWITCH_TO_LOGGING`
+   - `CARD_ERROR`
+
+### 5.2 SD 与 USB 的互斥原则
+
+这是本项目最重要的设计原则：
+
+`同一时刻，SD 卡不能同时被本地 FATFS 写文件和被电脑通过 USB MSC 作为块设备访问。`
+
+所以推荐行为定义为：
+
+1. 正常运行时：
+   - 本地挂载 FATFS
+   - 持续写日志文件
+2. 当电脑连上并准备枚举 MSC 时：
+   - 停止本地日志写入
+   - flush 缓冲
+   - 关闭文件
+   - `f_mount(NULL, ...)` 卸载文件系统
+   - 把 SD 卡原始块设备交给 USB MSC
+3. 当 USB 断开后：
+   - 停止 MSC
+   - 重新初始化/检查 SD
+   - 重新挂载 FATFS
+   - 恢复本地日志
+
+这也是最稳妥、最不容易把卡写坏的做法。
+
+## 6. 数据记录方案
+
+### 6.1 第一版建议格式
+
+第一版建议先做 `CSV`，原因是：
+
+- 串口和文件内容容易人工核对
+- 电脑插上后能直接打开看
+- 开发调试成本最低
+
+建议每行包含：
+
+- 时间戳
+- `LSM6DSOX` 加速度/陀螺仪/温度
+- `H3LIS100DL` 原始值/换算值
+- `QMA6100P` 加速度
+
+示例字段：
+
+`time_ms, lsm_ax, lsm_ay, lsm_az, lsm_gx, lsm_gy, lsm_gz, lsm_temp, h3_rx, h3_ry, h3_rz, h3_ax, h3_ay, h3_az, qma_ax, qma_ay, qma_az`
+
+### 6.2 采样与写卡解耦
+
+不建议三个传感器线程各自直接写文件。推荐做法是：
+
+1. 每个传感器线程把“最新一帧”更新到共享结构体。
+2. `logger task` 按固定周期统一抓取三路最新数据，拼成一行写入 SD。
+
+这样好处是：
+
+- SD 卡写入路径单一
+- 文件互斥更简单
+- 以后切换成二进制格式也更方便
+
+## 7. 分阶段实施计划
+
+### 阶段 A：补齐底层外设骨架
+
+目标：让 `SDMMC1` 和 `USB OTG FS Device` 至少能在工程里编译通过并初始化。
+
+计划内容：
+
+1. 在 `stm32u5xx_hal_conf.h` 里开启：
+   - `HAL_SD_MODULE_ENABLED`
+   - `HAL_PCD_MODULE_ENABLED`
+2. 新增 `SDMMC1` 初始化与 MSP：
+   - `PC8~PC12`
+   - `PD2`
+   - `PC13` 插卡检测
+3. 新增 `USB OTG FS` 初始化与 MSP：
+   - `PA11/PA12`
+   - `OTG_FS_IRQn`
+4. 补齐 `SDMMC1_IRQHandler`、`OTG_FS_IRQHandler`
+5. 调整时钟，保证 `USB FS` 与 `SDMMC` 拿到稳定的 `48MHz` 时钟源
+
+交付结果：
+
+- 工程能编过
+- 上电后 SD 和 USB 外设能初始化
+- 串口能输出初始化状态
+
+### 阶段 B：SD 卡块设备与 FATFS 打通
+
+目标：实现 `挂载 -> 建文件 -> 写入 -> 关闭 -> 读取` 的完整链路。
+
+计划内容：
+
+1. 引入 `FatFs` 必要源码
+2. 新增 `diskio` 和 `sd_diskio`
+3. 完成 `HAL_SD` 到 `FatFs diskio` 的桥接
+4. 新增卡检测、挂载、卸载接口
+5. 做一个最小文件测试：
+   - 插卡
+   - 创建测试文件
+   - 写一行文本
+   - 关闭
+
+交付结果：
+
+- SD 卡能被可靠识别
+- 可以在卡上看到测试文件
+
+### 阶段 C：传感器日志任务
+
+目标：把三路传感器数据真正写入 SD。
+
+计划内容：
+
+1. 新增 `storage/logger task`
+2. 定义共享采样快照结构
+3. 周期生成 CSV
+4. 周期 `f_write + f_sync`
+5. 定义日志目录和文件命名规则
+
+建议初版文件命名：
+
+- `LOG0001.CSV`
+- `LOG0002.CSV`
+
+或者按时间戳命名，如果 RTC 后面要一起做也可以预留。
+
+交付结果：
+
+- 三传感器数据能持续落卡
+- 串口保留采样与存储状态打印
+
+### 阶段 D：USB MSC 导出 SD 卡
+
+目标：插电脑后，电脑能把设备识别成 U 盘。
+
+计划内容：
+
+1. 引入 USB Device Core + MSC Class
+2. 新增：
+   - `usb_device.c`
+   - `usbd_conf.c`
+   - `usbd_desc.c`
+   - `usbd_storage_if.c`
+3. `usbd_storage_if` 直接调用 `HAL_SD_ReadBlocks / HAL_SD_WriteBlocks`
+4. 配置产品字符串、厂商字符串、容量信息
+
+交付结果：
+
+- Windows 能识别成大容量存储设备
+- 电脑能看到 SD 卡分区和日志文件
+
+### 阶段 E：日志模式与MSC模式切换
+
+目标：解决“本地写卡”和“电脑访问卡”的冲突。
+
+计划内容：
+
+1. 定义 USB 连接事件触发流程
+2. 在进入 MSC 前执行：
+   - 停止 logger
+   - flush
+   - close
+   - unmount
+3. 在 USB 断开后执行：
+   - 停止 MSC
+   - 重新 mount
+   - 恢复 logger
+4. 增加异常保护：
+   - 卡不存在
+   - 挂载失败
+   - 写卡失败
+   - USB 枚举失败
+
+交付结果：
+
+- 插电脑时不损坏文件系统
+- 拔线后能恢复本地记录
+
+## 8. 预计修改/新增文件范围
+
+### 预计修改
+
+- `Core/Inc/stm32u5xx_hal_conf.h`
+- `Core/Src/main.c`
+- `Core/Src/gpio.c`
+- `Core/Src/app_freertos.c`
+- `Core/Src/stm32u5xx_it.c`
+- `Core/Inc/stm32u5xx_it.h`
+
+### 预计新增
+
+- `Core/Src/sdmmc.c`
+- `Core/Inc/sdmmc.h`
+- `Core/Src/usb_device.c`
+- `Core/Inc/usb_device.h`
+- `Core/Src/usbd_conf.c`
+- `Core/Src/usbd_desc.c`
+- `Core/Inc/usbd_conf.h`
+- `Core/Inc/usbd_desc.h`
+- `Core/Src/usbd_storage_if.c`
+- `Core/Inc/usbd_storage_if.h`
+- `Core/Src/sd_diskio.c`
+- `Core/Inc/sd_diskio.h`
+- `Core/Src/fatfs.c`
+- `Core/Inc/fatfs.h`
+- `Core/Src/storage_manager.c`
+- `Core/Inc/storage_manager.h`
+
+另外还需要把 `USB Device Library` 和 `FatFs` 的必要中间件源码纳入工程编译。
+
+## 9. 风险点与建议
+
+### 9.1 最大风险：USB插入切换时机
+
+如果板上确实没有 MCU 可见的 `VBUS` 检测脚，那么“线一插上就先停日志再导出”的切换窗口会比有 `VBUS sense` 的设计更紧。
+
+解决策略：
+
+1. 第一版先以“USB 事件触发后立即切换”为主。
+2. 如果实际热插拔时机不够稳，再评估是否需要补 `VBUS` 检测或改成“上电进入某模式”。
+
+### 9.2 文件系统一致性风险
+
+如果电脑挂载 MSC 的同时本地还在写文件，极易损坏 FAT。
+
+建议：
+
+- 第一版严格互斥
+- `MSC active` 时本地日志完全停写
+
+### 9.3 初版建议优先保证稳定，不追求极限性能
+
+建议第一版：
+
+- 先用 `CSV`
+- 先用普通阻塞写
+- 先把可靠性跑通
+
+后续再考虑：
+
+- DMA
+- 更大的缓存
+- 二进制格式
+- 更高采样率
+
+## 10. 验收标准
+
+实现完成后，至少满足下面场景：
+
+1. 上电未接电脑：
+   - 能识别 SD 卡
+   - 能创建日志文件
+   - 能持续保存三传感器数据
+2. 接上电脑：
+   - 电脑能识别为 U 盘
+   - 能看到日志文件
+   - 不出现文件系统损坏
+3. 拔掉电脑：
+   - 系统能恢复本地记录
+   - 不需要重启单片机
+4. 插拔 SD 卡异常：
+   - 串口有明确错误提示
+   - 不导致系统死锁
+
+## 11. 推荐执行顺序
+
+建议我后续按下面顺序实际动手：
+
+1. 先把 `SDMMC1 + FATFS` 打通
+2. 再做三传感器日志落卡
+3. 最后做 `USB MSC`
+4. 最后再做 `日志 <-> MSC` 自动切换
+
+这样每一步都能单独验证，出问题也更容易定位。
+
+## 12. 本计划默认采用的行为约定
+
+为了后续执行时不反复停下来确认，我这里先把默认约定写清楚：
+
+1. `PC13` 默认按“低电平表示插卡”处理
+2. 初版日志格式默认 `CSV`
+3. 初版 `USB MSC` 默认允许电脑正常读取 SD 卡内容
+4. `USB MSC` 激活时，本地日志暂停
+5. `USB` 断开后，系统自动恢复本地日志
+
+如果你审阅后想改其中任何一条，我会按你的版本执行。

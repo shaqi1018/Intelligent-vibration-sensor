@@ -22,12 +22,13 @@
 #include "task.h"
 #include "main.h"
 #include "cmsis_os2.h"
+
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 #include <stdio.h>
-#include "lsm6dsox.h"             /* LSM6DSOX   - SPI1 dedicated   */
-#include "h3lis100dl.h"           /* H3LIS100DL - SPI2 shared bus  */
-#include "qma6100p.h"             /* QMA6100P   - SPI2 shared bus  */
+#include "lsm6dsox.h"
+#include "h3lis100dl.h"
+#include "qma6100p.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -37,22 +38,7 @@
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
-
-/** Key polling period (ms) */
-#define KEY_POLL_PERIOD_MS    10U
-
-/** Sensor sampling interval (ms) */
-#define SAMPLE_PERIOD_MS      500U
-
-/** Number of polling ticks per sample interval */
-#define SAMPLE_INTERVAL_TICKS (SAMPLE_PERIOD_MS / KEY_POLL_PERIOD_MS)
-
-/** Sensor ready bits for g_sensor_ready_mask */
-#define SENSOR_MASK_LSM6DSOX   (1U << 0)
-#define SENSOR_MASK_H3LIS100DL (1U << 1)
-#define SENSOR_MASK_QMA6100P   (1U << 2)
-#define SENSOR_MASK_ALL        (0x07U)
-
+#define SAMPLE_PERIOD_MS 500U
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -65,91 +51,37 @@
 
 /* ======================== Bus architecture ================================
  *
- *   SPI1 (PA5/PA6/PA7 + PA4 CS)          -> LSM6DSOX   (dedicated bus)
- *   SPI2 (PB13/PB14/PB15 + PB12/PB0 CS)  -> H3LIS100DL + QMA6100P (shared)
- *
- *   SPI2 is shared: a mutex is required before every CS sequence.
+ *   SPI1 (PA5/PA6/PA7 + PC4 CS)          -> LSM6DSOX   (dedicated bus)
+ *   SPI2 (PB10/PC2/PC1 + PC5/PA4 CS)     -> H3LIS100DL + QMA6100P (shared)
  */
 
-/** Mutex protecting the SPI2 shared bus */
 static osMutexId_t spi2_mutex;
 static const osMutexAttr_t spi2_mutex_attr = {
   .name      = "spi2Mutex",
   .attr_bits = osMutexPrioInherit,
 };
 
-/**
- * @brief  Sensor init ready flags.
- *         Bit 0 = LSM6DSOX, Bit 1 = H3LIS100DL, Bit 2 = QMA6100P.
- *         Set by each sensor task after successful init.
- *         Read by defaultTask to determine when to enable key control.
- */
-static volatile uint8_t g_sensor_ready_mask = 0U;
-
-/**
- * @brief  Global sampling enable flag.
- *         Toggled by defaultTask when PA12 is pressed (only after all 3 sensors ready).
- *         Read by all sensor tasks.
- */
-static volatile uint8_t g_sampling_enable = 0U;
-
 /* USER CODE END Variables */
 
-/* ======================== System default thread =========================== */
-osThreadId_t defaultTaskHandle;
-const osThreadAttr_t defaultTask_attributes = {
-  .name = "defaultTask",
-  .priority = (osPriority_t) osPriorityNormal,
-  .stack_size = 128 * 4
-};
-
-/* ======================== LED blink threads =============================== */
-osThreadId_t blueBlinkTaskHandle;
-const osThreadAttr_t blueBlinkTask_attributes = {
-  .name = "blueBlinkTask",
-  .priority = (osPriority_t) osPriorityLow,
-  .stack_size = 128 * 4
-};
-
-osThreadId_t greenBlinkTaskHandle;
-const osThreadAttr_t greenBlinkTask_attributes = {
-  .name = "greenBlinkTask",
-  .priority = (osPriority_t) osPriorityLow,
-  .stack_size = 128 * 4
-};
-
 /* ======================== Sensor threads ================================== */
-
-/**
- * @brief  LSM6DSOX thread  (SPI1 dedicated bus, no mutex needed)
- *         Stack: 2048 bytes (for float printf)
- */
 osThreadId_t lsm6dsoxTaskHandle;
 const osThreadAttr_t lsm6dsoxTask_attributes = {
   .name = "lsm6dsoxTask",
-  .priority = (osPriority_t) osPriorityAboveNormal,
+  .priority = (osPriority_t)osPriorityAboveNormal,
   .stack_size = 512 * 4
 };
 
-/**
- * @brief  QMA6100P thread  (SPI2 shared bus, mutex protected)
- *         Stack: 1024 bytes
- */
 osThreadId_t qma6100pTaskHandle;
 const osThreadAttr_t qma6100pTask_attributes = {
   .name = "qma6100pTask",
-  .priority = (osPriority_t) osPriorityAboveNormal,
+  .priority = (osPriority_t)osPriorityAboveNormal,
   .stack_size = 256 * 4
 };
 
-/**
- * @brief  H3LIS100DL thread  (SPI2 shared bus, mutex protected)
- *         Stack: 1024 bytes
- */
 osThreadId_t h3lis100dlTaskHandle;
 const osThreadAttr_t h3lis100dlTask_attributes = {
   .name = "h3lis100dlTask",
-  .priority = (osPriority_t) osPriorityAboveNormal,
+  .priority = (osPriority_t)osPriorityAboveNormal,
   .stack_size = 256 * 4
 };
 
@@ -158,58 +90,51 @@ const osThreadAttr_t h3lis100dlTask_attributes = {
 
 /* USER CODE END FunctionPrototypes */
 
-void StartDefaultTask(void *argument);
-void StartBlueBlinkTask(void *argument);
-void StartGreenBlinkTask(void *argument);
 void StartLsm6dsoxTask(void *argument);
 void StartQma6100pTask(void *argument);
 void StartH3lis100dlTask(void *argument);
 
-void MX_FREERTOS_Init(void); /* (MISRA C 2004 rule 8.1) */
-
+void MX_FREERTOS_Init(void);
 
 /* Hook prototypes */
 void configureTimerForRunTimeStats(void);
 unsigned long getRunTimeCounterValue(void);
 
 /* USER CODE BEGIN 1 */
-/* Functions needed when configGENERATE_RUN_TIME_STATS is on */
 __weak void configureTimerForRunTimeStats(void)
 {
-
 }
 
 __weak unsigned long getRunTimeCounterValue(void)
 {
-return 0;
+  return 0;
 }
 /* USER CODE END 1 */
 
 /* USER CODE BEGIN PREPOSTSLEEP */
 __weak void PreSleepProcessing(uint32_t ulExpectedIdleTime)
 {
-/* place for user code */
+  (void)ulExpectedIdleTime;
 }
 
 __weak void PostSleepProcessing(uint32_t ulExpectedIdleTime)
 {
-/* place for user code */
+  (void)ulExpectedIdleTime;
 }
 /* USER CODE END PREPOSTSLEEP */
 
-/**
-  * @brief  FreeRTOS initialization
-  * @param  None
-  * @retval None
-  */
-void MX_FREERTOS_Init(void) {
+void MX_FREERTOS_Init(void)
+{
   /* USER CODE BEGIN Init */
 
   /* USER CODE END Init */
 
   /* USER CODE BEGIN RTOS_MUTEX */
-  /* SPI2 is shared by H3LIS100DL and QMA6100P - create mutex before sensor threads */
+#if (APP_SENSOR_TEST_TARGET == APP_SENSOR_TEST_NONE) || \
+    (APP_SENSOR_TEST_TARGET == APP_SENSOR_TEST_H3LIS100DL) || \
+    (APP_SENSOR_TEST_TARGET == APP_SENSOR_TEST_QMA6100P)
   spi2_mutex = osMutexNew(&spi2_mutex_attr);
+#endif
   /* USER CODE END RTOS_MUTEX */
 
   /* USER CODE BEGIN RTOS_SEMAPHORES */
@@ -221,25 +146,18 @@ void MX_FREERTOS_Init(void) {
   /* USER CODE BEGIN RTOS_QUEUES */
   /* USER CODE END RTOS_QUEUES */
 
-  /* creation of defaultTask */
-  defaultTaskHandle = osThreadNew(StartDefaultTask, NULL, &defaultTask_attributes);
-
-  /* creation of blueBlinkTask */
-  blueBlinkTaskHandle = osThreadNew(StartBlueBlinkTask, NULL, &blueBlinkTask_attributes);
-
-  /* creation of greenBlinkTask */
-  greenBlinkTaskHandle = osThreadNew(StartGreenBlinkTask, NULL, &greenBlinkTask_attributes);
-
   /* USER CODE BEGIN RTOS_THREADS */
-
-  /* Three sensor threads, all active concurrently.
-   * Each thread initializes its own sensor, then sets its ready bit in
-   * g_sensor_ready_mask.  The defaultTask starts key-controlled sampling
-   * only after all three bits are set (SENSOR_MASK_ALL). */
-  lsm6dsoxTaskHandle  = osThreadNew(StartLsm6dsoxTask,  NULL, &lsm6dsoxTask_attributes);
+#if APP_SENSOR_TEST_TARGET == APP_SENSOR_TEST_LSM6DSOX
+  lsm6dsoxTaskHandle = osThreadNew(StartLsm6dsoxTask, NULL, &lsm6dsoxTask_attributes);
+#elif APP_SENSOR_TEST_TARGET == APP_SENSOR_TEST_H3LIS100DL
   h3lis100dlTaskHandle = osThreadNew(StartH3lis100dlTask, NULL, &h3lis100dlTask_attributes);
-  qma6100pTaskHandle  = osThreadNew(StartQma6100pTask,  NULL, &qma6100pTask_attributes);
-
+#elif APP_SENSOR_TEST_TARGET == APP_SENSOR_TEST_QMA6100P
+  qma6100pTaskHandle = osThreadNew(StartQma6100pTask, NULL, &qma6100pTask_attributes);
+#else
+  lsm6dsoxTaskHandle = osThreadNew(StartLsm6dsoxTask, NULL, &lsm6dsoxTask_attributes);
+  h3lis100dlTaskHandle = osThreadNew(StartH3lis100dlTask, NULL, &h3lis100dlTask_attributes);
+  qma6100pTaskHandle = osThreadNew(StartQma6100pTask, NULL, &qma6100pTask_attributes);
+#endif
   /* USER CODE END RTOS_THREADS */
 
   /* USER CODE BEGIN RTOS_EVENTS */
@@ -249,302 +167,343 @@ void MX_FREERTOS_Init(void) {
 /* Private application code --------------------------------------------------*/
 /* USER CODE BEGIN Application */
 
-/* ============================================================================
- *  Key press detection helper
- * ============================================================================
- *  PA12: idle=pull-up HIGH, pressed=GND LOW
- *  Detects falling edge + 10ms debounce + waits for release.
- *
- * @param  p_key_last  pointer to previous key state variable (caller owns)
- * @retval 1 = confirmed press-and-release cycle, 0 = no event
- */
-static uint8_t Key_DetectPress(GPIO_PinState *p_key_last)
+#if APP_SENSOR_TEST_TARGET == APP_SENSOR_TEST_LSM6DSOX
+static const char *LSM6DSOX_DiagPullName(uint32_t pull)
 {
-  GPIO_PinState key_now = HAL_GPIO_ReadPin(KEY1_GPIO_Port, KEY1_Pin);
-
-  if (*p_key_last == GPIO_PIN_SET && key_now == GPIO_PIN_RESET)
+  switch (pull)
   {
-    /* Falling edge detected - debounce */
-    osDelay(10);
-    if (HAL_GPIO_ReadPin(KEY1_GPIO_Port, KEY1_Pin) == GPIO_PIN_RESET)
+    case GPIO_PULLUP:   return "PULLUP";
+    case GPIO_PULLDOWN: return "PULLDOWN";
+    default:            return "NOPULL";
+  }
+}
+
+static void LSM6DSOX_DiagShortDelay(volatile uint32_t cycles)
+{
+  while (cycles--)
+  {
+    __NOP();
+  }
+}
+
+static void LSM6DSOX_DiagConfigureMisoPull(uint32_t pull)
+{
+  GPIO_InitTypeDef GPIO_InitStruct = {0};
+
+  GPIO_InitStruct.Pin = LSM_SPI_MISO_PIN;
+  GPIO_InitStruct.Mode = GPIO_MODE_AF_PP;
+  GPIO_InitStruct.Pull = pull;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_HIGH;
+  GPIO_InitStruct.Alternate = LSM_SPI_MISO_AF;
+  HAL_GPIO_Init(LSM_SPI_MISO_GPIO_PORT, &GPIO_InitStruct);
+}
+
+static HAL_StatusTypeDef LSM6DSOX_DiagReadWhoAmIRaw(uint8_t *rx0, uint8_t *rx1)
+{
+  HAL_StatusTypeDef ret;
+  uint8_t tx[2] = {(uint8_t)(LSM6DSOX_REG_WHO_AM_I | LSM6DSOX_SPI_READ), 0x00U};
+  uint8_t rx[2] = {0};
+
+  LSM_SPI_CS_HIGH();
+  LSM6DSOX_DiagShortDelay(200U);
+  LSM_SPI_CS_LOW();
+  LSM6DSOX_DiagShortDelay(200U);
+  ret = HAL_SPI_TransmitReceive(&hspi1, tx, rx, 2U, LSM_SPI_TIMEOUT_MS);
+  LSM_SPI_CS_HIGH();
+  LSM6DSOX_DiagShortDelay(200U);
+
+  if (rx0 != NULL)
+  {
+    *rx0 = rx[0];
+  }
+  if (rx1 != NULL)
+  {
+    *rx1 = rx[1];
+  }
+
+  return ret;
+}
+
+static void LSM6DSOX_DiagPrintHwSpiSweep(void)
+{
+  const uint32_t pulls[] = {GPIO_PULLUP, GPIO_PULLDOWN, GPIO_NOPULL};
+  uint32_t pull_idx;
+
+  printf("[LSM6DSOX DIAG] HW-SPI WHO_AM_I sweep\r\n");
+
+  for (pull_idx = 0U; pull_idx < (uint32_t)(sizeof(pulls) / sizeof(pulls[0])); pull_idx++)
+  {
+    uint8_t attempt;
+
+    LSM6DSOX_DiagConfigureMisoPull(pulls[pull_idx]);
+    HAL_Delay(1U);
+
+    for (attempt = 0U; attempt < 3U; attempt++)
     {
-      /* Wait for release */
-      while (HAL_GPIO_ReadPin(KEY1_GPIO_Port, KEY1_Pin) == GPIO_PIN_RESET)
-      {
-        osDelay(10);
-      }
-      *p_key_last = GPIO_PIN_SET;
-      return 1U;
+      uint8_t rx0 = 0U;
+      uint8_t rx1 = 0U;
+      HAL_StatusTypeDef ret = LSM6DSOX_DiagReadWhoAmIRaw(&rx0, &rx1);
+
+      printf("[LSM6DSOX DIAG] HW pull=%s try=%u ret=%d TX=[8F 00] RX=[%02X %02X]\r\n",
+             LSM6DSOX_DiagPullName(pulls[pull_idx]),
+             (unsigned int)(attempt + 1U),
+             (int)ret,
+             rx0,
+             rx1);
+      HAL_Delay(2U);
+    }
+  }
+}
+
+static void LSM6DSOX_DiagConfigureBitBangPins(uint32_t miso_pull)
+{
+  GPIO_InitTypeDef GPIO_InitStruct = {0};
+
+  HAL_SPI_DeInit(&hspi1);
+  __HAL_RCC_GPIOA_CLK_ENABLE();
+  __HAL_RCC_GPIOC_CLK_ENABLE();
+
+  GPIO_InitStruct.Pin = LSM_SPI_CS_PIN;
+  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_HIGH;
+  HAL_GPIO_Init(LSM_SPI_CS_GPIO_PORT, &GPIO_InitStruct);
+
+  GPIO_InitStruct.Pin = LSM_SPI_SCK_PIN | LSM_SPI_MOSI_PIN;
+  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_HIGH;
+  HAL_GPIO_Init(LSM_SPI_SCK_GPIO_PORT, &GPIO_InitStruct);
+
+  GPIO_InitStruct.Pin = LSM_SPI_MISO_PIN;
+  GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
+  GPIO_InitStruct.Pull = miso_pull;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_HIGH;
+  HAL_GPIO_Init(LSM_SPI_MISO_GPIO_PORT, &GPIO_InitStruct);
+
+  HAL_GPIO_WritePin(LSM_SPI_CS_GPIO_PORT, LSM_SPI_CS_PIN, GPIO_PIN_SET);
+  HAL_GPIO_WritePin(LSM_SPI_SCK_GPIO_PORT, LSM_SPI_SCK_PIN, GPIO_PIN_SET);
+  HAL_GPIO_WritePin(LSM_SPI_MOSI_GPIO_PORT, LSM_SPI_MOSI_PIN, GPIO_PIN_RESET);
+}
+
+static uint8_t LSM6DSOX_DiagBitBangTransfer(uint8_t tx)
+{
+  uint8_t rx = 0U;
+  uint8_t bit;
+
+  for (bit = 0U; bit < 8U; bit++)
+  {
+    uint8_t mask = (uint8_t)(0x80U >> bit);
+
+    HAL_GPIO_WritePin(LSM_SPI_SCK_GPIO_PORT, LSM_SPI_SCK_PIN, GPIO_PIN_RESET);
+    HAL_GPIO_WritePin(LSM_SPI_MOSI_GPIO_PORT,
+                      LSM_SPI_MOSI_PIN,
+                      (tx & mask) ? GPIO_PIN_SET : GPIO_PIN_RESET);
+    LSM6DSOX_DiagShortDelay(2000U);
+
+    HAL_GPIO_WritePin(LSM_SPI_SCK_GPIO_PORT, LSM_SPI_SCK_PIN, GPIO_PIN_SET);
+    LSM6DSOX_DiagShortDelay(2000U);
+
+    if (HAL_GPIO_ReadPin(LSM_SPI_MISO_GPIO_PORT, LSM_SPI_MISO_PIN) == GPIO_PIN_SET)
+    {
+      rx |= mask;
     }
   }
 
-  *p_key_last = key_now;
-  return 0U;
+  return rx;
 }
 
-/* USER CODE BEGIN Header_StartDefaultTask */
-/**
-* @brief Function implementing the defaultTask thread.
-*        Handles PA12 key detection and broadcasts g_sampling_enable to all
-*        sensor threads.  Sampling is only allowed after all three sensors
-*        have successfully initialized (g_sensor_ready_mask == SENSOR_MASK_ALL).
-* @param argument: Not used
-* @retval None
-*/
-/* USER CODE END Header_StartDefaultTask */
-void StartDefaultTask(void *argument)
+static void LSM6DSOX_DiagRunBitBangRead(uint32_t miso_pull)
 {
-  /* USER CODE BEGIN defaultTask */
-  GPIO_PinState key_last        = GPIO_PIN_SET;
-  uint8_t       all_ready_notified = 0U;
+  uint8_t rx0;
+  uint8_t rx1;
 
-  (void)argument;
+  LSM6DSOX_DiagConfigureBitBangPins(miso_pull);
+  LSM6DSOX_DiagShortDelay(4000U);
 
-  printf("[SYS] 系统启动, 等待三个传感器初始化...\r\n\r\n");
+  HAL_GPIO_WritePin(LSM_SPI_CS_GPIO_PORT, LSM_SPI_CS_PIN, GPIO_PIN_RESET);
+  LSM6DSOX_DiagShortDelay(4000U);
+  rx0 = LSM6DSOX_DiagBitBangTransfer((uint8_t)(LSM6DSOX_REG_WHO_AM_I | LSM6DSOX_SPI_READ));
+  rx1 = LSM6DSOX_DiagBitBangTransfer(0x00U);
+  HAL_GPIO_WritePin(LSM_SPI_CS_GPIO_PORT, LSM_SPI_CS_PIN, GPIO_PIN_SET);
+  LSM6DSOX_DiagShortDelay(4000U);
 
-  for(;;)
-  {
-    /* Notify once when all sensors are ready */
-    if (!all_ready_notified && (g_sensor_ready_mask == SENSOR_MASK_ALL))
-    {
-      all_ready_notified = 1U;
-      printf("[SYS] 所有传感器初始化完成! 按下PA12开始采集\r\n\r\n");
-    }
+  printf("[LSM6DSOX DIAG] BITBANG pull=%s TX=[8F 00] RX=[%02X %02X]\r\n",
+         LSM6DSOX_DiagPullName(miso_pull),
+         rx0,
+         rx1);
 
-    /* Key detection - only effective after all sensors ready */
-    if (all_ready_notified)
-    {
-      if (Key_DetectPress(&key_last))
-      {
-        g_sampling_enable = !g_sampling_enable;
-        printf("[按键] PA12 按下, 采集: %s\r\n\r\n",
-               g_sampling_enable ? ">> 开始" : ">> 停止");
-      }
-    }
-
-    osDelay(KEY_POLL_PERIOD_MS);
-  }
-  /* USER CODE END defaultTask */
+  MX_SPI1_Init();
 }
 
-/* USER CODE BEGIN Header_StartBlueBlinkTask */
-/**
-* @brief Function implementing the blueBlinkTask thread.
-* @param argument: Not used
-* @retval None
-*/
-/* USER CODE END Header_StartBlueBlinkTask */
-__weak void StartBlueBlinkTask(void *argument)
+static void LSM6DSOX_RunConnectivityDiagnostics(void)
 {
-  /* USER CODE BEGIN blueBlinkTask */
-  for(;;)
-  {
-    osDelay(1);
-  }
-  /* USER CODE END blueBlinkTask */
-}
+  printf("\r\n[LSM6DSOX DIAG] ===== begin =====\r\n");
+  printf("[LSM6DSOX DIAG] Pins: CS=PC4 SCK=PA5 MISO=PA6 MOSI=PA7\r\n");
 
-/* USER CODE BEGIN Header_StartGreenBlinkTask */
-/**
-* @brief Function implementing the greenBlinkTask thread.
-* @param argument: Not used
-* @retval None
-*/
-/* USER CODE END Header_StartGreenBlinkTask */
-__weak void StartGreenBlinkTask(void *argument)
-{
-  /* USER CODE BEGIN greenBlinkTask */
-  for(;;)
-  {
-    osDelay(1);
-  }
-  /* USER CODE END greenBlinkTask */
-}
+  LSM6DSOX_DiagPrintHwSpiSweep();
+  LSM6DSOX_DiagRunBitBangRead(GPIO_NOPULL);
+  LSM6DSOX_DiagRunBitBangRead(GPIO_PULLDOWN);
 
-/* ============================================================================
- *  LSM6DSOX sampling thread
- * ============================================================================
- *  SPI1 dedicated bus (PA5/PA6/PA7 + PA4 CS) - no mutex needed.
- *  Waits for g_sampling_enable (set by defaultTask via PA12 key).
- *  Sample interval: 500 ms.
- */
+  printf("[LSM6DSOX DIAG] Hint: pull-up->FF and pull-down->00 usually means MISO is floating.\r\n");
+  printf("[LSM6DSOX DIAG] ===== end =====\r\n\r\n");
+}
+#endif
+
 void StartLsm6dsoxTask(void *argument)
 {
   LSM6DSOX_AllData_t all_data;
-  uint32_t           sample_tick_count = 0U;
 
   (void)argument;
 
-  /* Sensor init */
+#if APP_SENSOR_TEST_TARGET == APP_SENSOR_TEST_LSM6DSOX
+  printf("[LSM6DSOX TEST] start connectivity diagnostics...\r\n");
+  LSM6DSOX_RunConnectivityDiagnostics();
+
+  while (LSM6DSOX_Init() != HAL_OK)
+  {
+    printf("[LSM6DSOX TEST] init failed, retry in 2s\r\n");
+    osDelay(2000U);
+    LSM6DSOX_RunConnectivityDiagnostics();
+  }
+
+  printf("[LSM6DSOX TEST] started, print every %lu ms\r\n", (unsigned long)SAMPLE_PERIOD_MS);
+
+  for (;;)
+  {
+    uint8_t status_reg = 0U;
+
+    if (LSM6DSOX_ReadStatus(&status_reg) != HAL_OK)
+    {
+      printf("[LSM6DSOX TEST] read STATUS failed\r\n");
+    }
+    else if (LSM6DSOX_ReadAllData(&all_data) != HAL_OK)
+    {
+      printf("[LSM6DSOX TEST] read data failed (STATUS=0x%02X)\r\n", status_reg);
+    }
+    else
+    {
+      printf("[LSM6DSOX TEST] STATUS=0x%02X | ACC(mg) X:%7.1f Y:%7.1f Z:%7.1f | "
+             "GYRO(mdps) X:%8.1f Y:%8.1f Z:%8.1f | TEMP:%.1fC\r\n",
+             status_reg,
+             all_data.acc.x, all_data.acc.y, all_data.acc.z,
+             all_data.gyro.x, all_data.gyro.y, all_data.gyro.z,
+             all_data.temp_C);
+    }
+
+    osDelay(SAMPLE_PERIOD_MS);
+  }
+#else
   if (LSM6DSOX_Init() != HAL_OK)
   {
-    /* Driver already printed the error */
     osThreadTerminate(NULL);
     return;
   }
 
-  /* Signal init complete */
-  taskENTER_CRITICAL();
-  g_sensor_ready_mask |= SENSOR_MASK_LSM6DSOX;
-  taskEXIT_CRITICAL();
-
-  /* ====================== Main loop (10ms period) ====================== */
   for (;;)
   {
-    if (g_sampling_enable)
-    {
-      sample_tick_count++;
+    uint8_t status_reg = 0U;
 
-      if (sample_tick_count >= SAMPLE_INTERVAL_TICKS)
-      {
-        sample_tick_count = 0U;
-        uint8_t status_reg = 0U;
-
-        if (LSM6DSOX_ReadStatus(&status_reg) == HAL_OK &&
-            (status_reg & LSM6DSOX_STATUS_XLDA))
-        {
-          if (LSM6DSOX_ReadAllData(&all_data) == HAL_OK)
-          {
-            printf("LSM6DSOX: 加速度(mg) X:%7.1f Y:%7.1f Z:%7.1f | "
-                   "陀螺仪(mdps) X:%8.1f Y:%8.1f Z:%8.1f | 温度:%.1fC\r\n",
-                   all_data.acc.x,  all_data.acc.y,  all_data.acc.z,
-                   all_data.gyro.x, all_data.gyro.y, all_data.gyro.z,
-                   all_data.temp_C);
-          }
-        }
-      }
-    }
-    else
+    if (LSM6DSOX_ReadStatus(&status_reg) == HAL_OK &&
+        (status_reg & LSM6DSOX_STATUS_XLDA) != 0U &&
+        LSM6DSOX_ReadAllData(&all_data) == HAL_OK)
     {
-      sample_tick_count = 0U;
+      printf("LSM6DSOX: ACC(mg) X:%7.1f Y:%7.1f Z:%7.1f | "
+             "GYRO(mdps) X:%8.1f Y:%8.1f Z:%8.1f | TEMP:%.1fC\r\n",
+             all_data.acc.x, all_data.acc.y, all_data.acc.z,
+             all_data.gyro.x, all_data.gyro.y, all_data.gyro.z,
+             all_data.temp_C);
     }
 
-    osDelay(KEY_POLL_PERIOD_MS);
+    osDelay(SAMPLE_PERIOD_MS);
   }
+#endif
 }
 
-/* ============================================================================
- *  H3LIS100DL sampling thread
- * ============================================================================
- *  SPI2 shared bus (PB13/PB14/PB15 + PB12 CS), protected by spi2_mutex.
- *  Waits for g_sampling_enable (set by defaultTask via PA12 key).
- *  Sample interval: 500 ms.
- */
 void StartH3lis100dlTask(void *argument)
 {
   H3LIS100DL_Data_t data;
-  uint32_t          sample_tick_count = 0U;
 
   (void)argument;
 
-  /* Sensor init - hold mutex for the whole init sequence */
   osMutexAcquire(spi2_mutex, osWaitForever);
-  int init_ret = H3LIS100DL_Init();
-  osMutexRelease(spi2_mutex);
-
-  if (init_ret != 0)
+  if (H3LIS100DL_Init() != 0)
   {
-    /* Driver already printed the error */
+    osMutexRelease(spi2_mutex);
     osThreadTerminate(NULL);
     return;
   }
+  osMutexRelease(spi2_mutex);
 
-  /* Signal init complete */
-  taskENTER_CRITICAL();
-  g_sensor_ready_mask |= SENSOR_MASK_H3LIS100DL;
-  taskEXIT_CRITICAL();
+#if APP_SENSOR_TEST_TARGET == APP_SENSOR_TEST_H3LIS100DL
+  printf("[H3LIS100DL TEST] started, print every %lu ms\r\n", (unsigned long)SAMPLE_PERIOD_MS);
+#endif
 
-  /* ====================== Main loop (10ms period) ====================== */
   for (;;)
   {
-    if (g_sampling_enable)
+    int ret;
+
+    osMutexAcquire(spi2_mutex, osWaitForever);
+    ret = H3LIS100DL_ReadAccXYZ(&data);
+    osMutexRelease(spi2_mutex);
+
+    if (ret == 0)
     {
-      sample_tick_count++;
-
-      if (sample_tick_count >= SAMPLE_INTERVAL_TICKS)
-      {
-        sample_tick_count = 0U;
-
-        osMutexAcquire(spi2_mutex, osWaitForever);
-        int ret = H3LIS100DL_ReadAccXYZ(&data);
-        osMutexRelease(spi2_mutex);
-
-        if (ret == 0)
-        {
-          printf("H3LIS100DL: raw[%4d,%4d,%4d]  acc(mg)[%7.1f,%7.1f,%7.1f]\r\n",
-                 data.raw[0], data.raw[1], data.raw[2],
-                 data.acc_mg[0], data.acc_mg[1], data.acc_mg[2]);
-        }
-      }
+      printf("H3LIS100DL: raw[%4d,%4d,%4d]  acc(mg)[%7.1f,%7.1f,%7.1f]\r\n",
+             data.raw[0], data.raw[1], data.raw[2],
+             data.acc_mg[0], data.acc_mg[1], data.acc_mg[2]);
     }
-    else
+    else if (ret != -2)
     {
-      sample_tick_count = 0U;
+#if APP_SENSOR_TEST_TARGET == APP_SENSOR_TEST_H3LIS100DL
+      printf("[H3LIS100DL TEST] read failed (ret=%d)\r\n", ret);
+#endif
     }
 
-    osDelay(KEY_POLL_PERIOD_MS);
+    osDelay(SAMPLE_PERIOD_MS);
   }
 }
 
-/* ============================================================================
- *  QMA6100P sampling thread
- * ============================================================================
- *  SPI2 shared bus (PB13/PB14/PB15 + PB0 CS), protected by spi2_mutex.
- *  Waits for g_sampling_enable (set by defaultTask via PA12 key).
- *  Sample interval: 500 ms.
- */
 void StartQma6100pTask(void *argument)
 {
   QMA6100P_Data_t data;
-  uint32_t        sample_tick_count = 0U;
 
   (void)argument;
 
-  /* Sensor init - hold mutex for the whole init sequence */
   osMutexAcquire(spi2_mutex, osWaitForever);
-  HAL_StatusTypeDef init_ret = QMA6100P_Init();
-  osMutexRelease(spi2_mutex);
-
-  if (init_ret != HAL_OK)
+  if (QMA6100P_Init() != HAL_OK)
   {
-    /* Driver already printed the error */
+    osMutexRelease(spi2_mutex);
     osThreadTerminate(NULL);
     return;
   }
+  osMutexRelease(spi2_mutex);
 
-  /* Signal init complete */
-  taskENTER_CRITICAL();
-  g_sensor_ready_mask |= SENSOR_MASK_QMA6100P;
-  taskEXIT_CRITICAL();
+#if APP_SENSOR_TEST_TARGET == APP_SENSOR_TEST_QMA6100P
+  printf("[QMA6100P TEST] started, print every %lu ms\r\n", (unsigned long)SAMPLE_PERIOD_MS);
+#endif
 
-  /* ====================== Main loop (10ms period) ====================== */
   for (;;)
   {
-    if (g_sampling_enable)
+    HAL_StatusTypeDef ret;
+
+    osMutexAcquire(spi2_mutex, osWaitForever);
+    ret = QMA6100P_ReadAccXYZ(&data);
+    osMutexRelease(spi2_mutex);
+
+    if (ret == HAL_OK)
     {
-      sample_tick_count++;
-
-      if (sample_tick_count >= SAMPLE_INTERVAL_TICKS)
-      {
-        sample_tick_count = 0U;
-
-        osMutexAcquire(spi2_mutex, osWaitForever);
-        HAL_StatusTypeDef ret = QMA6100P_ReadAccXYZ(&data);
-        osMutexRelease(spi2_mutex);
-
-        if (ret == HAL_OK)
-        {
-          printf("QMA6100P:  加速度(mg) X:%7.1f Y:%7.1f Z:%7.1f\r\n",
-                 data.acc_mg[0], data.acc_mg[1], data.acc_mg[2]);
-        }
-      }
+      printf("QMA6100P: acc(mg) X:%7.1f Y:%7.1f Z:%7.1f\r\n",
+             data.acc_mg[0], data.acc_mg[1], data.acc_mg[2]);
     }
     else
     {
-      sample_tick_count = 0U;
+#if APP_SENSOR_TEST_TARGET == APP_SENSOR_TEST_QMA6100P
+      printf("[QMA6100P TEST] read failed\r\n");
+#endif
     }
 
-    osDelay(KEY_POLL_PERIOD_MS);
+    osDelay(SAMPLE_PERIOD_MS);
   }
 }
 

@@ -4,19 +4,19 @@
   * @brief   SPI bus and chip-select pin definitions for sensors
   *
   *   SPI1 (LSM6DSOX dedicated):
-  *     SCK  = PA5 (AF5)   MISO = PA6 (AF5)   MOSI = PA7 (AF5)
-  *     CS   = PA4 (GPIO push-pull, active low)
+ *     SCK  = PA5 (AF5)   MISO = PA6 (AF5)   MOSI = PA7 (AF5)
+ *     CS   = PC4 (GPIO push-pull, active low)
   *
-  *   SPI2 (H3LIS100DL + QMA6100P shared bus):
-  *     SCK  = PB13 (AF5)  MISO = PB14 (AF5)  MOSI = PB15 (AF5)
-  *     CS_H3  = PB12 (GPIO, active low)
-  *     CS_QMA = PB0 (GPIO, active low)
+ *   SPI2 (H3LIS100DL + QMA6100P shared bus):
+ *     SCK  = PB10 (AF5)  MISO = PC2 (AF5)  MOSI = PC1 (AF5)
+ *     CS_H3  = PC5 (GPIO, active low)
+ *     CS_QMA = PA4 (GPIO, active low)
   *
   *   All buses: Master, Full-Duplex, 8-bit, MSB-first, Mode3 (CPOL=1,CPHA=1)
   *
   *   LSM6DSOX DIL24 wiring:
-  *     VDD(Pin1)->3.3V  VDD_IO(Pin2)->3.3V  GND(Pin5)->GND
-  *     CS(Pin14)->PA4   SCL/SPC(Pin9)->PA5   SDA/SDI(Pin11)->PA7
+ *     VDD(Pin1)->3.3V  VDD_IO(Pin2)->3.3V  GND(Pin5)->GND
+ *     CS(Pin14)->PC4   SCL/SPC(Pin9)->PA5   SDA/SDI(Pin11)->PA7
   *     SDO/SA0(Pin12)->PA6   INT1(Pin8)->PE0(opt)  INT2(Pin7)->PE1(opt)
   ******************************************************************************
   */
@@ -41,34 +41,34 @@ extern "C" {
 #define LSM_SPI_MOSI_GPIO_PORT   GPIOA
 #define LSM_SPI_MOSI_AF          GPIO_AF5_SPI1
 #define LSM_SPI_CS_PIN           GPIO_PIN_4
-#define LSM_SPI_CS_GPIO_PORT     GPIOA
+#define LSM_SPI_CS_GPIO_PORT     GPIOC
 
 #define LSM_SPI_CS_LOW()         HAL_GPIO_WritePin(LSM_SPI_CS_GPIO_PORT, LSM_SPI_CS_PIN, GPIO_PIN_RESET)
 #define LSM_SPI_CS_HIGH()        HAL_GPIO_WritePin(LSM_SPI_CS_GPIO_PORT, LSM_SPI_CS_PIN, GPIO_PIN_SET)
 
 /* ============================== SPI2 (H3LIS+QMA) ======================== */
 /* SPI2 bus pins:
- *   SCK  = PB13 (AF5, SPI2_SCK)
- *   MISO = PB14 (AF5, SPI2_MISO)
- *   MOSI = PB15 (AF5, SPI2_MOSI)
- *   CS_H3  = PB12 (GPIO push-pull, active low)
- *   CS_QMA = PB0 (GPIO push-pull, active low)
+ *   SCK  = PB10 (AF5, SPI2_SCK)
+ *   MISO = PC2  (AF5, SPI2_MISO)
+ *   MOSI = PC1  (AF5, SPI2_MOSI)
+ *   CS_H3  = PC5 (GPIO push-pull, active low)
+ *   CS_QMA = PA4 (GPIO push-pull, active low)
  */
 #define SENSOR_SPI2_INSTANCE     SPI2
-#define SENSOR_SPI2_SCK_PIN      GPIO_PIN_13
+#define SENSOR_SPI2_SCK_PIN      GPIO_PIN_10
 #define SENSOR_SPI2_SCK_PORT     GPIOB
 #define SENSOR_SPI2_SCK_AF       GPIO_AF5_SPI2
-#define SENSOR_SPI2_MISO_PIN     GPIO_PIN_14
-#define SENSOR_SPI2_MISO_PORT    GPIOB
+#define SENSOR_SPI2_MISO_PIN     GPIO_PIN_2
+#define SENSOR_SPI2_MISO_PORT    GPIOC
 #define SENSOR_SPI2_MISO_AF      GPIO_AF5_SPI2
-#define SENSOR_SPI2_MOSI_PIN     GPIO_PIN_15
-#define SENSOR_SPI2_MOSI_PORT    GPIOB
-#define SENSOR_SPI2_MOSI_AF      GPIO_AF5_SPI2
+#define SENSOR_SPI2_MOSI_PIN     GPIO_PIN_1
+#define SENSOR_SPI2_MOSI_PORT    GPIOC
+#define SENSOR_SPI2_MOSI_AF      GPIO_AF3_SPI2
 
-#define H3_SPI2_CS_PIN           GPIO_PIN_12
-#define H3_SPI2_CS_GPIO_PORT     GPIOB
-#define QMA_SPI2_CS_PIN          GPIO_PIN_0
-#define QMA_SPI2_CS_GPIO_PORT    GPIOB
+#define H3_SPI2_CS_PIN           GPIO_PIN_5
+#define H3_SPI2_CS_GPIO_PORT     GPIOC
+#define QMA_SPI2_CS_PIN          GPIO_PIN_4
+#define QMA_SPI2_CS_GPIO_PORT    GPIOA
 
 #define H3_SPI2_CS_LOW()         HAL_GPIO_WritePin(H3_SPI2_CS_GPIO_PORT, H3_SPI2_CS_PIN, GPIO_PIN_RESET)
 #define H3_SPI2_CS_HIGH()        HAL_GPIO_WritePin(H3_SPI2_CS_GPIO_PORT, H3_SPI2_CS_PIN, GPIO_PIN_SET)
@@ -90,4 +90,3 @@ void MX_SPI2_Init(void);
 #endif
 
 #endif /* __BSP_SPI_H__ */
-

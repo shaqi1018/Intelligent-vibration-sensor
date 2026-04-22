@@ -4,10 +4,10 @@
   * @brief   H3LIS100DL 100g high-g accelerometer driver (SPI2)
   *
   *   Wiring (STM32U575RIT6 LQFP64):
-  *     SCK  = PB13 (AF5, SPI2_SCK)
-  *     MISO = PB14 (AF5, SPI2_MISO)  SDO/SA0 pin on sensor
-  *     MOSI = PB15 (AF5, SPI2_MOSI)  SDA/SDI pin on sensor
-  *     CS   = PB12 (GPIO push-pull, active low)
+ *     SCK  = PB10 (AF5, SPI2_SCK)
+ *     MISO = PC2  (AF5, SPI2_MISO)  SDO/SA0 pin on sensor
+ *     MOSI = PC1  (AF5, SPI2_MOSI)  SDA/SDI pin on sensor
+ *     CS   = PC5 (GPIO push-pull, active low)
   *     VDD  = 3.3V    GND = GND
   *
   *   H3LIS100DL SPI command byte format (per datasheet):

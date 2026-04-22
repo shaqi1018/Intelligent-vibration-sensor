@@ -9,7 +9,7 @@
   *
   *   DIL24 wiring to STM32U575:
   *     VDD(Pin1)->3.3V   VDD_IO(Pin2)->3.3V   GND(Pin5)->GND
-  *     CS(Pin14)->PA4    SCL/SPC(Pin9)->PA5    SDA/SDI(Pin11)->PA7
+ *     CS(Pin14)->PC4    SCL/SPC(Pin9)->PA5    SDA/SDI(Pin11)->PA7
   *     SDO/SA0(Pin12)->PA6   INT1(Pin8)->PE0   INT2(Pin7)->PE1
   ******************************************************************************
   */
@@ -150,4 +150,3 @@ HAL_StatusTypeDef LSM6DSOX_ReadAllData(LSM6DSOX_AllData_t *all);
 #endif
 
 #endif /* __LSM6DSOX_H__ */
-

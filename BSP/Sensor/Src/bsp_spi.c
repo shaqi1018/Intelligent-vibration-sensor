@@ -3,12 +3,12 @@
   * @file    bsp_spi.c
   * @brief   SPI bus initialization for sensor drivers.
   *
-  *   SPI1 (LSM6DSOX dedicated):
-  *     PA5=SCK(AF5), PA6=MISO(AF5), PA7=MOSI(AF5), PA4=CS
+ *   SPI1 (LSM6DSOX dedicated):
+ *     PA5=SCK(AF5), PA6=MISO(AF5), PA7=MOSI(AF5), PC4=CS
   *
-  *   SPI2 (H3LIS100DL + QMA6100P shared bus):
-  *     PB13=SCK(AF5), PB14=MISO(AF5), PB15=MOSI(AF5)
-  *     PB12=H3 CS, PB0=QMA CS
+ *   SPI2 (H3LIS100DL + QMA6100P shared bus):
+ *     PB10=SCK(AF5), PC2=MISO(AF5), PC1=MOSI(AF5)
+ *     PC5=H3 CS, PA4=QMA CS
   *
   *   Both buses: Mode3 (CPOL=1, CPHA=1), 8-bit, MSB first
   ******************************************************************************
@@ -24,6 +24,7 @@ void MX_SPI1_Init(void)
   GPIO_InitTypeDef GPIO_InitStruct = {0};
 
   __HAL_RCC_GPIOA_CLK_ENABLE();
+  __HAL_RCC_GPIOC_CLK_ENABLE();
   __HAL_RCC_SPI1_CLK_ENABLE();
 
   GPIO_InitStruct.Pin = LSM_SPI_CS_PIN;
@@ -73,14 +74,20 @@ void MX_SPI2_Init(void)
 {
   GPIO_InitTypeDef GPIO_InitStruct = {0};
 
+  __HAL_RCC_GPIOA_CLK_ENABLE();
   __HAL_RCC_GPIOB_CLK_ENABLE();
+  __HAL_RCC_GPIOC_CLK_ENABLE();
   __HAL_RCC_SPI2_CLK_ENABLE();
 
-  GPIO_InitStruct.Pin = H3_SPI2_CS_PIN | QMA_SPI2_CS_PIN;
+  GPIO_InitStruct.Pin = H3_SPI2_CS_PIN;
   GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_HIGH;
-  HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
+  HAL_GPIO_Init(H3_SPI2_CS_GPIO_PORT, &GPIO_InitStruct);
+
+  GPIO_InitStruct.Pin = QMA_SPI2_CS_PIN;
+  HAL_GPIO_Init(QMA_SPI2_CS_GPIO_PORT, &GPIO_InitStruct);
+
   H3_SPI2_CS_HIGH();
   QMA_SPI2_CS_HIGH();
 
@@ -88,13 +95,17 @@ void MX_SPI2_Init(void)
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_HIGH;
   GPIO_InitStruct.Alternate = SENSOR_SPI2_SCK_AF;
-  GPIO_InitStruct.Pin = SENSOR_SPI2_SCK_PIN | SENSOR_SPI2_MOSI_PIN;
-  HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
+  GPIO_InitStruct.Pin = SENSOR_SPI2_SCK_PIN;
+  HAL_GPIO_Init(SENSOR_SPI2_SCK_PORT, &GPIO_InitStruct);
+
+  GPIO_InitStruct.Pin = SENSOR_SPI2_MOSI_PIN;
+  GPIO_InitStruct.Alternate = SENSOR_SPI2_MOSI_AF;
+  HAL_GPIO_Init(SENSOR_SPI2_MOSI_PORT, &GPIO_InitStruct);
 
   GPIO_InitStruct.Pull = GPIO_PULLUP;
   GPIO_InitStruct.Alternate = SENSOR_SPI2_MISO_AF;
   GPIO_InitStruct.Pin = SENSOR_SPI2_MISO_PIN;
-  HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
+  HAL_GPIO_Init(SENSOR_SPI2_MISO_PORT, &GPIO_InitStruct);
 
   hspi2.Instance = SENSOR_SPI2_INSTANCE;
   hspi2.Init.Mode = SPI_MODE_MASTER;
@@ -103,7 +114,7 @@ void MX_SPI2_Init(void)
   hspi2.Init.CLKPolarity = SPI_POLARITY_HIGH;
   hspi2.Init.CLKPhase = SPI_PHASE_2EDGE;
   hspi2.Init.NSS = SPI_NSS_SOFT;
-  hspi2.Init.BaudRatePrescaler = SPI_BAUDRATEPRESCALER_16;
+  hspi2.Init.BaudRatePrescaler = SPI_BAUDRATEPRESCALER_128; /* /128: 8x slower than before */
   hspi2.Init.FirstBit = SPI_FIRSTBIT_MSB;
   hspi2.Init.TIMode = SPI_TIMODE_DISABLE;
   hspi2.Init.CRCCalculation = SPI_CRCCALCULATION_DISABLE;
