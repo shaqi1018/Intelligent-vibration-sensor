@@ -26,6 +26,8 @@
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 #include <stdio.h>
+#include "fatfs_sd.h"
+#include "sensor_snapshot.h"
 #include "lsm6dsox.h"
 #include "h3lis100dl.h"
 #include "qma6100p.h"
@@ -38,7 +40,9 @@
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
-#define SAMPLE_PERIOD_MS 500U
+#define SAMPLE_PERIOD_MS         APP_SENSOR_SAMPLE_PERIOD_MS
+#define LOGGER_RETRY_DELAY_MS    1000U
+#define LOGGER_SYNC_EVERY_ROWS   5U
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -56,8 +60,14 @@
  */
 
 static osMutexId_t spi2_mutex;
+static osMutexId_t snapshot_mutex;
+static AppSensorSnapshot_t g_sensor_snapshot;
 static const osMutexAttr_t spi2_mutex_attr = {
   .name      = "spi2Mutex",
+  .attr_bits = osMutexPrioInherit,
+};
+static const osMutexAttr_t snapshot_mutex_attr = {
+  .name      = "snapshotMutex",
   .attr_bits = osMutexPrioInherit,
 };
 
@@ -85,6 +95,13 @@ const osThreadAttr_t h3lis100dlTask_attributes = {
   .stack_size = 256 * 4
 };
 
+osThreadId_t loggerTaskHandle;
+const osThreadAttr_t loggerTask_attributes = {
+  .name = "loggerTask",
+  .priority = (osPriority_t)osPriorityNormal,
+  .stack_size = 1024 * 4
+};
+
 /* Private function prototypes -----------------------------------------------*/
 /* USER CODE BEGIN FunctionPrototypes */
 
@@ -93,6 +110,7 @@ const osThreadAttr_t h3lis100dlTask_attributes = {
 void StartLsm6dsoxTask(void *argument);
 void StartQma6100pTask(void *argument);
 void StartH3lis100dlTask(void *argument);
+void StartLoggerTask(void *argument);
 
 void MX_FREERTOS_Init(void);
 
@@ -130,6 +148,7 @@ void MX_FREERTOS_Init(void)
   /* USER CODE END Init */
 
   /* USER CODE BEGIN RTOS_MUTEX */
+  snapshot_mutex = osMutexNew(&snapshot_mutex_attr);
 #if (APP_SENSOR_TEST_TARGET == APP_SENSOR_TEST_NONE) || \
     (APP_SENSOR_TEST_TARGET == APP_SENSOR_TEST_H3LIS100DL) || \
     (APP_SENSOR_TEST_TARGET == APP_SENSOR_TEST_QMA6100P)
@@ -157,6 +176,7 @@ void MX_FREERTOS_Init(void)
   lsm6dsoxTaskHandle = osThreadNew(StartLsm6dsoxTask, NULL, &lsm6dsoxTask_attributes);
   h3lis100dlTaskHandle = osThreadNew(StartH3lis100dlTask, NULL, &h3lis100dlTask_attributes);
   qma6100pTaskHandle = osThreadNew(StartQma6100pTask, NULL, &qma6100pTask_attributes);
+  loggerTaskHandle = osThreadNew(StartLoggerTask, NULL, &loggerTask_attributes);
 #endif
   /* USER CODE END RTOS_THREADS */
 
@@ -166,6 +186,60 @@ void MX_FREERTOS_Init(void)
 
 /* Private application code --------------------------------------------------*/
 /* USER CODE BEGIN Application */
+
+static void AppSnapshotPublishLsm6dsox(const LSM6DSOX_AllData_t *data)
+{
+  if ((snapshot_mutex == NULL) || (data == NULL))
+  {
+    return;
+  }
+
+  osMutexAcquire(snapshot_mutex, osWaitForever);
+  g_sensor_snapshot.lsm6dsox.data = *data;
+  g_sensor_snapshot.lsm6dsox.valid = 1U;
+  g_sensor_snapshot.lsm6dsox.last_update_ms = osKernelGetTickCount();
+  osMutexRelease(snapshot_mutex);
+}
+
+static void AppSnapshotPublishH3lis100dl(const H3LIS100DL_Data_t *data)
+{
+  if ((snapshot_mutex == NULL) || (data == NULL))
+  {
+    return;
+  }
+
+  osMutexAcquire(snapshot_mutex, osWaitForever);
+  g_sensor_snapshot.h3lis100dl.data = *data;
+  g_sensor_snapshot.h3lis100dl.valid = 1U;
+  g_sensor_snapshot.h3lis100dl.last_update_ms = osKernelGetTickCount();
+  osMutexRelease(snapshot_mutex);
+}
+
+static void AppSnapshotPublishQma6100p(const QMA6100P_Data_t *data)
+{
+  if ((snapshot_mutex == NULL) || (data == NULL))
+  {
+    return;
+  }
+
+  osMutexAcquire(snapshot_mutex, osWaitForever);
+  g_sensor_snapshot.qma6100p.data = *data;
+  g_sensor_snapshot.qma6100p.valid = 1U;
+  g_sensor_snapshot.qma6100p.last_update_ms = osKernelGetTickCount();
+  osMutexRelease(snapshot_mutex);
+}
+
+static void AppSnapshotCopy(AppSensorSnapshot_t *snapshot)
+{
+  if ((snapshot_mutex == NULL) || (snapshot == NULL))
+  {
+    return;
+  }
+
+  osMutexAcquire(snapshot_mutex, osWaitForever);
+  *snapshot = g_sensor_snapshot;
+  osMutexRelease(snapshot_mutex);
+}
 
 #if APP_SENSOR_TEST_TARGET == APP_SENSOR_TEST_LSM6DSOX
 static const char *LSM6DSOX_DiagPullName(uint32_t pull)
@@ -396,6 +470,7 @@ void StartLsm6dsoxTask(void *argument)
 #else
   if (LSM6DSOX_Init() != HAL_OK)
   {
+    printf("[LSM6DSOX] init failed, task exit\r\n");
     osThreadTerminate(NULL);
     return;
   }
@@ -408,11 +483,7 @@ void StartLsm6dsoxTask(void *argument)
         (status_reg & LSM6DSOX_STATUS_XLDA) != 0U &&
         LSM6DSOX_ReadAllData(&all_data) == HAL_OK)
     {
-      printf("LSM6DSOX: ACC(mg) X:%7.1f Y:%7.1f Z:%7.1f | "
-             "GYRO(mdps) X:%8.1f Y:%8.1f Z:%8.1f | TEMP:%.1fC\r\n",
-             all_data.acc.x, all_data.acc.y, all_data.acc.z,
-             all_data.gyro.x, all_data.gyro.y, all_data.gyro.z,
-             all_data.temp_C);
+      AppSnapshotPublishLsm6dsox(&all_data);
     }
 
     osDelay(SAMPLE_PERIOD_MS);
@@ -430,6 +501,7 @@ void StartH3lis100dlTask(void *argument)
   if (H3LIS100DL_Init() != 0)
   {
     osMutexRelease(spi2_mutex);
+    printf("[H3LIS100DL] init failed, task exit\r\n");
     osThreadTerminate(NULL);
     return;
   }
@@ -449,9 +521,13 @@ void StartH3lis100dlTask(void *argument)
 
     if (ret == 0)
     {
+#if APP_SENSOR_TEST_TARGET == APP_SENSOR_TEST_H3LIS100DL
       printf("H3LIS100DL: raw[%4d,%4d,%4d]  acc(mg)[%7.1f,%7.1f,%7.1f]\r\n",
              data.raw[0], data.raw[1], data.raw[2],
              data.acc_mg[0], data.acc_mg[1], data.acc_mg[2]);
+#else
+      AppSnapshotPublishH3lis100dl(&data);
+#endif
     }
     else if (ret != -2)
     {
@@ -474,6 +550,7 @@ void StartQma6100pTask(void *argument)
   if (QMA6100P_Init() != HAL_OK)
   {
     osMutexRelease(spi2_mutex);
+    printf("[QMA6100P] init failed, task exit\r\n");
     osThreadTerminate(NULL);
     return;
   }
@@ -493,8 +570,12 @@ void StartQma6100pTask(void *argument)
 
     if (ret == HAL_OK)
     {
+#if APP_SENSOR_TEST_TARGET == APP_SENSOR_TEST_QMA6100P
       printf("QMA6100P: acc(mg) X:%7.1f Y:%7.1f Z:%7.1f\r\n",
              data.acc_mg[0], data.acc_mg[1], data.acc_mg[2]);
+#else
+      AppSnapshotPublishQma6100p(&data);
+#endif
     }
     else
     {
@@ -504,6 +585,61 @@ void StartQma6100pTask(void *argument)
     }
 
     osDelay(SAMPLE_PERIOD_MS);
+  }
+}
+
+void StartLoggerTask(void *argument)
+{
+  AppSensorSnapshot_t snapshot;
+  FRESULT result;
+  uint32_t row_seq = 0U;
+
+  (void)argument;
+
+  printf("[Logger] task started, period=%lu ms\r\n", (unsigned long)SAMPLE_PERIOD_MS);
+
+  for (;;)
+  {
+    result = FatFs_SD_LoggerStart();
+    if (result != FR_OK)
+    {
+      printf("[Logger] start failed: %s (%d)\r\n", FatFs_SD_ResultToString(result), (int)result);
+      FatFs_SD_LoggerStop();
+      osDelay(LOGGER_RETRY_DELAY_MS);
+      continue;
+    }
+
+    for (;;)
+    {
+      uint32_t tick_ms;
+
+      AppSnapshotCopy(&snapshot);
+      tick_ms = osKernelGetTickCount();
+      row_seq++;
+
+      result = FatFs_SD_LoggerAppendRow(&snapshot, tick_ms, row_seq);
+      if (result != FR_OK)
+      {
+        printf("[Logger] append failed: %s (%d)\r\n", FatFs_SD_ResultToString(result), (int)result);
+        FatFs_SD_LoggerStop();
+        osDelay(LOGGER_RETRY_DELAY_MS);
+        break;
+      }
+
+      if ((row_seq % LOGGER_SYNC_EVERY_ROWS) == 0U)
+      {
+        result = FatFs_SD_LoggerSync();
+        if (result != FR_OK)
+        {
+          printf("[Logger] sync failed: %s (%d)\r\n", FatFs_SD_ResultToString(result), (int)result);
+          FatFs_SD_LoggerStop();
+          osDelay(LOGGER_RETRY_DELAY_MS);
+          break;
+        }
+      }
+
+      osDelay(SAMPLE_PERIOD_MS);
+    }
   }
 }
 

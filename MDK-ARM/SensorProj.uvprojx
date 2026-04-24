@@ -339,7 +339,7 @@
               <MiscControls></MiscControls>
               <Define>USE_HAL_DRIVER,STM32U575xx</Define>
               <Undefine></Undefine>
-              <IncludePath>../Core/Inc;../Drivers/STM32U5xx_HAL_Driver/Inc;../Drivers/STM32U5xx_HAL_Driver/Inc/Legacy;../Drivers/CMSIS/Device/ST/STM32U5xx/Include;../Drivers/CMSIS/Include;../Middlewares/Third_Party/FreeRTOS/Source/include/;../Middlewares/Third_Party/FreeRTOS/Source/portable/GCC/ARM_CM33_NTZ/non_secure/;../Middlewares/Third_Party/FreeRTOS/Source/CMSIS_RTOS_V2/;../Middlewares/Third_Party/CMSIS/RTOS2/Include/;..\HQYJ-BSP\Inc;..\BSP\Sensor\Inc</IncludePath>
+              <IncludePath>../Core/Inc;../Drivers/STM32U5xx_HAL_Driver/Inc;../Drivers/STM32U5xx_HAL_Driver/Inc/Legacy;../Drivers/CMSIS/Device/ST/STM32U5xx/Include;../Drivers/CMSIS/Include;../Middlewares/Third_Party/FreeRTOS/Source/include/;../Middlewares/Third_Party/FreeRTOS/Source/portable/GCC/ARM_CM33_NTZ/non_secure/;../Middlewares/Third_Party/FreeRTOS/Source/CMSIS_RTOS_V2/;../Middlewares/Third_Party/CMSIS/RTOS2/Include/;../Middlewares/Third_Party/FatFs/src;..\HQYJ-BSP\Inc;..\BSP\Sensor\Inc</IncludePath>
             </VariousControls>
           </Cads>
           <Aads>
@@ -447,6 +447,31 @@
               <FileName>sdmmc.h</FileName>
               <FileType>5</FileType>
               <FilePath>../Core/Inc/sdmmc.h</FilePath>
+            </File>
+            <File>
+              <FileName>sd_diskio.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>../Core/Src/sd_diskio.c</FilePath>
+            </File>
+            <File>
+              <FileName>sd_diskio.h</FileName>
+              <FileType>5</FileType>
+              <FilePath>../Core/Inc/sd_diskio.h</FilePath>
+            </File>
+            <File>
+              <FileName>fatfs_sd.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>../Core/Src/fatfs_sd.c</FilePath>
+            </File>
+            <File>
+              <FileName>fatfs_sd.h</FileName>
+              <FileType>5</FileType>
+              <FilePath>../Core/Inc/fatfs_sd.h</FilePath>
+            </File>
+            <File>
+              <FileName>sensor_snapshot.h</FileName>
+              <FileType>5</FileType>
+              <FilePath>../Core/Inc/sensor_snapshot.h</FilePath>
             </File>
           </Files>
         </Group>
@@ -722,6 +747,41 @@
               <FileName>h3lis100dl.c</FileName>
               <FileType>1</FileType>
               <FilePath>..\BSP\Sensor\Src\h3lis100dl.c</FilePath>
+            </File>
+          </Files>
+        </Group>
+        <Group>
+          <GroupName>Middlewares/FatFs</GroupName>
+          <Files>
+            <File>
+              <FileName>ff.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>../Middlewares/Third_Party/FatFs/src/ff.c</FilePath>
+            </File>
+            <File>
+              <FileName>ff.h</FileName>
+              <FileType>5</FileType>
+              <FilePath>../Middlewares/Third_Party/FatFs/src/ff.h</FilePath>
+            </File>
+            <File>
+              <FileName>diskio.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>../Middlewares/Third_Party/FatFs/src/diskio.c</FilePath>
+            </File>
+            <File>
+              <FileName>diskio.h</FileName>
+              <FileType>5</FileType>
+              <FilePath>../Middlewares/Third_Party/FatFs/src/diskio.h</FilePath>
+            </File>
+            <File>
+              <FileName>ffconf.h</FileName>
+              <FileType>5</FileType>
+              <FilePath>../Middlewares/Third_Party/FatFs/src/ffconf.h</FilePath>
+            </File>
+            <File>
+              <FileName>integer.h</FileName>
+              <FileType>5</FileType>
+              <FilePath>../Middlewares/Third_Party/FatFs/src/integer.h</FilePath>
             </File>
           </Files>
         </Group>

@@ -23,6 +23,7 @@
 #include "usart.h"
 #include "gpio.h"
 #include "sdmmc.h"
+#include "fatfs_sd.h"
 #include "usb_otg.h"
 
 /* Private includes ----------------------------------------------------------*/
@@ -110,6 +111,7 @@ int main(void)
   {
     MX_SDMMC1_SD_Init();
     printf("[初始化] SDMMC1 初始化完成 (检测到SD卡)\r\n");
+    FatFs_SD_RunPhaseBSmokeTest();
   }
   else
   {

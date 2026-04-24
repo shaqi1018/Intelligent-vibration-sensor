@@ -29,6 +29,20 @@ virtualFolder:
                 - path: ../Core/Src/stm32u5xx_hal_timebase_tim.c
                 - path: ../Core/Src/usart.c
               folders: []
+            - name: Storage
+              files:
+                - path: ../Core/Src/sdmmc.c
+                - path: ../Core/Inc/sdmmc.h
+                - path: ../Core/Src/sd_diskio.c
+                - path: ../Core/Inc/sd_diskio.h
+                - path: ../Core/Src/fatfs_sd.c
+                - path: ../Core/Inc/fatfs_sd.h
+              folders: []
+            - name: USB
+              files:
+                - path: ../Core/Src/usb_otg.c
+                - path: ../Core/Inc/usb_otg.h
+              folders: []
         - name: HQYJ-BSP
           files:
             - path: ../HQYJ-BSP/Src/user_app.c
@@ -60,6 +74,13 @@ virtualFolder:
             - path: ../Drivers/STM32U5xx_HAL_Driver/Src/stm32u5xx_hal_tim_ex.c
             - path: ../Drivers/STM32U5xx_HAL_Driver/Src/stm32u5xx_hal_uart.c
             - path: ../Drivers/STM32U5xx_HAL_Driver/Src/stm32u5xx_hal_uart_ex.c
+            - path: ../Drivers/STM32U5xx_HAL_Driver/Src/stm32u5xx_hal_sd.c
+            - path: ../Drivers/STM32U5xx_HAL_Driver/Src/stm32u5xx_hal_sd_ex.c
+            - path: ../Drivers/STM32U5xx_HAL_Driver/Src/stm32u5xx_ll_sdmmc.c
+            - path: ../Drivers/STM32U5xx_HAL_Driver/Src/stm32u5xx_ll_dlyb.c
+            - path: ../Drivers/STM32U5xx_HAL_Driver/Src/stm32u5xx_hal_pcd.c
+            - path: ../Drivers/STM32U5xx_HAL_Driver/Src/stm32u5xx_hal_pcd_ex.c
+            - path: ../Drivers/STM32U5xx_HAL_Driver/Src/stm32u5xx_ll_usb.c
           folders: []
         - name: CMSIS
           files:
@@ -100,6 +121,15 @@ virtualFolder:
                           files:
                             - path: ../Middlewares/Third_Party/FreeRTOS/Source/portable/MemMang/heap_4.c
                           folders: []
+        - name: FatFs
+          files:
+            - path: ../Middlewares/Third_Party/FatFs/src/ff.c
+            - path: ../Middlewares/Third_Party/FatFs/src/ff.h
+            - path: ../Middlewares/Third_Party/FatFs/src/diskio.c
+            - path: ../Middlewares/Third_Party/FatFs/src/diskio.h
+            - path: ../Middlewares/Third_Party/FatFs/src/ffconf.h
+            - path: ../Middlewares/Third_Party/FatFs/src/integer.h
+          folders: []
     - name: BSP
       files: []
       folders:
@@ -140,6 +170,8 @@ targets:
         - RTE/_01-1_stm32u575_freertos_blink
       libList: []
     excludeList: []
+    settings:
+      debugger: cortex-debug
     toolchain: AC6
     toolchainConfigMap:
       AC5:
@@ -299,12 +331,14 @@ targets:
         - ../Middlewares/Third_Party/FreeRTOS/Source/portable/GCC/ARM_CM33_NTZ/non_secure
         - ../Middlewares/Third_Party/FreeRTOS/Source/CMSIS_RTOS_V2
         - ../Middlewares/Third_Party/CMSIS/RTOS2/Include
+        - ../Middlewares/Third_Party/FatFs/src
         - ../HQYJ-BSP/Inc
         - ../BSP/Sensor/Inc
         - .cmsis/include
         - RTE/_SensorProj
       libList: []
     excludeList: []
+    settings: {}
     toolchain: AC6
     toolchainConfigMap:
       AC5:
