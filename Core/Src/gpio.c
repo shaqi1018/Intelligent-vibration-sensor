@@ -20,6 +20,7 @@
 
 /* Includes ------------------------------------------------------------------*/
 #include "gpio.h"
+#include "main.h"
 
 /* USER CODE BEGIN 0 */
 
@@ -36,7 +37,14 @@
 */
 void MX_GPIO_Init(void)
 {
-  /* No standalone GPIO is needed in the current sensor test flow. */
+  GPIO_InitTypeDef GPIO_InitStruct = {0};
+
+  __HAL_RCC_GPIOC_CLK_ENABLE();
+
+  GPIO_InitStruct.Pin = SDMMC1_DET_Pin;
+  GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
+  GPIO_InitStruct.Pull = GPIO_PULLUP;
+  HAL_GPIO_Init(SDMMC1_DET_GPIO_Port, &GPIO_InitStruct);
 }
 
 /* USER CODE BEGIN 2 */

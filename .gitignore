@@ -1,1 +1,20 @@
 /_git_backup_mdkarm_20260325/
+
+# Keil / build outputs
+MDK-ARM/SensorProj/
+MDK-ARM/01-1_stm32u575_freertos_blink/
+*.o
+*.d
+*.axf
+*.hex
+*.map
+*.htm
+*.lnp
+*.dep
+*.build_log.htm
+JLinkLog.txt
+
+# User-local IDE/debug state
+*.uvguix.*
+*.uvoptx
+JLinkSettings.ini

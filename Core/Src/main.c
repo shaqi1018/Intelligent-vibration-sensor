@@ -22,6 +22,8 @@
 #include "icache.h"
 #include "usart.h"
 #include "gpio.h"
+#include "sdmmc.h"
+#include "usb_otg.h"
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
@@ -99,6 +101,24 @@ int main(void)
   MX_ICACHE_Init();
   MX_USART1_UART_Init();
 
+  printf("[初始化] GPIO/ICACHE/UART1 初始化完成\r\n");
+  printf("[初始化] SD DET(PC13)=%u, inserted_level=%u\r\n",
+         (unsigned int)HAL_GPIO_ReadPin(SDMMC1_DET_GPIO_Port, SDMMC1_DET_Pin),
+         (unsigned int)SDMMC1_DET_INSERTED_LEVEL);
+
+  if (SDMMC1_IsCardDetected() != 0U)
+  {
+    MX_SDMMC1_SD_Init();
+    printf("[初始化] SDMMC1 初始化完成 (检测到SD卡)\r\n");
+  }
+  else
+  {
+    printf("[初始化] 未检测到SD卡，已跳过 SDMMC1 卡初始化\r\n");
+  }
+
+  MX_USB_OTG_FS_PCD_Init();
+  printf("[初始化] USB OTG FS PCD 初始化完成\r\n");
+
   /* SPI1(PA5/PA6/PA7 + PC4(CS)) -> LSM6DSOX */
 #if (APP_SENSOR_TEST_TARGET == APP_SENSOR_TEST_NONE) || \
     (APP_SENSOR_TEST_TARGET == APP_SENSOR_TEST_LSM6DSOX)
@@ -137,6 +157,8 @@ int main(void)
   printf("  SPI1: PA5/PA6/PA7 + PC4(CS) (LSM6DSOX)\r\n");
   printf("  SPI2: PB10/PC2/PC1 + PC5(CS) (H3LIS100DL)\r\n");
   printf("  SPI2: PB10/PC2/PC1 + PA4(CS) (QMA6100P)\r\n");
+  printf("  SDMMC1: PC8/PC9/PC10/PC11/PC12 + PD2, DET=PC13\r\n");
+  printf("  USB FS: PA11(D-) PA12(D+)\r\n");
   printf("  串口: PA9/PA10 115200bps\r\n");
 #endif
   printf("========================================\r\n\r\n");
@@ -182,7 +204,8 @@ void SystemClock_Config(void)
 
   /** Initializes the CPU, AHB and APB buses clocks
   */
-  RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_MSI;
+  RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSI48 | RCC_OSCILLATORTYPE_MSI;
+  RCC_OscInitStruct.HSI48State = RCC_HSI48_ON;
   RCC_OscInitStruct.MSIState = RCC_MSI_ON;
   RCC_OscInitStruct.MSICalibrationValue = RCC_MSICALIBRATION_DEFAULT;
   RCC_OscInitStruct.MSIClockRange = RCC_MSIRANGE_0;

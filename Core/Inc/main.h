@@ -71,6 +71,10 @@ void Error_Handler(void);
 
 #define APP_SENSOR_TEST_TARGET APP_SENSOR_TEST_NONE
 
+#define SDMMC1_DET_Pin              GPIO_PIN_13
+#define SDMMC1_DET_GPIO_Port        GPIOC
+#define SDMMC1_DET_INSERTED_LEVEL   GPIO_PIN_RESET
+
 /* USER CODE END Private defines */
 
 #ifdef __cplusplus

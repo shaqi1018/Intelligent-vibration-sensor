@@ -56,6 +56,8 @@
 
 /* External variables --------------------------------------------------------*/
 extern TIM_HandleTypeDef htim6;
+extern PCD_HandleTypeDef hpcd_USB_OTG_FS;
+extern SD_HandleTypeDef hsd1;
 
 /* USER CODE BEGIN EV */
 
@@ -171,6 +173,22 @@ void TIM6_IRQHandler(void)
   /* USER CODE BEGIN TIM6_IRQn 1 */
 
   /* USER CODE END TIM6_IRQn 1 */
+}
+
+/**
+  * @brief This function handles USB OTG FS global interrupt.
+  */
+void OTG_FS_IRQHandler(void)
+{
+  HAL_PCD_IRQHandler(&hpcd_USB_OTG_FS);
+}
+
+/**
+  * @brief This function handles SDMMC1 global interrupt.
+  */
+void SDMMC1_IRQHandler(void)
+{
+  HAL_SD_IRQHandler(&hsd1);
 }
 
 /* USER CODE BEGIN 1 */
