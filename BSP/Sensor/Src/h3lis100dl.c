@@ -10,6 +10,8 @@
   */
 
 #include "h3lis100dl.h"
+#include "bsp_spi.h"
+#include "dma_sampling.h"
 #include <string.h>
 
 #define H3LIS100DL_SPI_TIMEOUT_MS  SENSOR_SPI2_TIMEOUT_MS
@@ -30,6 +32,16 @@ static HAL_StatusTypeDef H3LIS100DL_Transfer2(const uint8_t tx[2], uint8_t rx[2]
   H3_SPI2_CS_HIGH();
 
   return ret;
+}
+
+static void H3LIS100DL_CsLow(void)
+{
+  H3_SPI2_CS_LOW();
+}
+
+static void H3LIS100DL_CsHigh(void)
+{
+  H3_SPI2_CS_HIGH();
 }
 
 static HAL_StatusTypeDef H3LIS100DL_WriteReg(uint8_t reg, uint8_t val)
@@ -73,6 +85,42 @@ static HAL_StatusTypeDef H3LIS100DL_ReadRegTrace(uint8_t reg,
   return ret;
 }
 
+static HAL_StatusTypeDef H3LIS100DL_ReadRegs_DMA(uint8_t reg, uint8_t *buf, uint16_t len)
+{
+  static uint8_t tx_buf[8] __attribute__((aligned(32)));
+  static uint8_t rx_buf[8] __attribute__((aligned(32)));
+  HAL_StatusTypeDef ret;
+  uint16_t i;
+
+  if ((buf == NULL) || (len == 0U) || ((uint16_t)(len + 1U) > sizeof(tx_buf)))
+  {
+    return HAL_ERROR;
+  }
+
+  memset(tx_buf, 0, sizeof(tx_buf));
+  memset(rx_buf, 0, sizeof(rx_buf));
+  tx_buf[0] = H3LIS100DL_SPI_MAKE_CMD(reg, 1U, (len > 1U) ? 1U : 0U);
+
+  ret = Sensor_SPI2_TransmitReceive_DMA(SENSOR_SPI2_DMA_OWNER_H3LIS100DL,
+                                        H3LIS100DL_CsLow,
+                                        H3LIS100DL_CsHigh,
+                                        tx_buf,
+                                        rx_buf,
+                                        (uint16_t)(len + 1U),
+                                        H3LIS100DL_SPI_TIMEOUT_MS);
+  if (ret != HAL_OK)
+  {
+    return ret;
+  }
+
+  for (i = 0U; i < len; i++)
+  {
+    buf[i] = rx_buf[i + 1U];
+  }
+
+  return HAL_OK;
+}
+
 static HAL_StatusTypeDef H3LIS100DL_ReadReg(uint8_t reg, uint8_t *val)
 {
   uint8_t tx[2];
@@ -88,39 +136,7 @@ static HAL_StatusTypeDef H3LIS100DL_ReadReg(uint8_t reg, uint8_t *val)
 
 static HAL_StatusTypeDef H3LIS100DL_ReadRegs(uint8_t reg, uint8_t *buf, uint16_t len)
 {
-  HAL_StatusTypeDef ret;
-  uint8_t cmd;
-  uint16_t i;
-
-  if ((buf == NULL) || (len == 0U))
-  {
-    return HAL_ERROR;
-  }
-
-  cmd = H3LIS100DL_SPI_MAKE_CMD(reg, 1U, 1U);
-
-  H3_SPI2_CS_LOW();
-
-  ret = HAL_SPI_Transmit(&hspi2, &cmd, 1U, H3LIS100DL_SPI_TIMEOUT_MS);
-  if (ret == HAL_OK)
-  {
-    for (i = 0U; i < len; i++)
-    {
-      uint8_t tx_dummy = 0x00U;
-      uint8_t rx_data = 0x00U;
-
-      ret = HAL_SPI_TransmitReceive(&hspi2, &tx_dummy, &rx_data, 1U, H3LIS100DL_SPI_TIMEOUT_MS);
-      if (ret != HAL_OK)
-      {
-        break;
-      }
-      buf[i] = rx_data;
-    }
-  }
-
-  H3_SPI2_CS_HIGH();
-
-  return ret;
+  return H3LIS100DL_ReadRegs_DMA(reg, buf, len);
 }
 
 static const char *H3LIS100DL_DiagPullName(uint32_t pull)
@@ -457,7 +473,7 @@ int H3LIS100DL_Init(void)
   }
   HAL_Delay(10U);
 
-  ret = H3LIS100DL_WriteReg(H3LIS100DL_REG_CTRL_REG1, 0x2FU);
+  ret = H3LIS100DL_WriteReg(H3LIS100DL_REG_CTRL_REG1, 0x37U);
   if (ret != HAL_OK)
   {
     printf("[H3LIS100DL] init failed (CTRL_REG1)\r\n");
@@ -475,7 +491,7 @@ int H3LIS100DL_Init(void)
     uint8_t v1 = 0U;
 
     H3LIS100DL_ReadReg(H3LIS100DL_REG_CTRL_REG1, &v1);
-    if (v1 != 0x2FU)
+    if (v1 != 0x37U)
     {
       printf("[H3LIS100DL] init failed (CTRL_REG1 verify, read=0x%02X)\r\n", v1);
       H3LIS100DL_PrintInitDiagnostics();
@@ -483,7 +499,7 @@ int H3LIS100DL_Init(void)
     }
   }
 
-  printf("[H3LIS100DL] init ok (+/-100g 100Hz)\r\n");
+  printf("[H3LIS100DL] init ok (+/-100g 400Hz)\r\n");
   return 0;
 }
 
@@ -524,8 +540,8 @@ int H3LIS100DL_Configure(const H3LIS100DL_Config_t *config)
 
 int H3LIS100DL_ReadAccXYZ(H3LIS100DL_Data_t *data)
 {
-  uint8_t raw_u8;
   uint8_t status = 0U;
+  uint8_t raw_xyz[3] = {0};
 
   if (data == NULL)
   {
@@ -541,14 +557,14 @@ int H3LIS100DL_ReadAccXYZ(H3LIS100DL_Data_t *data)
     return -2;
   }
 
-  if (H3LIS100DL_ReadReg(H3LIS100DL_REG_OUT_X, &raw_u8) != HAL_OK) return -1;
-  data->raw[0] = (int8_t)raw_u8;
+  if (H3LIS100DL_ReadRegs(H3LIS100DL_REG_OUT_X, raw_xyz, 3U) != HAL_OK)
+  {
+    return -1;
+  }
 
-  if (H3LIS100DL_ReadReg(H3LIS100DL_REG_OUT_Y, &raw_u8) != HAL_OK) return -1;
-  data->raw[1] = (int8_t)raw_u8;
-
-  if (H3LIS100DL_ReadReg(H3LIS100DL_REG_OUT_Z, &raw_u8) != HAL_OK) return -1;
-  data->raw[2] = (int8_t)raw_u8;
+  data->raw[0] = (int8_t)raw_xyz[0];
+  data->raw[1] = (int8_t)raw_xyz[1];
+  data->raw[2] = (int8_t)raw_xyz[2];
 
   data->acc_mg[0] = (float)data->raw[0] * H3LIS100DL_SENSITIVITY_MG;
   data->acc_mg[1] = (float)data->raw[1] * H3LIS100DL_SENSITIVITY_MG;

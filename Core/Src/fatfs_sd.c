@@ -15,6 +15,7 @@ static FIL g_log_file;
 static char g_log_path[FATFS_SD_LOG_PATH_MAX];
 static uint8_t g_sd_mounted = 0U;
 static uint8_t g_logger_active = 0U;
+static uint32_t g_logger_rows_written = 0U;
 
 const char *FatFs_SD_ResultToString(FRESULT result)
 {
@@ -56,21 +57,6 @@ static FRESULT FatFs_SD_WriteExact(FIL *file, const void *buffer, UINT length)
   }
 
   return FR_OK;
-}
-
-static uint32_t FatFs_SD_ComputeAgeMs(uint32_t tick_ms, uint32_t last_update_ms)
-{
-  return tick_ms - last_update_ms;
-}
-
-static uint8_t FatFs_SD_IsFresh(uint8_t valid, uint32_t age_ms)
-{
-  if ((valid == 0U) || (age_ms > APP_SENSOR_STALE_TIMEOUT_MS))
-  {
-    return 0U;
-  }
-
-  return 1U;
 }
 
 static FRESULT FatFs_SD_EnsureLogDirectory(void)
@@ -133,7 +119,13 @@ FRESULT FatFs_SD_Mount(void)
     return FR_NOT_READY;
   }
 
+  if ((disk_initialize(SDDISKIO_DRIVE_NUM) & STA_NOINIT) != 0U)
+  {
+    return FR_NOT_READY;
+  }
+
   memset(&g_sd_fatfs, 0, sizeof(g_sd_fatfs));
+  result = f_mount(NULL, "0:", 1U);
   result = f_mount(&g_sd_fatfs, "0:", 1U);
   if (result == FR_OK)
   {
@@ -163,10 +155,10 @@ FRESULT FatFs_SD_LoggerStart(void)
 {
   FRESULT result;
   static const char kCsvHeader[] =
-      "tick_ms,row_seq,"
-      "lsm_valid,lsm_age_ms,lsm_acc_x_mg,lsm_acc_y_mg,lsm_acc_z_mg,lsm_gyro_x_mdps,lsm_gyro_y_mdps,lsm_gyro_z_mdps,lsm_temp_c,"
-      "h3_valid,h3_age_ms,h3_raw_x,h3_raw_y,h3_raw_z,h3_acc_x_mg,h3_acc_y_mg,h3_acc_z_mg,"
-      "qma_valid,qma_age_ms,qma_raw_x,qma_raw_y,qma_raw_z,qma_acc_x_mg,qma_acc_y_mg,qma_acc_z_mg\r\n";
+      "frame_id,tick_ms,enabled_mask,present_mask,"
+      "lsm_sample_seq,lsm_valid,lsm_acc_x_mg,lsm_acc_y_mg,lsm_acc_z_mg,lsm_gyro_x_mdps,lsm_gyro_y_mdps,lsm_gyro_z_mdps,lsm_temp_c,"
+      "h3_sample_seq,h3_valid,h3_raw_x,h3_raw_y,h3_raw_z,h3_acc_x_mg,h3_acc_y_mg,h3_acc_z_mg,"
+      "qma_sample_seq,qma_valid,qma_raw_x,qma_raw_y,qma_raw_z,qma_acc_x_mg,qma_acc_y_mg,qma_acc_z_mg\r\n";
 
   if (g_logger_active != 0U)
   {
@@ -221,24 +213,19 @@ FRESULT FatFs_SD_LoggerStart(void)
     return result;
   }
 
-  g_logger_active = 1U;
   printf("[FatFs] 日志文件已打开: %s\r\n", g_log_path);
+  g_logger_active = 1U;
+  g_logger_rows_written = 0U;
   return FR_OK;
 }
 
-FRESULT FatFs_SD_LoggerAppendRow(const AppSensorSnapshot_t *snapshot, uint32_t tick_ms, uint32_t row_seq)
+FRESULT FatFs_SD_LoggerAppendFrame(const AppSensorFrame_t *frame)
 {
   FRESULT result;
   char line[512];
-  uint32_t lsm_age_ms;
-  uint32_t h3_age_ms;
-  uint32_t qma_age_ms;
-  uint8_t lsm_valid;
-  uint8_t h3_valid;
-  uint8_t qma_valid;
   int line_len;
 
-  if (snapshot == NULL)
+  if (frame == NULL)
   {
     return FR_INVALID_PARAMETER;
   }
@@ -253,48 +240,42 @@ FRESULT FatFs_SD_LoggerAppendRow(const AppSensorSnapshot_t *snapshot, uint32_t t
     return FR_NOT_READY;
   }
 
-  lsm_age_ms = FatFs_SD_ComputeAgeMs(tick_ms, snapshot->lsm6dsox.last_update_ms);
-  h3_age_ms = FatFs_SD_ComputeAgeMs(tick_ms, snapshot->h3lis100dl.last_update_ms);
-  qma_age_ms = FatFs_SD_ComputeAgeMs(tick_ms, snapshot->qma6100p.last_update_ms);
-
-  lsm_valid = FatFs_SD_IsFresh(snapshot->lsm6dsox.valid, lsm_age_ms);
-  h3_valid = FatFs_SD_IsFresh(snapshot->h3lis100dl.valid, h3_age_ms);
-  qma_valid = FatFs_SD_IsFresh(snapshot->qma6100p.valid, qma_age_ms);
-
   line_len = snprintf(
       line,
       sizeof(line),
-      "%lu,%lu,"
-      "%u,%lu,%.1f,%.1f,%.1f,%.1f,%.1f,%.1f,%.1f,"
-      "%u,%lu,%d,%d,%d,%.1f,%.1f,%.1f,"
-      "%u,%lu,%d,%d,%d,%.1f,%.1f,%.1f\r\n",
-      (unsigned long)tick_ms,
-      (unsigned long)row_seq,
-      (unsigned int)lsm_valid,
-      (unsigned long)lsm_age_ms,
-      snapshot->lsm6dsox.data.acc.x,
-      snapshot->lsm6dsox.data.acc.y,
-      snapshot->lsm6dsox.data.acc.z,
-      snapshot->lsm6dsox.data.gyro.x,
-      snapshot->lsm6dsox.data.gyro.y,
-      snapshot->lsm6dsox.data.gyro.z,
-      snapshot->lsm6dsox.data.temp_C,
-      (unsigned int)h3_valid,
-      (unsigned long)h3_age_ms,
-      (int)snapshot->h3lis100dl.data.raw[0],
-      (int)snapshot->h3lis100dl.data.raw[1],
-      (int)snapshot->h3lis100dl.data.raw[2],
-      snapshot->h3lis100dl.data.acc_mg[0],
-      snapshot->h3lis100dl.data.acc_mg[1],
-      snapshot->h3lis100dl.data.acc_mg[2],
-      (unsigned int)qma_valid,
-      (unsigned long)qma_age_ms,
-      (int)snapshot->qma6100p.data.raw[0],
-      (int)snapshot->qma6100p.data.raw[1],
-      (int)snapshot->qma6100p.data.raw[2],
-      snapshot->qma6100p.data.acc_mg[0],
-      snapshot->qma6100p.data.acc_mg[1],
-      snapshot->qma6100p.data.acc_mg[2]);
+      "%lu,%lu,0x%02lX,0x%02lX,"
+      "%lu,%u,%.1f,%.1f,%.1f,%.1f,%.1f,%.1f,%.1f,"
+      "%lu,%u,%d,%d,%d,%.1f,%.1f,%.1f,"
+      "%lu,%u,%d,%d,%d,%.1f,%.1f,%.1f\r\n",
+      (unsigned long)frame->frame_id,
+      (unsigned long)frame->tick_ms,
+      (unsigned long)frame->enabled_mask,
+      (unsigned long)frame->present_mask,
+      (unsigned long)frame->lsm6dsox.sample_seq,
+      (unsigned int)frame->lsm6dsox.valid,
+      frame->lsm6dsox.data.acc.x,
+      frame->lsm6dsox.data.acc.y,
+      frame->lsm6dsox.data.acc.z,
+      frame->lsm6dsox.data.gyro.x,
+      frame->lsm6dsox.data.gyro.y,
+      frame->lsm6dsox.data.gyro.z,
+      frame->lsm6dsox.data.temp_C,
+      (unsigned long)frame->h3lis100dl.sample_seq,
+      (unsigned int)frame->h3lis100dl.valid,
+      (int)frame->h3lis100dl.data.raw[0],
+      (int)frame->h3lis100dl.data.raw[1],
+      (int)frame->h3lis100dl.data.raw[2],
+      frame->h3lis100dl.data.acc_mg[0],
+      frame->h3lis100dl.data.acc_mg[1],
+      frame->h3lis100dl.data.acc_mg[2],
+      (unsigned long)frame->qma6100p.sample_seq,
+      (unsigned int)frame->qma6100p.valid,
+      (int)frame->qma6100p.data.raw[0],
+      (int)frame->qma6100p.data.raw[1],
+      (int)frame->qma6100p.data.raw[2],
+      frame->qma6100p.data.acc_mg[0],
+      frame->qma6100p.data.acc_mg[1],
+      frame->qma6100p.data.acc_mg[2]);
 
   if ((line_len < 0) || ((size_t)line_len >= sizeof(line)))
   {
@@ -307,26 +288,45 @@ FRESULT FatFs_SD_LoggerAppendRow(const AppSensorSnapshot_t *snapshot, uint32_t t
     return result;
   }
 
+  g_logger_rows_written++;
   return FR_OK;
 }
 
 FRESULT FatFs_SD_LoggerSync(void)
 {
+  FRESULT result;
+
   if (g_logger_active == 0U)
   {
     return FR_NOT_ENABLED;
   }
 
-  return f_sync(&g_log_file);
+  result = f_sync(&g_log_file);
+  printf("[FatFs] sync rows=%lu result=%s (%d)\r\n",
+         (unsigned long)g_logger_rows_written,
+         FatFs_SD_ResultToString(result),
+         (int)result);
+  return result;
 }
 
 void FatFs_SD_LoggerStop(void)
 {
+  FRESULT sync_result = FR_OK;
+  FRESULT close_result = FR_OK;
+
   if (g_logger_active != 0U)
   {
-    (void)f_sync(&g_log_file);
-    (void)f_close(&g_log_file);
+    sync_result = f_sync(&g_log_file);
+    close_result = f_close(&g_log_file);
+    printf("[FatFs] logger stop rows=%lu sync=%s (%d) close=%s (%d) file=%s\r\n",
+           (unsigned long)g_logger_rows_written,
+           FatFs_SD_ResultToString(sync_result),
+           (int)sync_result,
+           FatFs_SD_ResultToString(close_result),
+           (int)close_result,
+           g_log_path);
     g_logger_active = 0U;
+    g_logger_rows_written = 0U;
     g_log_path[0] = '\0';
   }
 

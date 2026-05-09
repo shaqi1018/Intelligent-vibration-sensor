@@ -113,6 +113,7 @@ extern "C" {
 
 #define LSM6DSOX_TEMP_SENSITIVITY     256.0f   /* LSB/degC */
 #define LSM6DSOX_TEMP_OFFSET          25.0f
+#define LSM6DSOX_DMA_DEBUG_LOG        0
 
 /* ======================== INT pins (optional) ============================== */
 #define LSM6DSOX_INT1_PIN           GPIO_PIN_0
@@ -144,6 +145,8 @@ HAL_StatusTypeDef LSM6DSOX_ReadAccel(LSM6DSOX_Data_t *data);
 HAL_StatusTypeDef LSM6DSOX_ReadGyro(LSM6DSOX_Data_t *data);
 HAL_StatusTypeDef LSM6DSOX_ReadTemp(float *temp_C);
 HAL_StatusTypeDef LSM6DSOX_ReadAllData(LSM6DSOX_AllData_t *all);
+HAL_StatusTypeDef LSM6DSOX_ReadAllData_DMA(LSM6DSOX_AllData_t *all);
+uint32_t LSM6DSOX_GetDmaCallCount(void);
 
 #ifdef __cplusplus
 }

@@ -22,6 +22,7 @@
 #include "stm32u5xx_it.h"
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
+#include "dma_sampling.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -54,10 +55,12 @@
 
 /* USER CODE END 0 */
 
-/* External variables --------------------------------------------------------*/
 extern TIM_HandleTypeDef htim6;
 extern PCD_HandleTypeDef hpcd_USB_OTG_FS;
 extern SD_HandleTypeDef hsd1;
+extern SPI_HandleTypeDef hspi1;
+extern SPI_HandleTypeDef hspi2;
+
 
 /* USER CODE BEGIN EV */
 
@@ -173,6 +176,24 @@ void TIM6_IRQHandler(void)
   /* USER CODE BEGIN TIM6_IRQn 1 */
 
   /* USER CODE END TIM6_IRQn 1 */
+}
+
+/**
+  * @brief This function handles SPI1 global interrupt.
+  */
+void SPI1_IRQHandler(void)
+{
+  DmaSampling_NotifySpiIrq();
+  HAL_SPI_IRQHandler(&hspi1);
+}
+
+/**
+  * @brief This function handles SPI2 global interrupt.
+  */
+void SPI2_IRQHandler(void)
+{
+  DmaSampling_NotifySpi2Irq();
+  HAL_SPI_IRQHandler(&hspi2);
 }
 
 /**

@@ -17,7 +17,7 @@ static DSTATUS SD_GetDriveStatus(BYTE pdrv)
     return g_sd_status;
   }
 
-  if (HAL_SD_GetCardState(&hsd1) != HAL_SD_CARD_TRANSFER)
+  if (SDMMC1_InitCard() == 0U)
   {
     g_sd_status = STA_NOINIT;
     return g_sd_status;

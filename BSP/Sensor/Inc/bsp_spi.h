@@ -82,8 +82,22 @@ extern "C" {
 extern SPI_HandleTypeDef hspi1;
 extern SPI_HandleTypeDef hspi2;
 
+typedef enum
+{
+  SENSOR_SPI2_DMA_OWNER_NONE = 0,
+  SENSOR_SPI2_DMA_OWNER_H3LIS100DL,
+  SENSOR_SPI2_DMA_OWNER_QMA6100P
+} SensorSpi2DmaOwner_t;
+
 void MX_SPI1_Init(void);
 void MX_SPI2_Init(void);
+HAL_StatusTypeDef Sensor_SPI2_TransmitReceive_DMA(SensorSpi2DmaOwner_t owner,
+                                                  void (*cs_low)(void),
+                                                  void (*cs_high)(void),
+                                                  uint8_t *tx,
+                                                  uint8_t *rx,
+                                                  uint16_t len,
+                                                  uint32_t timeout_ms);
 
 #ifdef __cplusplus
 }

@@ -9,6 +9,8 @@
   */
 
 #include "qma6100p.h"
+#include "bsp_spi.h"
+#include "dma_sampling.h"
 #include <string.h>
 
 #define QMA6100P_SPI_TIMEOUT_MS SENSOR_SPI2_TIMEOUT_MS
@@ -31,6 +33,16 @@ static HAL_StatusTypeDef QMA6100P_Transfer2(const uint8_t tx[2], uint8_t rx[2])
   QMA_SPI2_CS_HIGH();
 
   return ret;
+}
+
+static void QMA6100P_CsLow(void)
+{
+  QMA_SPI2_CS_LOW();
+}
+
+static void QMA6100P_CsHigh(void)
+{
+  QMA_SPI2_CS_HIGH();
 }
 
 static HAL_StatusTypeDef QMA6100P_ReadRegTrace(uint8_t reg,
@@ -108,6 +120,42 @@ static HAL_StatusTypeDef QMA6100P_ReadReg(uint8_t reg, uint8_t *buf, uint16_t le
   QMA_SPI2_CS_HIGH();
 
   return ret;
+}
+
+static HAL_StatusTypeDef QMA6100P_ReadReg_DMA(uint8_t reg, uint8_t *buf, uint16_t len)
+{
+  static uint8_t tx_buf[8] __attribute__((aligned(32)));
+  static uint8_t rx_buf[8] __attribute__((aligned(32)));
+  HAL_StatusTypeDef ret;
+  uint16_t i;
+
+  if ((buf == NULL) || (len == 0U) || ((uint16_t)(len + 1U) > sizeof(tx_buf)))
+  {
+    return HAL_ERROR;
+  }
+
+  memset(tx_buf, 0, sizeof(tx_buf));
+  memset(rx_buf, 0, sizeof(rx_buf));
+  tx_buf[0] = QMA6100P_SPI_MAKE_CMD(reg, 1U);
+
+  ret = Sensor_SPI2_TransmitReceive_DMA(SENSOR_SPI2_DMA_OWNER_QMA6100P,
+                                        QMA6100P_CsLow,
+                                        QMA6100P_CsHigh,
+                                        tx_buf,
+                                        rx_buf,
+                                        (uint16_t)(len + 1U),
+                                        QMA6100P_SPI_TIMEOUT_MS);
+  if (ret != HAL_OK)
+  {
+    return ret;
+  }
+
+  for (i = 0U; i < len; i++)
+  {
+    buf[i] = rx_buf[i + 1U];
+  }
+
+  return HAL_OK;
 }
 
 static const char *QMA6100P_DiagPullName(uint32_t pull)
@@ -492,7 +540,7 @@ static HAL_StatusTypeDef QMA6100P_Initialize(void)
   HAL_Delay(10U);
 
   if (QMA6100P_SetRange(QMA6100P_RANGE_4G) != HAL_OK) return HAL_ERROR;
-  if (QMA6100P_SetBW(QMA6100P_BW_100) != HAL_OK) return HAL_ERROR;
+  if (QMA6100P_SetBW(QMA6100P_BW_1600) != HAL_OK) return HAL_ERROR;
   if (QMA6100P_SetActiveMode() != HAL_OK) return HAL_ERROR;
 
   return HAL_OK;
@@ -543,7 +591,7 @@ HAL_StatusTypeDef QMA6100P_Init(void)
       g_qma.chip_id = (uint8_t)(chip_id_raw >> 4);
       if (g_qma.chip_id == QMA6100P_DEVICE_ID)
       {
-        printf("[QMA6100P] init ok (+/-4g 100Hz)\r\n");
+        printf("[QMA6100P] init ok (+/-4g 1600Hz)\r\n");
         return HAL_OK;
       }
     }
@@ -557,11 +605,11 @@ HAL_StatusTypeDef QMA6100P_Init(void)
       (QMA6100P_ReadReg(QMA6100P_REG_POWER_MANAGE, &power_manage, 1U) == HAL_OK) &&
       ((chip_state & 0xF0U) == 0xC0U) &&
       (range == (uint8_t)QMA6100P_RANGE_4G) &&
-      (bw_odr == (uint8_t)QMA6100P_BW_100) &&
+      (bw_odr == (uint8_t)QMA6100P_BW_1600) &&
       (power_manage == 0x84U))
   {
     g_qma.chip_id = QMA6100P_DEVICE_ID;
-    printf("[QMA6100P] init ok (+/-4g 100Hz)\r\n");
+    printf("[QMA6100P] init ok (+/-4g 1600Hz)\r\n");
     return HAL_OK;
   }
 
@@ -608,7 +656,7 @@ HAL_StatusTypeDef QMA6100P_ReadRawXYZ(QMA6100P_Data_t *data)
     return HAL_ERROR;
   }
 
-  while (QMA6100P_ReadReg(QMA6100P_REG_XOUTL, buf, 6U) != HAL_OK)
+  while (QMA6100P_ReadReg_DMA(QMA6100P_REG_XOUTL, buf, 6U) != HAL_OK)
   {
     if (++retry > 1U)
     {

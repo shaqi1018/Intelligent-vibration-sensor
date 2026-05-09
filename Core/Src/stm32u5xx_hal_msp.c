@@ -80,4 +80,33 @@ void HAL_MspInit(void)
 
 /* USER CODE BEGIN 1 */
 
+void HAL_SPI_MspInit(SPI_HandleTypeDef* hspi)
+{
+  extern DMA_HandleTypeDef hdma_spi1_rx;
+  extern DMA_HandleTypeDef hdma_spi1_tx;
+  extern DMA_HandleTypeDef hdma_spi2_rx;
+  extern DMA_HandleTypeDef hdma_spi2_tx;
+
+  if(hspi->Instance==SPI1)
+  {
+    /* Link DMA handles */
+    __HAL_LINKDMA(hspi, hdmarx, hdma_spi1_rx);
+    __HAL_LINKDMA(hspi, hdmatx, hdma_spi1_tx);
+
+    /* Enable SPI IRQ required for EOT handling in DMA mode */
+    HAL_NVIC_SetPriority(SPI1_IRQn, 1, 0);
+    HAL_NVIC_EnableIRQ(SPI1_IRQn);
+  }
+  else if(hspi->Instance==SPI2)
+  {
+    /* Link DMA handles */
+    __HAL_LINKDMA(hspi, hdmarx, hdma_spi2_rx);
+    __HAL_LINKDMA(hspi, hdmatx, hdma_spi2_tx);
+
+    /* Enable SPI IRQ required for EOT handling in DMA mode */
+    HAL_NVIC_SetPriority(SPI2_IRQn, 1, 0);
+    HAL_NVIC_EnableIRQ(SPI2_IRQn);
+  }
+}
+
 /* USER CODE END 1 */

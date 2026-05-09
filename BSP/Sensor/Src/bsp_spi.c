@@ -15,9 +15,71 @@
   */
 
 #include "bsp_spi.h"
+#include "dma_sampling.h"
+#include "cmsis_os2.h"
 
 SPI_HandleTypeDef hspi1;
 SPI_HandleTypeDef hspi2;
+
+static void SensorSpi2_NoOp(void)
+{
+}
+
+HAL_StatusTypeDef Sensor_SPI2_TransmitReceive_DMA(SensorSpi2DmaOwner_t owner,
+                                                  void (*cs_low)(void),
+                                                  void (*cs_high)(void),
+                                                  uint8_t *tx,
+                                                  uint8_t *rx,
+                                                  uint16_t len,
+                                                  uint32_t timeout_ms)
+{
+  HAL_StatusTypeDef status;
+  uint32_t timeout = timeout_ms;
+  void (*assert_cs)(void) = (cs_low != NULL) ? cs_low : SensorSpi2_NoOp;
+  void (*release_cs)(void) = (cs_high != NULL) ? cs_high : SensorSpi2_NoOp;
+
+  (void)owner;
+
+  if ((tx == NULL) || (rx == NULL) || (len == 0U))
+  {
+    return HAL_ERROR;
+  }
+
+  DmaSampling_ResetSpi2DebugState();
+
+  assert_cs();
+  status = HAL_SPI_TransmitReceive_DMA(&hspi2, tx, rx, len);
+  if (status != HAL_OK)
+  {
+    release_cs();
+    DmaSampling_RecordSpi2StartFail();
+    return status;
+  }
+
+  while (timeout-- > 0U)
+  {
+    if (HAL_SPI_GetState(&hspi2) == HAL_SPI_STATE_READY)
+    {
+      break;
+    }
+    osDelay(1U);
+  }
+
+  release_cs();
+
+  if (timeout == 0U)
+  {
+    DmaSampling_RecordSpi2Timeout();
+    return HAL_TIMEOUT;
+  }
+
+  if (DmaSampling_IsSpi2TransferComplete() == 0U)
+  {
+    return HAL_ERROR;
+  }
+
+  return HAL_OK;
+}
 
 void MX_SPI1_Init(void)
 {

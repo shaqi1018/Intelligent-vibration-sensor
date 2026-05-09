@@ -31,6 +31,8 @@
 
 #include <stdio.h>
 #include "bsp_spi.h"
+#include "key_adc.h"
+#include "dma_sampling.h"
 
 /* USER CODE END Includes */
 
@@ -118,12 +120,16 @@ int main(void)
     printf("[初始化] 未检测到SD卡，已跳过 SDMMC1 卡初始化\r\n");
   }
 
+  /* 暂时跳过KEY_ADC初始化（硬件问题待排查） */
+
   MX_USB_OTG_FS_PCD_Init();
   printf("[初始化] USB OTG FS PCD 初始化完成\r\n");
 
   /* SPI1(PA5/PA6/PA7 + PC4(CS)) -> LSM6DSOX */
 #if (APP_SENSOR_TEST_TARGET == APP_SENSOR_TEST_NONE) || \
     (APP_SENSOR_TEST_TARGET == APP_SENSOR_TEST_LSM6DSOX)
+  DmaSampling_InitSPI1();
+  printf("[初始化] SPI1 DMA 初始化完成\r\n");
   MX_SPI1_Init();
   printf("[初始化] SPI1 初始化完成\r\n");
 #endif
@@ -134,6 +140,8 @@ int main(void)
     (APP_SENSOR_TEST_TARGET == APP_SENSOR_TEST_QMA6100P)
   MX_SPI2_Init();
   printf("[初始化] SPI2 初始化完成\r\n");
+  DmaSampling_InitSPI2();
+  printf("[初始化] SPI2 DMA 初始化完成\r\n");
 #endif
 
   /* USER CODE BEGIN 2 */

@@ -16,6 +16,26 @@ uint8_t SDMMC1_IsCardDetected(void)
   return (HAL_GPIO_ReadPin(SDMMC1_DET_GPIO_Port, SDMMC1_DET_Pin) == SDMMC1_DET_INSERTED_LEVEL) ? 1U : 0U;
 }
 
+uint8_t SDMMC1_InitCard(void)
+{
+  if (SDMMC1_IsCardDetected() == 0U)
+  {
+    return 0U;
+  }
+
+  if (hsd1.Instance != SDMMC1)
+  {
+    MX_SDMMC1_SD_Init();
+  }
+  else if (HAL_SD_GetCardState(&hsd1) == HAL_SD_CARD_ERROR)
+  {
+    HAL_SD_DeInit(&hsd1);
+    MX_SDMMC1_SD_Init();
+  }
+
+  return (HAL_SD_GetCardState(&hsd1) == HAL_SD_CARD_TRANSFER) ? 1U : 0U;
+}
+
 void MX_SDMMC1_SD_Init(void)
 {
   hsd1.Instance = SDMMC1;

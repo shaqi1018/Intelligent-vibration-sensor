@@ -7,12 +7,21 @@
   */
 
 #include "lsm6dsox.h"
+#include "dma_sampling.h"
 #include <stdio.h>
+#include "cmsis_os2.h"
+
+#if LSM6DSOX_DMA_DEBUG_LOG
+#define LSM6DSOX_DMA_DEBUG_PRINTF(...) printf(__VA_ARGS__)
+#else
+#define LSM6DSOX_DMA_DEBUG_PRINTF(...) ((void)0)
+#endif
 
 #define LSM6DSOX_SPI_READ_FLAG   0x80
 
 static float xl_sensitivity = LSM6DSOX_XL_SENSITIVITY_4G;
 static float g_sensitivity  = LSM6DSOX_G_SENSITIVITY_2000;
+static volatile uint32_t dma_call_count = 0;
 
 /* ======================== 微秒级延时(粗略) ============================== */
 static void LSM6DSOX_DelayUs(volatile uint32_t us)
@@ -33,7 +42,7 @@ static HAL_StatusTypeDef LSM6DSOX_WriteReg(uint8_t reg, uint8_t data)
   tx[1] = data;
 
   LSM_SPI_CS_LOW();
-  LSM6DSOX_DelayUs(1);                     /* tsu(CS) 建立时间 */
+  LSM6DSOX_DelayUs(1);                     /* tsu(CS)和 建立时间 */
   ret = HAL_SPI_Transmit(&hspi1, tx, 2, LSM_SPI_TIMEOUT_MS);
   LSM_SPI_CS_HIGH();
   LSM6DSOX_DelayUs(1);                     /* CS 间隔 */
@@ -130,8 +139,8 @@ HAL_StatusTypeDef LSM6DSOX_Init(void)
   uint8_t id = 0, reg_val = 0;
   uint8_t retry;
   LSM6DSOX_Config_t default_cfg = {
-    .xl_odr = LSM6DSOX_XL_ODR_104Hz, .xl_fs = LSM6DSOX_XL_FS_4G,
-    .g_odr = LSM6DSOX_G_ODR_104Hz,   .g_fs = LSM6DSOX_G_FS_2000DPS,
+    .xl_odr = LSM6DSOX_XL_ODR_833Hz, .xl_fs = LSM6DSOX_XL_FS_4G,
+    .g_odr = LSM6DSOX_G_ODR_833Hz,   .g_fs = LSM6DSOX_G_FS_2000DPS,
     .enable_bdu = 1, .enable_inc = 1
   };
 
@@ -153,7 +162,7 @@ HAL_StatusTypeDef LSM6DSOX_Init(void)
   HAL_Delay(10);
 
   if (LSM6DSOX_Configure(&default_cfg) != HAL_OK) return HAL_ERROR;
-  printf("[LSM6DSOX] 初始化成功 (加速度:+/-4g 104Hz, 陀螺仪:+/-2000dps 104Hz)\r\n");
+  printf("[LSM6DSOX] 初始化成功 (加速度:+/-4g 833Hz, 陀螺仪:+/-2000dps 833Hz)\r\n");
   return HAL_OK;
 }
 
@@ -244,4 +253,81 @@ HAL_StatusTypeDef LSM6DSOX_ReadAllData(LSM6DSOX_AllData_t *all)
   all->acc.z = (float)raw * xl_sensitivity;
 
   return HAL_OK;
+}
+
+HAL_StatusTypeDef LSM6DSOX_ReadAllData_DMA(LSM6DSOX_AllData_t *all)
+{
+  static uint8_t tx_buf[15] __attribute__((aligned(32)));
+  static uint8_t rx_buf[15] __attribute__((aligned(32)));
+  HAL_StatusTypeDef status;
+  int16_t raw;
+  uint32_t timeout = 100;
+
+  dma_call_count++;
+  DmaSampling_ResetDebugState();
+  LSM6DSOX_DMA_DEBUG_PRINTF("[DMA] Call #%lu\r\n", (unsigned long)dma_call_count);
+
+  tx_buf[0] = LSM6DSOX_REG_OUT_TEMP_L | LSM6DSOX_SPI_READ;
+
+  LSM_SPI_CS_LOW();
+  LSM6DSOX_DelayUs(1);
+
+  status = HAL_SPI_TransmitReceive_DMA(&hspi1, tx_buf, rx_buf, 15);
+  if (status != HAL_OK)
+  {
+    LSM_SPI_CS_HIGH();
+    DmaSampling_RecordStartFail();
+    printf("[DMA] HAL_SPI_TransmitReceive_DMA failed: %d\r\n", status);
+    return status;
+  }
+
+  LSM6DSOX_DMA_DEBUG_PRINTF("[DMA] Transfer started, SPI state=%d\r\n", HAL_SPI_GetState(&hspi1));
+
+  while (timeout-- > 0)
+  {
+    HAL_SPI_StateTypeDef spi_state = HAL_SPI_GetState(&hspi1);
+    if (spi_state == HAL_SPI_STATE_READY) break;
+    osDelay(1);
+  }
+
+  LSM6DSOX_DMA_DEBUG_PRINTF("[DMA] Wait finished, timeout=%lu\r\n", (unsigned long)timeout);
+
+  LSM_SPI_CS_HIGH();
+  LSM6DSOX_DelayUs(1);
+
+  if (timeout == 0)
+  {
+    DmaSampling_RecordTimeout();
+    printf("[DMA] Timeout waiting for SPI ready\r\n");
+    return HAL_TIMEOUT;
+  }
+
+  LSM6DSOX_DMA_DEBUG_PRINTF("[DMA] RX: %02X %02X %02X %02X %02X %02X\r\n",
+         rx_buf[1], rx_buf[2], rx_buf[3], rx_buf[4], rx_buf[5], rx_buf[6]);
+
+  uint8_t *buf = &rx_buf[1];
+
+  raw = (int16_t)((uint16_t)buf[1] << 8 | buf[0]);
+  all->temp_C = (float)raw / LSM6DSOX_TEMP_SENSITIVITY + LSM6DSOX_TEMP_OFFSET;
+
+  raw = (int16_t)((uint16_t)buf[3] << 8 | buf[2]);
+  all->gyro.x = (float)raw * g_sensitivity;
+  raw = (int16_t)((uint16_t)buf[5] << 8 | buf[4]);
+  all->gyro.y = (float)raw * g_sensitivity;
+  raw = (int16_t)((uint16_t)buf[7] << 8 | buf[6]);
+  all->gyro.z = (float)raw * g_sensitivity;
+
+  raw = (int16_t)((uint16_t)buf[9]  << 8 | buf[8]);
+  all->acc.x = (float)raw * xl_sensitivity;
+  raw = (int16_t)((uint16_t)buf[11] << 8 | buf[10]);
+  all->acc.y = (float)raw * xl_sensitivity;
+  raw = (int16_t)((uint16_t)buf[13] << 8 | buf[12]);
+  all->acc.z = (float)raw * xl_sensitivity;
+
+  return HAL_OK;
+}
+
+uint32_t LSM6DSOX_GetDmaCallCount(void)
+{
+  return dma_call_count;
 }

@@ -75,6 +75,9 @@ void Error_Handler(void);
 #define SDMMC1_DET_GPIO_Port        GPIOC
 #define SDMMC1_DET_INSERTED_LEVEL   GPIO_PIN_RESET
 
+#define KEY_ADC_Pin                 GPIO_PIN_0
+#define KEY_ADC_GPIO_Port           GPIOA
+
 /* USER CODE END Private defines */
 
 #ifdef __cplusplus
