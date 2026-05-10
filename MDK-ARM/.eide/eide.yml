@@ -28,6 +28,12 @@ virtualFolder:
                 - path: ../Core/Src/stm32u5xx_hal_msp.c
                 - path: ../Core/Src/stm32u5xx_hal_timebase_tim.c
                 - path: ../Core/Src/usart.c
+                - path: ../Core/Src/key_adc.c
+                - path: ../Core/Src/usb_cdc_service.c
+                - path: ../Core/Src/dma_sampling.c
+                - path: ../Core/Inc/key_adc.h
+                - path: ../Core/Inc/usb_cdc_service.h
+                - path: ../Core/Inc/dma_sampling.h
               folders: []
             - name: Storage
               files:
@@ -37,58 +43,105 @@ virtualFolder:
                 - path: ../Core/Inc/sd_diskio.h
                 - path: ../Core/Src/fatfs_sd.c
                 - path: ../Core/Inc/fatfs_sd.h
+                - path: ../Core/Inc/sensor_snapshot.h
               folders: []
             - name: USB
               files:
                 - path: ../Core/Src/usb_otg.c
                 - path: ../Core/Inc/usb_otg.h
+                - path: ../Core/Src/ux_standalone_port.c
+                - path: ../USBX/App/app_usbx_device.c
+                - path: ../USBX/App/app_usbx_device.h
+                - path: ../USBX/App/ux_device_descriptors.c
+                - path: ../USBX/App/ux_device_descriptors.h
+                - path: ../USBX/App/ux_device_cdc_acm.c
+                - path: ../USBX/App/ux_device_cdc_acm.h
+                - path: ../USBX/App/ux_user.h
+                - path: ../USBX/Target/ux_stm32_config.h
               folders: []
         - name: HQYJ-BSP
           files:
             - path: ../HQYJ-BSP/Src/user_app.c
           folders: []
-    - name: Drivers
-      files: []
-      folders:
-        - name: STM32U5xx_HAL_Driver
-          files:
-            - path: ../Drivers/STM32U5xx_HAL_Driver/Src/stm32u5xx_hal_cortex.c
-            - path: ../Drivers/STM32U5xx_HAL_Driver/Src/stm32u5xx_hal_icache.c
-            - path: ../Drivers/STM32U5xx_HAL_Driver/Src/stm32u5xx_hal.c
-            - path: ../Drivers/STM32U5xx_HAL_Driver/Src/stm32u5xx_hal_i2c.c
-            - path: ../Drivers/STM32U5xx_HAL_Driver/Src/stm32u5xx_hal_i2c_ex.c
-            - path: ../Drivers/STM32U5xx_HAL_Driver/Src/stm32u5xx_hal_spi.c
-            - path: ../Drivers/STM32U5xx_HAL_Driver/Src/stm32u5xx_hal_spi_ex.c
-            - path: ../Drivers/STM32U5xx_HAL_Driver/Src/stm32u5xx_hal_rcc.c
-            - path: ../Drivers/STM32U5xx_HAL_Driver/Src/stm32u5xx_hal_rcc_ex.c
-            - path: ../Drivers/STM32U5xx_HAL_Driver/Src/stm32u5xx_hal_flash.c
-            - path: ../Drivers/STM32U5xx_HAL_Driver/Src/stm32u5xx_hal_flash_ex.c
-            - path: ../Drivers/STM32U5xx_HAL_Driver/Src/stm32u5xx_hal_gpio.c
-            - path: ../Drivers/STM32U5xx_HAL_Driver/Src/stm32u5xx_hal_dma.c
-            - path: ../Drivers/STM32U5xx_HAL_Driver/Src/stm32u5xx_hal_dma_ex.c
-            - path: ../Drivers/STM32U5xx_HAL_Driver/Src/stm32u5xx_hal_exti.c
-            - path: ../Drivers/STM32U5xx_HAL_Driver/Src/stm32u5xx_hal_pwr.c
-            - path: ../Drivers/STM32U5xx_HAL_Driver/Src/stm32u5xx_hal_pwr_ex.c
-            - path: ../Drivers/STM32U5xx_HAL_Driver/Src/stm32u5xx_hal_gtzc.c
-            - path: ../Drivers/STM32U5xx_HAL_Driver/Src/stm32u5xx_hal_tim.c
-            - path: ../Drivers/STM32U5xx_HAL_Driver/Src/stm32u5xx_hal_tim_ex.c
-            - path: ../Drivers/STM32U5xx_HAL_Driver/Src/stm32u5xx_hal_uart.c
-            - path: ../Drivers/STM32U5xx_HAL_Driver/Src/stm32u5xx_hal_uart_ex.c
-            - path: ../Drivers/STM32U5xx_HAL_Driver/Src/stm32u5xx_hal_sd.c
-            - path: ../Drivers/STM32U5xx_HAL_Driver/Src/stm32u5xx_hal_sd_ex.c
-            - path: ../Drivers/STM32U5xx_HAL_Driver/Src/stm32u5xx_ll_sdmmc.c
-            - path: ../Drivers/STM32U5xx_HAL_Driver/Src/stm32u5xx_ll_dlyb.c
-            - path: ../Drivers/STM32U5xx_HAL_Driver/Src/stm32u5xx_hal_pcd.c
-            - path: ../Drivers/STM32U5xx_HAL_Driver/Src/stm32u5xx_hal_pcd_ex.c
-            - path: ../Drivers/STM32U5xx_HAL_Driver/Src/stm32u5xx_ll_usb.c
-          folders: []
-        - name: CMSIS
-          files:
-            - path: ../Core/Src/system_stm32u5xx.c
-          folders: []
     - name: Middlewares
       files: []
       folders:
+        - name: USBX
+          files: []
+          folders:
+            - name: Core
+              files:
+                - path: ../Middlewares/ST/usbx/common/core/src/ux_system_initialize.c
+                - path: ../Middlewares/ST/usbx/common/core/src/ux_system_error_handler.c
+                - path: ../Middlewares/ST/usbx/common/core/src/ux_device_stack_initialize.c
+                - path: ../Middlewares/ST/usbx/common/core/src/ux_device_stack_class_register.c
+                - path: ../Middlewares/ST/usbx/common/core/src/ux_device_stack_tasks_run.c
+                - path: ../Middlewares/ST/usbx/common/core/src/ux_device_stack_control_request_process.c
+                - path: ../Middlewares/ST/usbx/common/core/src/ux_device_stack_descriptor_send.c
+                - path: ../Middlewares/ST/usbx/common/core/src/ux_device_stack_transfer_request.c
+                - path: ../Middlewares/ST/usbx/common/core/src/ux_device_stack_transfer_run.c
+                - path: ../Middlewares/ST/usbx/common/core/src/ux_device_stack_disconnect.c
+                - path: ../Middlewares/ST/usbx/common/core/src/ux_utility_memory_allocate.c
+                - path: ../Middlewares/ST/usbx/common/core/src/ux_utility_memory_free.c
+                - path: ../Middlewares/ST/usbx/common/core/src/ux_utility_memory_copy.c
+                - path: ../Middlewares/ST/usbx/common/core/src/ux_utility_memory_set.c
+                - path: ../Middlewares/ST/usbx/common/core/src/ux_utility_memory_compare.c
+                - path: ../Middlewares/ST/usbx/common/core/src/ux_utility_memory_byte_pool_create.c
+                - path: ../Middlewares/ST/usbx/common/core/src/ux_utility_descriptor_parse.c
+                - path: ../Middlewares/ST/usbx/common/core/src/ux_utility_descriptor_pack.c
+                - path: ../Middlewares/ST/usbx/common/core/src/ux_utility_short_get.c
+                - path: ../Middlewares/ST/usbx/common/core/src/ux_utility_short_put.c
+                - path: ../Middlewares/ST/usbx/common/core/src/ux_utility_long_get.c
+                - path: ../Middlewares/ST/usbx/common/core/src/ux_utility_long_put.c
+                - path: ../Middlewares/ST/usbx/common/core/src/ux_utility_string_length_check.c
+                - path: ../Middlewares/ST/usbx/common/core/src/ux_utility_memory_byte_pool_search.c
+                - path: ../Middlewares/ST/usbx/common/core/src/ux_utility_memory_allocate_mulc_safe.c
+                - path: ../Middlewares/ST/usbx/common/core/src/ux_device_stack_alternate_setting_get.c
+                - path: ../Middlewares/ST/usbx/common/core/src/ux_device_stack_alternate_setting_set.c
+                - path: ../Middlewares/ST/usbx/common/core/src/ux_device_stack_clear_feature.c
+                - path: ../Middlewares/ST/usbx/common/core/src/ux_device_stack_configuration_get.c
+                - path: ../Middlewares/ST/usbx/common/core/src/ux_device_stack_configuration_set.c
+                - path: ../Middlewares/ST/usbx/common/core/src/ux_device_stack_endpoint_stall.c
+                - path: ../Middlewares/ST/usbx/common/core/src/ux_device_stack_get_status.c
+                - path: ../Middlewares/ST/usbx/common/core/src/ux_device_stack_interface_set.c
+                - path: ../Middlewares/ST/usbx/common/core/src/ux_device_stack_interface_start.c
+                - path: ../Middlewares/ST/usbx/common/core/src/ux_device_stack_set_feature.c
+                - path: ../Middlewares/ST/usbx/common/core/src/ux_device_stack_interface_delete.c
+                - path: ../Middlewares/ST/usbx/common/core/src/ux_device_stack_transfer_abort.c
+                - path: ../Middlewares/ST/usbx/common/core/src/ux_device_stack_transfer_all_request_abort.c
+                - path: ../Middlewares/ST/usbx/common/core/src/ux_system_tasks_run.c
+              folders: []
+            - name: CDC_ACM
+              files:
+                - path: ../Middlewares/ST/usbx/common/usbx_device_classes/src/ux_device_class_cdc_acm_entry.c
+                - path: ../Middlewares/ST/usbx/common/usbx_device_classes/src/ux_device_class_cdc_acm_initialize.c
+                - path: ../Middlewares/ST/usbx/common/usbx_device_classes/src/ux_device_class_cdc_acm_unitialize.c
+                - path: ../Middlewares/ST/usbx/common/usbx_device_classes/src/ux_device_class_cdc_acm_activate.c
+                - path: ../Middlewares/ST/usbx/common/usbx_device_classes/src/ux_device_class_cdc_acm_deactivate.c
+                - path: ../Middlewares/ST/usbx/common/usbx_device_classes/src/ux_device_class_cdc_acm_control_request.c
+                - path: ../Middlewares/ST/usbx/common/usbx_device_classes/src/ux_device_class_cdc_acm_tasks_run.c
+                - path: ../Middlewares/ST/usbx/common/usbx_device_classes/src/ux_device_class_cdc_acm_read_run.c
+                - path: ../Middlewares/ST/usbx/common/usbx_device_classes/src/ux_device_class_cdc_acm_write_run.c
+                - path: ../Middlewares/ST/usbx/common/usbx_device_classes/src/ux_device_class_cdc_acm_ioctl.c
+              folders: []
+            - name: STM32_DCD
+              files:
+                - path: ../Middlewares/ST/usbx/common/usbx_stm32_device_controllers/ux_dcd_stm32_initialize.c
+                - path: ../Middlewares/ST/usbx/common/usbx_stm32_device_controllers/ux_dcd_stm32_function.c
+                - path: ../Middlewares/ST/usbx/common/usbx_stm32_device_controllers/ux_dcd_stm32_initialize_complete.c
+                - path: ../Middlewares/ST/usbx/common/usbx_stm32_device_controllers/ux_dcd_stm32_endpoint_create.c
+                - path: ../Middlewares/ST/usbx/common/usbx_stm32_device_controllers/ux_dcd_stm32_endpoint_destroy.c
+                - path: ../Middlewares/ST/usbx/common/usbx_stm32_device_controllers/ux_dcd_stm32_endpoint_reset.c
+                - path: ../Middlewares/ST/usbx/common/usbx_stm32_device_controllers/ux_dcd_stm32_endpoint_stall.c
+                - path: ../Middlewares/ST/usbx/common/usbx_stm32_device_controllers/ux_dcd_stm32_endpoint_status.c
+                - path: ../Middlewares/ST/usbx/common/usbx_stm32_device_controllers/ux_dcd_stm32_transfer_request.c
+                - path: ../Middlewares/ST/usbx/common/usbx_stm32_device_controllers/ux_dcd_stm32_transfer_abort.c
+                - path: ../Middlewares/ST/usbx/common/usbx_stm32_device_controllers/ux_dcd_stm32_transfer_run.c
+                - path: ../Middlewares/ST/usbx/common/usbx_stm32_device_controllers/ux_dcd_stm32_frame_number_get.c
+                - path: ../Middlewares/ST/usbx/common/usbx_stm32_device_controllers/ux_dcd_stm32_callback.c
+                - path: ../Middlewares/ST/usbx/common/usbx_stm32_device_controllers/ux_dcd_stm32_interrupt_handler.c
+                - path: ../Middlewares/ST/usbx/common/usbx_stm32_device_controllers/ux_dcd_stm32_uninitialize.c
+              folders: []
         - name: RTOS2
           files: []
           folders:
@@ -129,6 +182,47 @@ virtualFolder:
             - path: ../Middlewares/Third_Party/FatFs/src/diskio.h
             - path: ../Middlewares/Third_Party/FatFs/src/ffconf.h
             - path: ../Middlewares/Third_Party/FatFs/src/integer.h
+          folders: []
+    - name: Drivers
+      files: []
+      folders:
+        - name: STM32U5xx_HAL_Driver
+          files:
+            - path: ../Drivers/STM32U5xx_HAL_Driver/Src/stm32u5xx_hal_cortex.c
+            - path: ../Drivers/STM32U5xx_HAL_Driver/Src/stm32u5xx_hal_icache.c
+            - path: ../Drivers/STM32U5xx_HAL_Driver/Src/stm32u5xx_hal.c
+            - path: ../Drivers/STM32U5xx_HAL_Driver/Src/stm32u5xx_hal_adc.c
+            - path: ../Drivers/STM32U5xx_HAL_Driver/Src/stm32u5xx_hal_adc_ex.c
+            - path: ../Drivers/STM32U5xx_HAL_Driver/Src/stm32u5xx_hal_i2c.c
+            - path: ../Drivers/STM32U5xx_HAL_Driver/Src/stm32u5xx_hal_i2c_ex.c
+            - path: ../Drivers/STM32U5xx_HAL_Driver/Src/stm32u5xx_hal_spi.c
+            - path: ../Drivers/STM32U5xx_HAL_Driver/Src/stm32u5xx_hal_spi_ex.c
+            - path: ../Drivers/STM32U5xx_HAL_Driver/Src/stm32u5xx_hal_rcc.c
+            - path: ../Drivers/STM32U5xx_HAL_Driver/Src/stm32u5xx_hal_rcc_ex.c
+            - path: ../Drivers/STM32U5xx_HAL_Driver/Src/stm32u5xx_hal_flash.c
+            - path: ../Drivers/STM32U5xx_HAL_Driver/Src/stm32u5xx_hal_flash_ex.c
+            - path: ../Drivers/STM32U5xx_HAL_Driver/Src/stm32u5xx_hal_gpio.c
+            - path: ../Drivers/STM32U5xx_HAL_Driver/Src/stm32u5xx_hal_dma.c
+            - path: ../Drivers/STM32U5xx_HAL_Driver/Src/stm32u5xx_hal_dma_ex.c
+            - path: ../Drivers/STM32U5xx_HAL_Driver/Src/stm32u5xx_hal_exti.c
+            - path: ../Drivers/STM32U5xx_HAL_Driver/Src/stm32u5xx_hal_pwr.c
+            - path: ../Drivers/STM32U5xx_HAL_Driver/Src/stm32u5xx_hal_pwr_ex.c
+            - path: ../Drivers/STM32U5xx_HAL_Driver/Src/stm32u5xx_hal_gtzc.c
+            - path: ../Drivers/STM32U5xx_HAL_Driver/Src/stm32u5xx_hal_tim.c
+            - path: ../Drivers/STM32U5xx_HAL_Driver/Src/stm32u5xx_hal_tim_ex.c
+            - path: ../Drivers/STM32U5xx_HAL_Driver/Src/stm32u5xx_hal_uart.c
+            - path: ../Drivers/STM32U5xx_HAL_Driver/Src/stm32u5xx_hal_uart_ex.c
+            - path: ../Drivers/STM32U5xx_HAL_Driver/Src/stm32u5xx_hal_sd.c
+            - path: ../Drivers/STM32U5xx_HAL_Driver/Src/stm32u5xx_hal_sd_ex.c
+            - path: ../Drivers/STM32U5xx_HAL_Driver/Src/stm32u5xx_ll_sdmmc.c
+            - path: ../Drivers/STM32U5xx_HAL_Driver/Src/stm32u5xx_ll_dlyb.c
+            - path: ../Drivers/STM32U5xx_HAL_Driver/Src/stm32u5xx_hal_pcd.c
+            - path: ../Drivers/STM32U5xx_HAL_Driver/Src/stm32u5xx_hal_pcd_ex.c
+            - path: ../Drivers/STM32U5xx_HAL_Driver/Src/stm32u5xx_ll_usb.c
+          folders: []
+        - name: CMSIS
+          files:
+            - path: ../Core/Src/system_stm32u5xx.c
           folders: []
     - name: BSP
       files: []
@@ -320,6 +414,8 @@ targets:
       defineList:
         - USE_HAL_DRIVER
         - STM32U575xx
+        - UX_STANDALONE
+        - UX_INCLUDE_USER_DEFINE_FILE
       incList:
         - .
         - ../Core/Inc
@@ -332,6 +428,12 @@ targets:
         - ../Middlewares/Third_Party/FreeRTOS/Source/CMSIS_RTOS_V2
         - ../Middlewares/Third_Party/CMSIS/RTOS2/Include
         - ../Middlewares/Third_Party/FatFs/src
+        - ../Middlewares/ST/usbx/common/core/inc
+        - ../Middlewares/ST/usbx/common/usbx_device_classes/inc
+        - ../Middlewares/ST/usbx/common/usbx_stm32_device_controllers
+        - ../Middlewares/ST/usbx/ports/generic/inc
+        - ../USBX/App
+        - ../USBX/Target
         - ../HQYJ-BSP/Inc
         - ../BSP/Sensor/Inc
         - .cmsis/include

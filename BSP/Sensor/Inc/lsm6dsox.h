@@ -69,6 +69,9 @@ extern "C" {
 #define LSM6DSOX_XL_ODR_208Hz       0x50
 #define LSM6DSOX_XL_ODR_416Hz       0x60
 #define LSM6DSOX_XL_ODR_833Hz       0x70
+#define LSM6DSOX_XL_ODR_1666Hz      0x80
+#define LSM6DSOX_XL_ODR_3332Hz      0x90
+#define LSM6DSOX_XL_ODR_6664Hz      0xA0
 
 #define LSM6DSOX_XL_FS_2G           0x00
 #define LSM6DSOX_XL_FS_4G           0x08
@@ -84,6 +87,9 @@ extern "C" {
 #define LSM6DSOX_G_ODR_208Hz        0x50
 #define LSM6DSOX_G_ODR_416Hz        0x60
 #define LSM6DSOX_G_ODR_833Hz        0x70
+#define LSM6DSOX_G_ODR_1666Hz       0x80
+#define LSM6DSOX_G_ODR_3332Hz       0x90
+#define LSM6DSOX_G_ODR_6664Hz       0xA0
 
 #define LSM6DSOX_G_FS_250DPS        0x00
 #define LSM6DSOX_G_FS_500DPS        0x04

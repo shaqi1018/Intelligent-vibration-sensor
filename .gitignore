@@ -18,3 +18,14 @@ JLinkLog.txt
 *.uvguix.*
 *.uvoptx
 JLinkSettings.ini
+
+# ST USBX vendor middleware (large, regenerated from CubeMX)
+Middlewares/ST/usbx/
+
+# Build logs
+MDK-ARM/build.log
+MDK-ARM/build_log_usb_stage_a.txt
+MDK-ARM/build_sync_frame.log
+
+# Claude IDE settings
+MDK-ARM/.claude/
