@@ -35,6 +35,8 @@
 #include "qma6100p.h"
 #include "usb_cdc_service.h"
 #include "dma_sampling.h"
+#include "acq_config.h"
+#include "device_config.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -262,7 +264,7 @@ __weak void PostSleepProcessing(uint32_t ulExpectedIdleTime)
 void MX_FREERTOS_Init(void)
 {
   /* USER CODE BEGIN Init */
-
+  AcqConfig_Init();
   /* USER CODE END Init */
 
   /* USER CODE BEGIN RTOS_MUTEX */
@@ -568,6 +570,7 @@ static void AppLoggerStopSdSession(uint8_t *sd_file_open, uint32_t *rows_since_s
 
   if (*sd_file_open != 0U)
   {
+    (void)DeviceCfg_WriteCurrentToSD();
     FatFs_SD_LoggerStop();
     *sd_file_open = 0U;
   }
@@ -1966,6 +1969,10 @@ void StartLoggerTask(void *argument)
   AppFlowStatsSetMode(0U, 0U);
   printf("[Logger] task started, SD card mode\r\n");
 
+  /* 从SD卡读取 DeviceConfig.json 并应用到运行时配置；
+   * 文件不存在时写入默认模板，两种情况均不中断启动流程 */
+  (void)DeviceCfg_LoadFromSD();
+
   for (;;)
   {
     AppAcqControl_t acq;
@@ -1990,6 +1997,9 @@ void StartLoggerTask(void *argument)
       result = FatFs_SD_LoggerStart();
       if (result == FR_OK)
       {
+        /* 将当前配置快照写入会话目录 */
+        (void)DeviceCfg_WriteConfigToDir(FatFs_SD_GetSessionDir());
+
         sd_file_open = 1U;
         rows_since_sync = 0U;
         AppFlowStatsSetMode(0U, 1U);

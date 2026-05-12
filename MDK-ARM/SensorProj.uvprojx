@@ -463,6 +463,26 @@
               <FileType>5</FileType>
               <FilePath>../Core/Inc/dma_sampling.h</FilePath>
             </File>
+            <File>
+              <FileName>acq_config.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>../Core/Src/acq_config.c</FilePath>
+            </File>
+            <File>
+              <FileName>acq_timer.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>../Core/Src/acq_timer.c</FilePath>
+            </File>
+            <File>
+              <FileName>sensor_bin.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>../Core/Src/sensor_bin.c</FilePath>
+            </File>
+            <File>
+              <FileName>frame_ring.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>../Core/Src/frame_ring.c</FilePath>
+            </File>
           </Files>
         </Group>
         <Group>
@@ -502,6 +522,16 @@
               <FileName>sensor_snapshot.h</FileName>
               <FileType>5</FileType>
               <FilePath>../Core/Inc/sensor_snapshot.h</FilePath>
+            </File>
+            <File>
+              <FileName>device_config.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>../Core/Src/device_config.c</FilePath>
+            </File>
+            <File>
+              <FileName>device_config.h</FileName>
+              <FileType>5</FileType>
+              <FilePath>../Core/Inc/device_config.h</FilePath>
             </File>
           </Files>
         </Group>

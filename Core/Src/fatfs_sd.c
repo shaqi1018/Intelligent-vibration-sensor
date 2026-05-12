@@ -7,12 +7,24 @@
 #include "sd_diskio.h"
 #include "sdmmc.h"
 
-#define FATFS_SD_LOG_DIR        "0:/LOG"
-#define FATFS_SD_LOG_PATH_MAX   32U
+/* 会话目录前缀，8.3 格式：CKBX + 4 位数字 = 8 字符 */
+#define FATFS_SD_SESSION_PREFIX   "CKBX"
+#define FATFS_SD_SESSION_MAX      9999U
+#define FATFS_SD_DIR_PATH_MAX     24U   /* "0:/CKBOX0001" = 13 + NUL */
+#define FATFS_SD_FILE_PATH_MAX    32U   /* "0:/CKBOX0001/LSM_ACC.CSV" = 25 + NUL */
+
+/* 5 个 CSV 文件名（8.3 格式） */
+#define FATFS_SD_FNAME_LSM_ACC   "LSM_ACC.CSV"
+#define FATFS_SD_FNAME_LSM_GYR   "LSM_GYR.CSV"
+#define FATFS_SD_FNAME_LSM_TMP   "LSM_TMP.CSV"
+#define FATFS_SD_FNAME_H3_ACC    "H3_ACC.CSV"
+#define FATFS_SD_FNAME_QMA_ACC   "QMA_ACC.CSV"
+
+#define FATFS_SD_NUM_FILES        5U
 
 static FATFS g_sd_fatfs;
-static FIL g_log_file;
-static char g_log_path[FATFS_SD_LOG_PATH_MAX];
+static FIL g_log_files[FATFS_SD_NUM_FILES];
+static char g_session_dir[FATFS_SD_DIR_PATH_MAX];
 static uint8_t g_sd_mounted = 0U;
 static uint8_t g_logger_active = 0U;
 static uint32_t g_logger_rows_written = 0U;
@@ -59,50 +71,57 @@ static FRESULT FatFs_SD_WriteExact(FIL *file, const void *buffer, UINT length)
   return FR_OK;
 }
 
-static FRESULT FatFs_SD_EnsureLogDirectory(void)
-{
-  FRESULT result;
-  FILINFO info;
-
-  result = f_stat(FATFS_SD_LOG_DIR, &info);
-  if (result == FR_OK)
-  {
-    return ((info.fattrib & AM_DIR) != 0U) ? FR_OK : FR_EXIST;
-  }
-
-  if (result != FR_NO_FILE)
-  {
-    return result;
-  }
-
-  return f_mkdir(FATFS_SD_LOG_DIR);
-}
-
-static FRESULT FatFs_SD_FindNextLogPath(char *path, size_t path_size)
+static FRESULT FatFs_SD_FindNextSessionDir(char *dir, size_t dir_size)
 {
   unsigned int index;
   FILINFO info;
 
-  for (index = 1U; index <= 9999U; index++)
+  for (index = 1U; index <= FATFS_SD_SESSION_MAX; index++)
   {
-    int path_len = snprintf(path, path_size, FATFS_SD_LOG_DIR "/LOG%04u.CSV", index);
-    if ((path_len < 0) || ((size_t)path_len >= path_size))
+    int len = snprintf(dir, dir_size, "0:/%s%04u", FATFS_SD_SESSION_PREFIX, index);
+    if ((len < 0) || ((size_t)len >= dir_size))
     {
       return FR_INVALID_NAME;
     }
 
-    switch (f_stat(path, &info))
+    FRESULT r = f_stat(dir, &info);
+    if (r == FR_NO_FILE)
     {
-      case FR_OK:
-        break;
-      case FR_NO_FILE:
-        return FR_OK;
-      default:
-        return FR_DISK_ERR;
+      return FR_OK;  /* 目录不存在，可用 */
     }
+    if (r != FR_OK)
+    {
+      return r;
+    }
+    /* 目录已存在，尝试下一个序号 */
   }
 
   return FR_DENIED;
+}
+
+static FRESULT FatFs_SD_OpenCsvFile(FIL *file, const char *dir, const char *fname,
+                                     const char *header)
+{
+  char path[FATFS_SD_FILE_PATH_MAX];
+  FRESULT r;
+
+  (void)snprintf(path, sizeof(path), "%s/%s", dir, fname);
+
+  r = f_open(file, path, FA_CREATE_ALWAYS | FA_WRITE);
+  if (r != FR_OK)
+  {
+    printf("[FatFs] 打开 %s 失败: %s (%d)\r\n", path, FatFs_SD_ResultToString(r), (int)r);
+    return r;
+  }
+
+  r = FatFs_SD_WriteExact(file, header, (UINT)strlen(header));
+  if (r != FR_OK)
+  {
+    (void)f_close(file);
+    return r;
+  }
+
+  return f_sync(file);
 }
 
 FRESULT FatFs_SD_Mount(void)
@@ -139,9 +158,12 @@ void FatFs_SD_Unmount(void)
 {
   if (g_logger_active != 0U)
   {
-    (void)f_close(&g_log_file);
+    for (uint32_t i = 0U; i < FATFS_SD_NUM_FILES; i++)
+    {
+      (void)f_close(&g_log_files[i]);
+    }
     g_logger_active = 0U;
-    g_log_path[0] = '\0';
+    g_session_dir[0] = '\0';
   }
 
   if (g_sd_mounted != 0U)
@@ -151,14 +173,29 @@ void FatFs_SD_Unmount(void)
   }
 }
 
+const char *FatFs_SD_GetSessionDir(void)
+{
+  return g_session_dir;
+}
+
 FRESULT FatFs_SD_LoggerStart(void)
 {
   FRESULT result;
-  static const char kCsvHeader[] =
-      "frame_id,tick_ms,enabled_mask,present_mask,"
-      "lsm_sample_seq,lsm_valid,lsm_acc_x_mg,lsm_acc_y_mg,lsm_acc_z_mg,lsm_gyro_x_mdps,lsm_gyro_y_mdps,lsm_gyro_z_mdps,lsm_temp_c,"
-      "h3_sample_seq,h3_valid,h3_raw_x,h3_raw_y,h3_raw_z,h3_acc_x_mg,h3_acc_y_mg,h3_acc_z_mg,"
-      "qma_sample_seq,qma_valid,qma_raw_x,qma_raw_y,qma_raw_z,qma_acc_x_mg,qma_acc_y_mg,qma_acc_z_mg\r\n";
+
+  /* CSV 表头定义 */
+  static const char kHdrLsmAcc[] = "frame_id,tick_ms,acc_x_mg,acc_y_mg,acc_z_mg\r\n";
+  static const char kHdrLsmGyr[] = "frame_id,tick_ms,gyro_x_mdps,gyro_y_mdps,gyro_z_mdps\r\n";
+  static const char kHdrLsmTmp[] = "frame_id,tick_ms,temp_C\r\n";
+  static const char kHdrH3Acc[]  = "frame_id,tick_ms,raw_x,raw_y,raw_z,acc_x_mg,acc_y_mg,acc_z_mg\r\n";
+  static const char kHdrQmaAcc[] = "frame_id,tick_ms,raw_x,raw_y,raw_z,acc_x_mg,acc_y_mg,acc_z_mg\r\n";
+
+  static const char *headers[FATFS_SD_NUM_FILES] = {
+    kHdrLsmAcc, kHdrLsmGyr, kHdrLsmTmp, kHdrH3Acc, kHdrQmaAcc
+  };
+  static const char *fnames[FATFS_SD_NUM_FILES] = {
+    FATFS_SD_FNAME_LSM_ACC, FATFS_SD_FNAME_LSM_GYR, FATFS_SD_FNAME_LSM_TMP,
+    FATFS_SD_FNAME_H3_ACC,  FATFS_SD_FNAME_QMA_ACC
+  };
 
   if (g_logger_active != 0U)
   {
@@ -176,44 +213,42 @@ FRESULT FatFs_SD_LoggerStart(void)
     return result;
   }
 
-  result = FatFs_SD_EnsureLogDirectory();
+  /* 查找下一个可用会话目录 */
+  result = FatFs_SD_FindNextSessionDir(g_session_dir, sizeof(g_session_dir));
   if (result != FR_OK)
   {
+    printf("[FatFs] 查找会话目录失败: %s (%d)\r\n", FatFs_SD_ResultToString(result), (int)result);
     FatFs_SD_Unmount();
     return result;
   }
 
-  result = FatFs_SD_FindNextLogPath(g_log_path, sizeof(g_log_path));
+  /* 创建会话目录 */
+  result = f_mkdir(g_session_dir);
   if (result != FR_OK)
   {
+    printf("[FatFs] 创建目录 %s 失败: %s (%d)\r\n",
+           g_session_dir, FatFs_SD_ResultToString(result), (int)result);
     FatFs_SD_Unmount();
     return result;
   }
 
-  result = f_open(&g_log_file, g_log_path, FA_CREATE_ALWAYS | FA_WRITE);
-  if (result != FR_OK)
+  /* 打开 5 个 CSV 文件并写入表头 */
+  for (uint32_t i = 0U; i < FATFS_SD_NUM_FILES; i++)
   {
-    FatFs_SD_Unmount();
-    return result;
+    result = FatFs_SD_OpenCsvFile(&g_log_files[i], g_session_dir, fnames[i], headers[i]);
+    if (result != FR_OK)
+    {
+      /* 关闭已打开的文件 */
+      for (uint32_t j = 0U; j < i; j++)
+      {
+        (void)f_close(&g_log_files[j]);
+      }
+      FatFs_SD_Unmount();
+      return result;
+    }
   }
 
-  result = FatFs_SD_WriteExact(&g_log_file, kCsvHeader, (UINT)(sizeof(kCsvHeader) - 1U));
-  if (result != FR_OK)
-  {
-    (void)f_close(&g_log_file);
-    FatFs_SD_Unmount();
-    return result;
-  }
-
-  result = f_sync(&g_log_file);
-  if (result != FR_OK)
-  {
-    (void)f_close(&g_log_file);
-    FatFs_SD_Unmount();
-    return result;
-  }
-
-  printf("[FatFs] 日志文件已打开: %s\r\n", g_log_path);
+  printf("[FatFs] 会话目录已创建: %s\r\n", g_session_dir);
   g_logger_active = 1U;
   g_logger_rows_written = 0U;
   return FR_OK;
@@ -221,9 +256,9 @@ FRESULT FatFs_SD_LoggerStart(void)
 
 FRESULT FatFs_SD_LoggerAppendFrame(const AppSensorFrame_t *frame)
 {
-  FRESULT result;
-  char line[512];
-  int line_len;
+  FRESULT result = FR_OK;
+  char line[128];
+  int len;
 
   if (frame == NULL)
   {
@@ -240,52 +275,78 @@ FRESULT FatFs_SD_LoggerAppendFrame(const AppSensorFrame_t *frame)
     return FR_NOT_READY;
   }
 
-  line_len = snprintf(
-      line,
-      sizeof(line),
-      "%lu,%lu,0x%02lX,0x%02lX,"
-      "%lu,%u,%.1f,%.1f,%.1f,%.1f,%.1f,%.1f,%.1f,"
-      "%lu,%u,%d,%d,%d,%.1f,%.1f,%.1f,"
-      "%lu,%u,%d,%d,%d,%.1f,%.1f,%.1f\r\n",
-      (unsigned long)frame->frame_id,
-      (unsigned long)frame->tick_ms,
-      (unsigned long)frame->enabled_mask,
-      (unsigned long)frame->present_mask,
-      (unsigned long)frame->lsm6dsox.sample_seq,
-      (unsigned int)frame->lsm6dsox.valid,
-      frame->lsm6dsox.data.acc.x,
-      frame->lsm6dsox.data.acc.y,
-      frame->lsm6dsox.data.acc.z,
-      frame->lsm6dsox.data.gyro.x,
-      frame->lsm6dsox.data.gyro.y,
-      frame->lsm6dsox.data.gyro.z,
-      frame->lsm6dsox.data.temp_C,
-      (unsigned long)frame->h3lis100dl.sample_seq,
-      (unsigned int)frame->h3lis100dl.valid,
-      (int)frame->h3lis100dl.data.raw[0],
-      (int)frame->h3lis100dl.data.raw[1],
-      (int)frame->h3lis100dl.data.raw[2],
-      frame->h3lis100dl.data.acc_mg[0],
-      frame->h3lis100dl.data.acc_mg[1],
-      frame->h3lis100dl.data.acc_mg[2],
-      (unsigned long)frame->qma6100p.sample_seq,
-      (unsigned int)frame->qma6100p.valid,
-      (int)frame->qma6100p.data.raw[0],
-      (int)frame->qma6100p.data.raw[1],
-      (int)frame->qma6100p.data.raw[2],
-      frame->qma6100p.data.acc_mg[0],
-      frame->qma6100p.data.acc_mg[1],
-      frame->qma6100p.data.acc_mg[2]);
-
-  if ((line_len < 0) || ((size_t)line_len >= sizeof(line)))
+  /* LSM6DSOX acc — 文件索引 0 */
+  if (frame->lsm6dsox.valid != 0U)
   {
-    return FR_INT_ERR;
+    len = snprintf(line, sizeof(line), "%lu,%lu,%.1f,%.1f,%.1f\r\n",
+                   (unsigned long)frame->frame_id,
+                   (unsigned long)frame->tick_ms,
+                   frame->lsm6dsox.data.acc.x,
+                   frame->lsm6dsox.data.acc.y,
+                   frame->lsm6dsox.data.acc.z);
+    if ((len > 0) && ((size_t)len < sizeof(line)))
+      result = FatFs_SD_WriteExact(&g_log_files[0], line, (UINT)len);
+    if (result != FR_OK) return result;
   }
 
-  result = FatFs_SD_WriteExact(&g_log_file, line, (UINT)line_len);
-  if (result != FR_OK)
+  /* LSM6DSOX gyro — 文件索引 1 */
+  if (frame->lsm6dsox.valid != 0U)
   {
-    return result;
+    len = snprintf(line, sizeof(line), "%lu,%lu,%.1f,%.1f,%.1f\r\n",
+                   (unsigned long)frame->frame_id,
+                   (unsigned long)frame->tick_ms,
+                   frame->lsm6dsox.data.gyro.x,
+                   frame->lsm6dsox.data.gyro.y,
+                   frame->lsm6dsox.data.gyro.z);
+    if ((len > 0) && ((size_t)len < sizeof(line)))
+      result = FatFs_SD_WriteExact(&g_log_files[1], line, (UINT)len);
+    if (result != FR_OK) return result;
+  }
+
+  /* LSM6DSOX temp — 文件索引 2 */
+  if (frame->lsm6dsox.valid != 0U)
+  {
+    len = snprintf(line, sizeof(line), "%lu,%lu,%.1f\r\n",
+                   (unsigned long)frame->frame_id,
+                   (unsigned long)frame->tick_ms,
+                   frame->lsm6dsox.data.temp_C);
+    if ((len > 0) && ((size_t)len < sizeof(line)))
+      result = FatFs_SD_WriteExact(&g_log_files[2], line, (UINT)len);
+    if (result != FR_OK) return result;
+  }
+
+  /* H3LIS100DL acc — 文件索引 3 */
+  if (frame->h3lis100dl.valid != 0U)
+  {
+    len = snprintf(line, sizeof(line), "%lu,%lu,%d,%d,%d,%.1f,%.1f,%.1f\r\n",
+                   (unsigned long)frame->frame_id,
+                   (unsigned long)frame->tick_ms,
+                   (int)frame->h3lis100dl.data.raw[0],
+                   (int)frame->h3lis100dl.data.raw[1],
+                   (int)frame->h3lis100dl.data.raw[2],
+                   frame->h3lis100dl.data.acc_mg[0],
+                   frame->h3lis100dl.data.acc_mg[1],
+                   frame->h3lis100dl.data.acc_mg[2]);
+    if ((len > 0) && ((size_t)len < sizeof(line)))
+      result = FatFs_SD_WriteExact(&g_log_files[3], line, (UINT)len);
+    if (result != FR_OK) return result;
+  }
+
+  /* QMA6100P acc — 文件索引 4 */
+  if (frame->qma6100p.valid != 0U)
+  {
+    len = snprintf(line, sizeof(line), "%lu,%lu,%d,%d,%d,%.1f,%.1f,%.1f\r\n",
+                   (unsigned long)frame->frame_id,
+                   (unsigned long)frame->tick_ms,
+                   (int)frame->qma6100p.data.raw[0],
+                   (int)frame->qma6100p.data.raw[1],
+                   (int)frame->qma6100p.data.raw[2],
+                   frame->qma6100p.data.acc_mg[0],
+                   frame->qma6100p.data.acc_mg[1],
+                   frame->qma6100p.data.acc_mg[2]);
+    if ((len > 0) && ((size_t)len < sizeof(line)))
+      result = FatFs_SD_WriteExact(&g_log_files[4], line, (UINT)len);
+    if (result != FR_OK) return result;
   }
 
   g_logger_rows_written++;
@@ -294,14 +355,22 @@ FRESULT FatFs_SD_LoggerAppendFrame(const AppSensorFrame_t *frame)
 
 FRESULT FatFs_SD_LoggerSync(void)
 {
-  FRESULT result;
+  FRESULT result = FR_OK;
 
   if (g_logger_active == 0U)
   {
     return FR_NOT_ENABLED;
   }
 
-  result = f_sync(&g_log_file);
+  for (uint32_t i = 0U; i < FATFS_SD_NUM_FILES; i++)
+  {
+    FRESULT r = f_sync(&g_log_files[i]);
+    if (r != FR_OK)
+    {
+      result = r;
+    }
+  }
+
   printf("[FatFs] sync rows=%lu result=%s (%d)\r\n",
          (unsigned long)g_logger_rows_written,
          FatFs_SD_ResultToString(result),
@@ -311,23 +380,21 @@ FRESULT FatFs_SD_LoggerSync(void)
 
 void FatFs_SD_LoggerStop(void)
 {
-  FRESULT sync_result = FR_OK;
-  FRESULT close_result = FR_OK;
-
   if (g_logger_active != 0U)
   {
-    sync_result = f_sync(&g_log_file);
-    close_result = f_close(&g_log_file);
-    printf("[FatFs] logger stop rows=%lu sync=%s (%d) close=%s (%d) file=%s\r\n",
+    for (uint32_t i = 0U; i < FATFS_SD_NUM_FILES; i++)
+    {
+      (void)f_sync(&g_log_files[i]);
+      (void)f_close(&g_log_files[i]);
+    }
+
+    printf("[FatFs] logger stop rows=%lu dir=%s\r\n",
            (unsigned long)g_logger_rows_written,
-           FatFs_SD_ResultToString(sync_result),
-           (int)sync_result,
-           FatFs_SD_ResultToString(close_result),
-           (int)close_result,
-           g_log_path);
+           g_session_dir);
+
     g_logger_active = 0U;
     g_logger_rows_written = 0U;
-    g_log_path[0] = '\0';
+    g_session_dir[0] = '\0';
   }
 
   if (g_sd_mounted != 0U)

@@ -13,6 +13,7 @@ extern "C" {
 const char *FatFs_SD_ResultToString(FRESULT result);
 FRESULT FatFs_SD_Mount(void);
 void FatFs_SD_Unmount(void);
+const char *FatFs_SD_GetSessionDir(void);
 FRESULT FatFs_SD_LoggerStart(void);
 FRESULT FatFs_SD_LoggerAppendFrame(const AppSensorFrame_t *frame);
 FRESULT FatFs_SD_LoggerSync(void);

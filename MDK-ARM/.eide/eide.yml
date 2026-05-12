@@ -34,6 +34,10 @@ virtualFolder:
                 - path: ../Core/Inc/key_adc.h
                 - path: ../Core/Inc/usb_cdc_service.h
                 - path: ../Core/Inc/dma_sampling.h
+                - path: ../Core/Src/acq_config.c
+                - path: ../Core/Src/acq_timer.c
+                - path: ../Core/Src/sensor_bin.c
+                - path: ../Core/Src/frame_ring.c
               folders: []
             - name: Storage
               files:
@@ -44,6 +48,8 @@ virtualFolder:
                 - path: ../Core/Src/fatfs_sd.c
                 - path: ../Core/Inc/fatfs_sd.h
                 - path: ../Core/Inc/sensor_snapshot.h
+                - path: ../Core/Src/device_config.c
+                - path: ../Core/Inc/device_config.h
               folders: []
             - name: USB
               files:
