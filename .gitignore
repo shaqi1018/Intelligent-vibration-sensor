@@ -19,8 +19,8 @@ JLinkLog.txt
 *.uvoptx
 JLinkSettings.ini
 
-# ST USBX vendor middleware (large, regenerated from CubeMX)
-Middlewares/ST/usbx/
+# ST USBX vendor middleware: tracked in repo so the project builds without
+# requiring a CubeMX regeneration. Source: STM32Cube_FW_U5_V1.7.0.
 
 # Build logs
 MDK-ARM/build.log
