@@ -37,7 +37,6 @@
 #include "dma_sampling.h"
 #include "acq_config.h"
 #include "device_config.h"
-#include "boot_mode.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -1382,17 +1381,6 @@ static void UsbCmd_Process(const char *cmd)
   else if (strcmp(cmd, "acq_status") == 0)
   {
     UsbCmd_AcqStatus();
-  }
-  else if (strcmp(cmd, "msc") == 0)
-  {
-    const char *msg = "Switching to USB MSC mode (resets in 500ms)...\r\n";
-    UsbCdcService_Write((const uint8_t *)msg, strlen(msg));
-    /* Stop acquisition so the logger releases SD before reset. */
-    UsbCmd_AcqStop();
-    /* Give FatFs writes time to flush; logger task closes files on stop. */
-    osDelay(500U);
-    BootMode_Write(BOOT_MODE_USB_MSC);
-    NVIC_SystemReset();
   }
   else
   {

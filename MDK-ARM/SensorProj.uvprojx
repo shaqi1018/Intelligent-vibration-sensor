@@ -339,7 +339,7 @@
               <MiscControls></MiscControls>
               <Define>USE_HAL_DRIVER,STM32U575xx,UX_STANDALONE,UX_INCLUDE_USER_DEFINE_FILE</Define>
               <Undefine></Undefine>
-              <IncludePath>../Core/Inc;../Drivers/STM32U5xx_HAL_Driver/Inc;../Drivers/STM32U5xx_HAL_Driver/Inc/Legacy;../Drivers/CMSIS/Device/ST/STM32U5xx/Include;../Drivers/CMSIS/Include;../Middlewares/Third_Party/FreeRTOS/Source/include/;../Middlewares/Third_Party/FreeRTOS/Source/portable/GCC/ARM_CM33_NTZ/non_secure/;../Middlewares/Third_Party/FreeRTOS/Source/CMSIS_RTOS_V2/;../Middlewares/Third_Party/CMSIS/RTOS2/Include/;../Middlewares/Third_Party/FatFs/src;../Middlewares/ST/usbx/common/core/inc;../Middlewares/ST/usbx/common/usbx_device_classes/inc;../Middlewares/ST/usbx/common/usbx_stm32_device_controllers;../Middlewares/ST/usbx/ports/generic/inc;../Middlewares/ST/STM32_USB_Device_Library/Core/Inc;../Middlewares/ST/STM32_USB_Device_Library/Class/MSC/Inc;../USBX/App;../USBX/Target;..\HQYJ-BSP\Inc;..\BSP\Sensor\Inc</IncludePath>
+              <IncludePath>../Core/Inc;../Drivers/STM32U5xx_HAL_Driver/Inc;../Drivers/STM32U5xx_HAL_Driver/Inc/Legacy;../Drivers/CMSIS/Device/ST/STM32U5xx/Include;../Drivers/CMSIS/Include;../Middlewares/Third_Party/FreeRTOS/Source/include/;../Middlewares/Third_Party/FreeRTOS/Source/portable/GCC/ARM_CM33_NTZ/non_secure/;../Middlewares/Third_Party/FreeRTOS/Source/CMSIS_RTOS_V2/;../Middlewares/Third_Party/CMSIS/RTOS2/Include/;../Middlewares/Third_Party/FatFs/src;../Middlewares/ST/usbx/common/core/inc;../Middlewares/ST/usbx/common/usbx_device_classes/inc;../Middlewares/ST/usbx/common/usbx_stm32_device_controllers;../Middlewares/ST/usbx/ports/generic/inc;../USBX/App;../USBX/Target;..\HQYJ-BSP\Inc;..\BSP\Sensor\Inc</IncludePath>
             </VariousControls>
           </Cads>
           <Aads>
@@ -592,111 +592,6 @@
               <FileName>ux_stm32_config.h</FileName>
               <FileType>5</FileType>
               <FilePath>../USBX/Target/ux_stm32_config.h</FilePath>
-            </File>
-            <File>
-              <FileName>boot_mode.c</FileName>
-              <FileType>1</FileType>
-              <FilePath>../Core/Src/boot_mode.c</FilePath>
-            </File>
-            <File>
-              <FileName>boot_mode.h</FileName>
-              <FileType>5</FileType>
-              <FilePath>../Core/Inc/boot_mode.h</FilePath>
-            </File>
-            <File>
-              <FileName>usb_pcd_dispatch.c</FileName>
-              <FileType>1</FileType>
-              <FilePath>../Core/Src/usb_pcd_dispatch.c</FilePath>
-            </File>
-            <File>
-              <FileName>usb_pcd_dispatch.h</FileName>
-              <FileType>5</FileType>
-              <FilePath>../Core/Inc/usb_pcd_dispatch.h</FilePath>
-            </File>
-            <File>
-              <FileName>usb_msc_app.c</FileName>
-              <FileType>1</FileType>
-              <FilePath>../Core/Src/usb_msc_app.c</FilePath>
-            </File>
-            <File>
-              <FileName>usb_msc_app.h</FileName>
-              <FileType>5</FileType>
-              <FilePath>../Core/Inc/usb_msc_app.h</FilePath>
-            </File>
-            <File>
-              <FileName>usbd_conf.c</FileName>
-              <FileType>1</FileType>
-              <FilePath>../Core/Src/usbd_conf.c</FilePath>
-            </File>
-            <File>
-              <FileName>usbd_conf.h</FileName>
-              <FileType>5</FileType>
-              <FilePath>../Core/Inc/usbd_conf.h</FilePath>
-            </File>
-            <File>
-              <FileName>usbd_desc.c</FileName>
-              <FileType>1</FileType>
-              <FilePath>../Core/Src/usbd_desc.c</FilePath>
-            </File>
-            <File>
-              <FileName>usbd_desc.h</FileName>
-              <FileType>5</FileType>
-              <FilePath>../Core/Inc/usbd_desc.h</FilePath>
-            </File>
-            <File>
-              <FileName>usbd_storage_if.c</FileName>
-              <FileType>1</FileType>
-              <FilePath>../Core/Src/usbd_storage_if.c</FilePath>
-            </File>
-            <File>
-              <FileName>usbd_storage_if.h</FileName>
-              <FileType>5</FileType>
-              <FilePath>../Core/Inc/usbd_storage_if.h</FilePath>
-            </File>
-          </Files>
-        </Group>
-        <Group>
-          <GroupName>Middlewares/USBD_Classic/Core</GroupName>
-          <Files>
-            <File>
-              <FileName>usbd_core.c</FileName>
-              <FileType>1</FileType>
-              <FilePath>../Middlewares/ST/STM32_USB_Device_Library/Core/Src/usbd_core.c</FilePath>
-            </File>
-            <File>
-              <FileName>usbd_ctlreq.c</FileName>
-              <FileType>1</FileType>
-              <FilePath>../Middlewares/ST/STM32_USB_Device_Library/Core/Src/usbd_ctlreq.c</FilePath>
-            </File>
-            <File>
-              <FileName>usbd_ioreq.c</FileName>
-              <FileType>1</FileType>
-              <FilePath>../Middlewares/ST/STM32_USB_Device_Library/Core/Src/usbd_ioreq.c</FilePath>
-            </File>
-          </Files>
-        </Group>
-        <Group>
-          <GroupName>Middlewares/USBD_Classic/MSC</GroupName>
-          <Files>
-            <File>
-              <FileName>usbd_msc.c</FileName>
-              <FileType>1</FileType>
-              <FilePath>../Middlewares/ST/STM32_USB_Device_Library/Class/MSC/Src/usbd_msc.c</FilePath>
-            </File>
-            <File>
-              <FileName>usbd_msc_bot.c</FileName>
-              <FileType>1</FileType>
-              <FilePath>../Middlewares/ST/STM32_USB_Device_Library/Class/MSC/Src/usbd_msc_bot.c</FilePath>
-            </File>
-            <File>
-              <FileName>usbd_msc_data.c</FileName>
-              <FileType>1</FileType>
-              <FilePath>../Middlewares/ST/STM32_USB_Device_Library/Class/MSC/Src/usbd_msc_data.c</FilePath>
-            </File>
-            <File>
-              <FileName>usbd_msc_scsi.c</FileName>
-              <FileType>1</FileType>
-              <FilePath>../Middlewares/ST/STM32_USB_Device_Library/Class/MSC/Src/usbd_msc_scsi.c</FilePath>
             </File>
           </Files>
         </Group>

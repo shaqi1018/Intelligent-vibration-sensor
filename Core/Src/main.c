@@ -33,9 +33,6 @@
 #include "bsp_spi.h"
 #include "key_adc.h"
 #include "dma_sampling.h"
-#include "boot_mode.h"
-#include "usb_pcd_dispatch.h"
-#include "usb_msc_app.h"
 
 /* USER CODE END Includes */
 
@@ -111,60 +108,6 @@ int main(void)
   printf("[初始化] SD DET(PC13)=%u, inserted_level=%u\r\n",
          (unsigned int)HAL_GPIO_ReadPin(SDMMC1_DET_GPIO_Port, SDMMC1_DET_Pin),
          (unsigned int)SDMMC1_DET_INSERTED_LEVEL);
-
-  /* Boot mode is decided by a flash flag written by the previous session.
-   * MSC mode = bare-metal U-disk (SD as block device), exits via USB unplug.
-   * LOG mode = normal RTOS path (sensors + FatFs + USBX-CDC). */
-  g_boot_mode = BootMode_Read();
-
-  if (g_boot_mode == BOOT_MODE_USB_MSC)
-  {
-    printf("[BOOT] USB MSC mode (SD card as U-disk)\r\n");
-
-    if (SDMMC1_IsCardDetected() == 0U)
-    {
-      printf("[MSC] no SD card; falling back to LOG mode\r\n");
-      BootMode_Write(BOOT_MODE_DATA_LOG);
-      NVIC_SystemReset();
-    }
-    MX_SDMMC1_SD_Init();
-    printf("[MSC] SDMMC1 ready, blocks=%u, blkSize=%u\r\n",
-           (unsigned int)hsd1.SdCard.BlockNbr,
-           (unsigned int)hsd1.SdCard.BlockSize);
-
-    MX_USB_OTG_FS_PCD_Init();
-    printf("[MSC] PCD init done\r\n");
-
-    if (UsbMsc_App_Start() == 0U)
-    {
-      printf("[MSC] USBD start FAILED; falling back to LOG mode\r\n");
-      BootMode_Write(BOOT_MODE_DATA_LOG);
-      NVIC_SystemReset();
-    }
-    printf("[MSC] enumerated as USB Mass Storage. Unplug USB to return to LOG mode.\r\n");
-
-    /* Bare polling loop: when host disconnects (was configured, now not),
-     * arm LOG flag and reset so next boot resumes data logging. */
-    uint8_t was_configured = 0U;
-    for (;;)
-    {
-      if (UsbMsc_App_IsConfigured() != 0U)
-      {
-        was_configured = 1U;
-      }
-      else if (was_configured != 0U)
-      {
-        printf("[MSC] USB disconnected; switching back to LOG mode\r\n");
-        HAL_Delay(50U);
-        BootMode_Write(BOOT_MODE_DATA_LOG);
-        NVIC_SystemReset();
-      }
-      HAL_Delay(20U);
-    }
-    /* not reached */
-  }
-
-  printf("[BOOT] LOG mode (sensors + FatFs + USBX-CDC)\r\n");
 
   if (SDMMC1_IsCardDetected() != 0U)
   {
