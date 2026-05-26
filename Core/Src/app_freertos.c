@@ -1421,6 +1421,7 @@ void StartUsbCdcTask(void *argument)
   memset(cmd_buffer, 0, sizeof(cmd_buffer));
 
   usb_init_ok = UsbCdcService_Init();
+  printf("[CDC] init %s\r\n", usb_init_ok ? "ok" : "FAIL");
 
   for (;;)
   {
@@ -1440,6 +1441,7 @@ void StartUsbCdcTask(void *argument)
           if (cmd_len > 0U)
           {
             cmd_buffer[cmd_len] = '\0';
+            printf("[CDC] cmd: %s\r\n", cmd_buffer);
             UsbCmd_Process(cmd_buffer);
             cmd_len = 0U;
           }
@@ -1987,7 +1989,9 @@ void StartLoggerTask(void *argument)
 
   /* 从SD卡读取 DeviceConfig.json 并应用到运行时配置；
    * 文件不存在时写入默认模板，两种情况均不中断启动流程 */
+  printf("[Logger] loading config from SD...\r\n");
   (void)DeviceCfg_LoadFromSD();
+  printf("[Logger] config loaded, entering main loop\r\n");
 
   for (;;)
   {
@@ -2010,6 +2014,8 @@ void StartLoggerTask(void *argument)
 
     if (sd_file_open == 0U)
     {
+      printf("[Logger] starting SD session (acq running=%u sink=%u)...\r\n",
+             (unsigned int)acq.running, (unsigned int)acq.sink);
       result = FatFs_SD_LoggerStart();
       if (result == FR_OK)
       {

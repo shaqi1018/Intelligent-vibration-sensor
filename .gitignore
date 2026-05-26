@@ -1,8 +1,12 @@
 /_git_backup_mdkarm_20260325/
 
-# Keil / build outputs
+# ============================================================
+# Keil build outputs — remove from index if accidentally tracked
+# ============================================================
 MDK-ARM/SensorProj/
 MDK-ARM/01-1_stm32u575_freertos_blink/
+
+# Individual build artifacts (catch strays outside SensorProj/)
 *.o
 *.d
 *.axf
@@ -12,20 +16,33 @@ MDK-ARM/01-1_stm32u575_freertos_blink/
 *.lnp
 *.dep
 *.build_log.htm
-JLinkLog.txt
+*.sct
+*.lst
+*.htm.hex
 
-# User-local IDE/debug state
-*.uvguix.*
+# ============================================================
+# Keil IDE user-local state (not portable across machines)
+# ============================================================
+*.uvguix.Q1
+*.uvguix.南风
 *.uvoptx
+JLinkLog.txt
 JLinkSettings.ini
 
-# ST USBX vendor middleware: tracked in repo so the project builds without
-# requiring a CubeMX regeneration. Source: STM32Cube_FW_U5_V1.7.0.
-
+# ============================================================
 # Build logs
+# ============================================================
 MDK-ARM/build.log
 MDK-ARM/build_log_usb_stage_a.txt
 MDK-ARM/build_sync_frame.log
 
+# ============================================================
 # Claude IDE settings
+# ============================================================
 MDK-ARM/.claude/
+
+# ============================================================
+# NOTE: USBX / USBD / usb_* source files MUST be tracked.
+# Do NOT add USBX/, Core/Src/usb_*, Core/Inc/usb_*,
+# Middlewares/ST/STM32_USB_Device_Library/ to this file.
+# ============================================================

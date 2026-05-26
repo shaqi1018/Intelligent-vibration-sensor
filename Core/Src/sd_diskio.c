@@ -44,6 +44,8 @@ DSTATUS SD_disk_initialize(BYTE pdrv)
 
 DRESULT SD_disk_read(BYTE pdrv, BYTE *buff, DWORD sector, UINT count)
 {
+  uint8_t retries;
+
   if ((pdrv != SDDISKIO_DRIVE_NUM) || (buff == NULL) || (count == 0U))
   {
     return RES_PARERR;
@@ -54,16 +56,28 @@ DRESULT SD_disk_read(BYTE pdrv, BYTE *buff, DWORD sector, UINT count)
     return RES_NOTRDY;
   }
 
-  if (HAL_SD_ReadBlocks(&hsd1, buff, (uint32_t)sector, (uint32_t)count, HAL_MAX_DELAY) != HAL_OK)
+  for (retries = 0U; retries < 3U; retries++)
   {
-    return RES_ERROR;
+    /* Disable interrupts during SDMMC polling to prevent SysTick/PendSV
+     * from firing inside HAL_SD_ReadBlocks and corrupting the SDMMC
+     * state machine. This matches the bare-metal conditions where SDMMC
+     * operations are proven reliable (smoke test). */
+    __disable_irq();
+    if (HAL_SD_ReadBlocks(&hsd1, buff, (uint32_t)sector, (uint32_t)count, HAL_MAX_DELAY) == HAL_OK)
+    {
+      while (HAL_SD_GetCardState(&hsd1) != HAL_SD_CARD_TRANSFER)
+      {
+      }
+      __enable_irq();
+      return RES_OK;
+    }
+    __enable_irq();
+    /* Re-init card before retry */
+    HAL_SD_DeInit(&hsd1);
+    MX_SDMMC1_SD_Init();
   }
 
-  while (HAL_SD_GetCardState(&hsd1) != HAL_SD_CARD_TRANSFER)
-  {
-  }
-
-  return RES_OK;
+  return RES_ERROR;
 }
 
 DRESULT SD_disk_write(BYTE pdrv, const BYTE *buff, DWORD sector, UINT count)
@@ -78,14 +92,18 @@ DRESULT SD_disk_write(BYTE pdrv, const BYTE *buff, DWORD sector, UINT count)
     return RES_NOTRDY;
   }
 
+  /* Disable interrupts during SDMMC polling — same reason as read path. */
+  __disable_irq();
   if (HAL_SD_WriteBlocks(&hsd1, buff, (uint32_t)sector, (uint32_t)count, HAL_MAX_DELAY) != HAL_OK)
   {
+    __enable_irq();
     return RES_ERROR;
   }
 
   while (HAL_SD_GetCardState(&hsd1) != HAL_SD_CARD_TRANSFER)
   {
   }
+  __enable_irq();
 
   return RES_OK;
 }

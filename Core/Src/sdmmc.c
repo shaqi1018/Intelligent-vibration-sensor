@@ -18,6 +18,8 @@ uint8_t SDMMC1_IsCardDetected(void)
 
 uint8_t SDMMC1_InitCard(void)
 {
+  HAL_SD_CardStateTypeDef state;
+
   if (SDMMC1_IsCardDetected() == 0U)
   {
     return 0U;
@@ -26,12 +28,18 @@ uint8_t SDMMC1_InitCard(void)
   if (hsd1.Instance != SDMMC1)
   {
     MX_SDMMC1_SD_Init();
+    return (HAL_SD_GetCardState(&hsd1) == HAL_SD_CARD_TRANSFER) ? 1U : 0U;
   }
-  else if (HAL_SD_GetCardState(&hsd1) == HAL_SD_CARD_ERROR)
+
+  state = HAL_SD_GetCardState(&hsd1);
+  if (state == HAL_SD_CARD_TRANSFER)
   {
-    HAL_SD_DeInit(&hsd1);
-    MX_SDMMC1_SD_Init();
+    return 1U;
   }
+
+  /* Card is not in TRANSFER (ERROR, SENDING, RECEIVE, etc.) → full re-init */
+  HAL_SD_DeInit(&hsd1);
+  MX_SDMMC1_SD_Init();
 
   return (HAL_SD_GetCardState(&hsd1) == HAL_SD_CARD_TRANSFER) ? 1U : 0U;
 }
@@ -43,7 +51,7 @@ void MX_SDMMC1_SD_Init(void)
   hsd1.Init.ClockPowerSave = SDMMC_CLOCK_POWER_SAVE_DISABLE;
   hsd1.Init.BusWide = SDMMC_BUS_WIDE_1B;
   hsd1.Init.HardwareFlowControl = SDMMC_HARDWARE_FLOW_CONTROL_DISABLE;
-  hsd1.Init.ClockDiv = 118U;
+  hsd1.Init.ClockDiv = 24U;  /* 48 MHz / (24+2) ≈ 1.85 MHz — faster identification */
 
   if (HAL_SD_Init(&hsd1) != HAL_OK)
   {
@@ -54,6 +62,9 @@ void MX_SDMMC1_SD_Init(void)
   {
     hsd1.Init.BusWide = SDMMC_BUS_WIDE_4B;
   }
+  /* Boost data transfer clock: 48 MHz / (1+2) = 16 MHz.
+   * Only touches CLKCR, no card re-init needed. */
+  MODIFY_REG(hsd1.Instance->CLKCR, SDMMC_CLKCR_CLKDIV, 1U << SDMMC_CLKCR_CLKDIV_Pos);
 }
 
 void HAL_SD_MspInit(SD_HandleTypeDef *sdHandle)
@@ -89,8 +100,10 @@ void HAL_SD_MspInit(SD_HandleTypeDef *sdHandle)
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   HAL_GPIO_Init(GPIOD, &GPIO_InitStruct);
 
-  HAL_NVIC_SetPriority(SDMMC1_IRQn, 6U, 0U);
-  HAL_NVIC_EnableIRQ(SDMMC1_IRQn);
+  /* SDMMC1 IRQ disabled — polling mode only (HAL_SD_ReadBlocks/WriteBlocks
+   * with HAL_MAX_DELAY). Keeping the IRQ enabled caused spurious
+   * HAL_SD_IRQHandler invocations that corrupted hsd1.State between
+   * consecutive FatFs operations in the RTOS context. */
 }
 
 void HAL_SD_MspDeInit(SD_HandleTypeDef *sdHandle)

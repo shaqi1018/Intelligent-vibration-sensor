@@ -56,17 +56,38 @@ uint32_t UxDeviceCdcAcm_Write(const uint8_t *buf, uint32_t len)
 {
   ULONG actual_length = 0U;
   UINT status;
+  uint32_t retries = 0U;
 
   if ((buf == NULL) || (len == 0U) || (g_cdc_acm == UX_NULL))
   {
     return 0U;
   }
 
-  status = ux_device_class_cdc_acm_write_run(g_cdc_acm, (UCHAR *)buf, (ULONG)len, &actual_length);
-  if ((status == UX_STATE_NEXT) || (status == UX_SUCCESS))
+  /* Drive the non-blocking write state machine to completion.
+   * First call transitions from UX_STATE_RESET to WRITE_WAIT (submits transfer).
+   * Subsequent calls poll until UX_STATE_NEXT (transfer complete). */
+  do
   {
-    return (uint32_t)actual_length;
-  }
+    actual_length = 0U;
+    status = ux_device_class_cdc_acm_write_run(g_cdc_acm, (UCHAR *)buf, (ULONG)len, &actual_length);
+
+    if ((status == UX_STATE_NEXT) || (status == UX_SUCCESS))
+    {
+      return (uint32_t)actual_length;
+    }
+
+    if (status == UX_STATE_WAIT)
+    {
+      /* Transfer submitted but not yet completed — run the USBX task loop
+       * to push data through the HAL PCD, then retry. */
+      ux_system_tasks_run();
+    }
+    else
+    {
+      /* UX_STATE_ERROR, UX_STATE_EXIT, etc. — give up. */
+      break;
+    }
+  } while (++retries < 100U);
 
   return 0U;
 }

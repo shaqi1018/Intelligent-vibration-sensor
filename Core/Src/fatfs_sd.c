@@ -143,6 +143,10 @@ FRESULT FatFs_SD_Mount(void)
     return FR_NOT_READY;
   }
 
+  /* Matches committed order: memset → unmount → mount.
+   * The old re-ordering (unmount → memset → mount) caused FR_DISK_ERR
+   * because f_mount(NULL) on a zeroed FATFS struct was a no-op, leaving
+   * stale volume metadata that corrupted the subsequent f_mount. */
   memset(&g_sd_fatfs, 0, sizeof(g_sd_fatfs));
   result = f_mount(NULL, "0:", 1U);
   result = f_mount(&g_sd_fatfs, "0:", 1U);
@@ -171,6 +175,15 @@ void FatFs_SD_Unmount(void)
     (void)f_mount(NULL, "0:", 1U);
     g_sd_mounted = 0U;
   }
+}
+
+void FatFs_SD_ForceReinit(void)
+{
+  /* Unmount first (close files, unbind volume) */
+  FatFs_SD_Unmount();
+
+  /* Clear the FATFS structure so FatFs re-reads boot sector / FAT from disk */
+  memset(&g_sd_fatfs, 0, sizeof(g_sd_fatfs));
 }
 
 const char *FatFs_SD_GetSessionDir(void)
