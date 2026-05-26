@@ -27,7 +27,7 @@ USBD_StatusTypeDef USBD_LL_Init(USBD_HandleTypeDef *pdev)
    * RX shared, TX0 = EP0, TX1 = MSC-IN. */
   HAL_PCDEx_SetRxFiFo(&hpcd_USB_OTG_FS, 0x80U);   /* 128 words = 512 bytes */
   HAL_PCDEx_SetTxFiFo(&hpcd_USB_OTG_FS, 0U, 0x40U);  /* 64 words = 256 bytes */
-  HAL_PCDEx_SetTxFiFo(&hpcd_USB_OTG_FS, 1U, 0x40U);  /* 64 words = 256 bytes */
+  HAL_PCDEx_SetTxFiFo(&hpcd_USB_OTG_FS, 1U, 0x80U);  /* 128 words = 512 bytes */
   return USBD_OK;
 }
 
