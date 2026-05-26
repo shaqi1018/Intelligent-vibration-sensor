@@ -37,6 +37,7 @@
 #include "dma_sampling.h"
 #include "acq_config.h"
 #include "device_config.h"
+#include "boot_mode.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -1079,7 +1080,7 @@ static void UsbCmd_Ping(void)
 
 static void UsbCmd_Help(void)
 {
-  const char *msg = "Commands: ping, help, status, snapshot, flowstat, dmastat, stat, acq_start, acq_stop, acq_status\r\n";
+  const char *msg = "Commands: ping, help, status, snapshot, flowstat, dmastat, stat, acq_start, acq_stop, acq_status, msc\r\n";
   UsbCdcService_Write((const uint8_t *)msg, strlen(msg));
 }
 
@@ -1381,6 +1382,21 @@ static void UsbCmd_Process(const char *cmd)
   else if (strcmp(cmd, "acq_status") == 0)
   {
     UsbCmd_AcqStatus();
+  }
+  else if (strcmp(cmd, "msc") == 0)
+  {
+    const char *msg = "Switching to USB MSC mode...\r\n";
+    UsbCdcService_Write((const uint8_t *)msg, strlen(msg));
+    UsbCmd_AcqStop();
+    osDelay(500U);
+    BootMode_Write(BOOT_MODE_USB_MSC);
+    /* Verify write before reset */
+    boot_mode_t verify = BootMode_Read();
+    char buf[64];
+    snprintf(buf, sizeof(buf), "BootMode flag written, readback=%d, resetting...\r\n", (int)verify);
+    UsbCdcService_Write((const uint8_t *)buf, strlen(buf));
+    osDelay(200U);
+    NVIC_SystemReset();
   }
   else
   {

@@ -228,7 +228,7 @@ ULONG                   ed_status;
 /*                                            resulting in version 6.1.10 */
 /*                                                                        */
 /**************************************************************************/
-void HAL_PCD_SetupStageCallback(PCD_HandleTypeDef *hpcd)
+void UX_App_PCD_SetupStageCallback(PCD_HandleTypeDef *hpcd)
 {
 
 UX_SLAVE_DCD            *dcd;
@@ -390,7 +390,7 @@ UX_SLAVE_ENDPOINT       *endpoint;
 /*                                            resulting in version 6.1.12 */
 /*                                                                        */
 /**************************************************************************/
-void HAL_PCD_DataInStageCallback(PCD_HandleTypeDef *hpcd, uint8_t epnum)
+void UX_App_PCD_DataInStageCallback(PCD_HandleTypeDef *hpcd, uint8_t epnum)
 {
 
 UX_SLAVE_DCD            *dcd;
@@ -586,7 +586,7 @@ UX_SLAVE_ENDPOINT       *endpoint;
 /*                                            resulting in version 6.1.10 */
 /*                                                                        */
 /**************************************************************************/
-void HAL_PCD_DataOutStageCallback(PCD_HandleTypeDef *hpcd, uint8_t epnum)
+void UX_App_PCD_DataOutStageCallback(PCD_HandleTypeDef *hpcd, uint8_t epnum)
 {
 
 UX_SLAVE_DCD            *dcd;
@@ -739,7 +739,7 @@ UX_SLAVE_ENDPOINT       *endpoint;
 /*                                            resulting in version 6.1.10 */
 /*                                                                        */
 /**************************************************************************/
-void HAL_PCD_ResetCallback(PCD_HandleTypeDef *hpcd)
+void UX_App_PCD_ResetCallback(PCD_HandleTypeDef *hpcd)
 {
 
     /* If the device is attached or configured, we need to disconnect it.  */
@@ -818,7 +818,7 @@ void HAL_PCD_ResetCallback(PCD_HandleTypeDef *hpcd)
 /*  07-29-2022     Chaoqiong Xiao           Modified comment(s),          */
 /*                                            resulting in version 6.1.12 */
 /**************************************************************************/
-void HAL_PCD_ConnectCallback(PCD_HandleTypeDef *hpcd)
+void UX_App_PCD_ConnectCallback(PCD_HandleTypeDef *hpcd)
 {
 
     /* Check the status change callback.  */
@@ -872,7 +872,7 @@ void HAL_PCD_ConnectCallback(PCD_HandleTypeDef *hpcd)
 /*                                            resulting in version 6.1.12 */
 /*                                                                        */
 /**************************************************************************/
-void HAL_PCD_DisconnectCallback(PCD_HandleTypeDef *hpcd)
+void UX_App_PCD_DisconnectCallback(PCD_HandleTypeDef *hpcd)
 {
 
     /* Check the status change callback.  */
@@ -931,7 +931,7 @@ void HAL_PCD_DisconnectCallback(PCD_HandleTypeDef *hpcd)
 /*                                            resulting in version 6.1.12 */
 /*                                                                        */
 /**************************************************************************/
-void HAL_PCD_SuspendCallback(PCD_HandleTypeDef *hpcd)
+void UX_App_PCD_SuspendCallback(PCD_HandleTypeDef *hpcd)
 {
 
     /* Check the status change callback.  */
@@ -982,7 +982,7 @@ void HAL_PCD_SuspendCallback(PCD_HandleTypeDef *hpcd)
 /*                                            resulting in version 6.1.12 */
 /*                                                                        */
 /**************************************************************************/
-void HAL_PCD_ResumeCallback(PCD_HandleTypeDef *hpcd)
+void UX_App_PCD_ResumeCallback(PCD_HandleTypeDef *hpcd)
 {
 
     /* Check the status change callback.  */
@@ -1033,7 +1033,7 @@ void HAL_PCD_ResumeCallback(PCD_HandleTypeDef *hpcd)
 /*                                            resulting in version 6.1.12 */
 /*                                                                        */
 /**************************************************************************/
-void HAL_PCD_SOFCallback(PCD_HandleTypeDef *hpcd)
+void UX_App_PCD_SOFCallback(PCD_HandleTypeDef *hpcd)
 {
 
     /* Check the status change callback.  */
@@ -1085,7 +1085,7 @@ void HAL_PCD_SOFCallback(PCD_HandleTypeDef *hpcd)
 /*  01-31-2022     Chaoqiong Xiao           Initial Version 6.1.10        */
 /*                                                                        */
 /**************************************************************************/
-void HAL_PCD_ISOINIncompleteCallback(PCD_HandleTypeDef *hpcd, uint8_t epnum)
+void UX_App_PCD_ISOINIncompleteCallback(PCD_HandleTypeDef *hpcd, uint8_t epnum)
 {
 UX_SLAVE_DCD            *dcd;
 UX_DCD_STM32            *dcd_stm32;
@@ -1162,7 +1162,7 @@ UX_SLAVE_ENDPOINT       *endpoint;
 /*  01-31-2022     Chaoqiong Xiao           Initial Version 6.1.10        */
 /*                                                                        */
 /**************************************************************************/
-void HAL_PCD_ISOOUTIncompleteCallback(PCD_HandleTypeDef *hpcd, uint8_t epnum)
+void UX_App_PCD_ISOOUTIncompleteCallback(PCD_HandleTypeDef *hpcd, uint8_t epnum)
 {
 UX_SLAVE_DCD            *dcd;
 UX_DCD_STM32            *dcd_stm32;
