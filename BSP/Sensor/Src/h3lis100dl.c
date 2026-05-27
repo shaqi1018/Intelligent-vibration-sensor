@@ -541,7 +541,6 @@ int H3LIS100DL_Configure(const H3LIS100DL_Config_t *config)
 int H3LIS100DL_ReadAccXYZ(H3LIS100DL_Data_t *data)
 {
   uint8_t status = 0U;
-  uint8_t raw_xyz[3] = {0};
 
   if (data == NULL)
   {
@@ -557,14 +556,17 @@ int H3LIS100DL_ReadAccXYZ(H3LIS100DL_Data_t *data)
     return -2;
   }
 
-  if (H3LIS100DL_ReadRegs(H3LIS100DL_REG_OUT_X, raw_xyz, 3U) != HAL_OK)
+  /* OUT_X=0x29, OUT_Y=0x2B, OUT_Z=0x2D — reserved bytes at 0x2A and 0x2C.
+     Auto-increment steps through every address, so read 5 bytes and pick [0],[2],[4]. */
+  uint8_t raw5[5] = {0};
+  if (H3LIS100DL_ReadRegs(H3LIS100DL_REG_OUT_X, raw5, 5U) != HAL_OK)
   {
     return -1;
   }
 
-  data->raw[0] = (int8_t)raw_xyz[0];
-  data->raw[1] = (int8_t)raw_xyz[1];
-  data->raw[2] = (int8_t)raw_xyz[2];
+  data->raw[0] = (int8_t)raw5[0];  /* 0x29 OUT_X */
+  data->raw[1] = (int8_t)raw5[2];  /* 0x2B OUT_Y (skip reserved 0x2A) */
+  data->raw[2] = (int8_t)raw5[4];  /* 0x2D OUT_Z (skip reserved 0x2C) */
 
   data->acc_mg[0] = (float)data->raw[0] * H3LIS100DL_SENSITIVITY_MG;
   data->acc_mg[1] = (float)data->raw[1] * H3LIS100DL_SENSITIVITY_MG;

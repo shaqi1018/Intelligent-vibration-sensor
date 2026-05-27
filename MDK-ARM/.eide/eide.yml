@@ -64,6 +64,18 @@ virtualFolder:
                 - path: ../USBX/App/ux_device_cdc_acm.h
                 - path: ../USBX/App/ux_user.h
                 - path: ../USBX/Target/ux_stm32_config.h
+                - path: ../Core/Src/boot_mode.c
+                - path: ../Core/Inc/boot_mode.h
+                - path: ../Core/Src/usb_pcd_dispatch.c
+                - path: ../Core/Inc/usb_pcd_dispatch.h
+                - path: ../Core/Src/usb_msc_app.c
+                - path: ../Core/Inc/usb_msc_app.h
+                - path: ../Core/Src/usbd_conf.c
+                - path: ../Core/Inc/usbd_conf.h
+                - path: ../Core/Src/usbd_desc.c
+                - path: ../Core/Inc/usbd_desc.h
+                - path: ../Core/Src/usbd_storage_if.c
+                - path: ../Core/Inc/usbd_storage_if.h
               folders: []
         - name: HQYJ-BSP
           files:
@@ -72,6 +84,22 @@ virtualFolder:
     - name: Middlewares
       files: []
       folders:
+        - name: USBD_Classic
+          files: []
+          folders:
+            - name: Core
+              files:
+                - path: ../Middlewares/ST/STM32_USB_Device_Library/Core/Src/usbd_core.c
+                - path: ../Middlewares/ST/STM32_USB_Device_Library/Core/Src/usbd_ctlreq.c
+                - path: ../Middlewares/ST/STM32_USB_Device_Library/Core/Src/usbd_ioreq.c
+              folders: []
+            - name: MSC
+              files:
+                - path: ../Middlewares/ST/STM32_USB_Device_Library/Class/MSC/Src/usbd_msc.c
+                - path: ../Middlewares/ST/STM32_USB_Device_Library/Class/MSC/Src/usbd_msc_bot.c
+                - path: ../Middlewares/ST/STM32_USB_Device_Library/Class/MSC/Src/usbd_msc_data.c
+                - path: ../Middlewares/ST/STM32_USB_Device_Library/Class/MSC/Src/usbd_msc_scsi.c
+              folders: []
         - name: USBX
           files: []
           folders:
@@ -438,6 +466,8 @@ targets:
         - ../Middlewares/ST/usbx/common/usbx_device_classes/inc
         - ../Middlewares/ST/usbx/common/usbx_stm32_device_controllers
         - ../Middlewares/ST/usbx/ports/generic/inc
+        - ../Middlewares/ST/STM32_USB_Device_Library/Core/Inc
+        - ../Middlewares/ST/STM32_USB_Device_Library/Class/MSC/Inc
         - ../USBX/App
         - ../USBX/Target
         - ../HQYJ-BSP/Inc

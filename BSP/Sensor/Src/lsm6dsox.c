@@ -130,7 +130,20 @@ HAL_StatusTypeDef LSM6DSOX_Configure(const LSM6DSOX_Config_t *cfg)
   if (LSM6DSOX_WriteReg(LSM6DSOX_REG_CTRL3_C, ctrl3) != HAL_OK) return HAL_ERROR;
   if (LSM6DSOX_WriteReg(LSM6DSOX_REG_CTRL1_XL, cfg->xl_odr | cfg->xl_fs) != HAL_OK) return HAL_ERROR;
   if (LSM6DSOX_WriteReg(LSM6DSOX_REG_CTRL2_G,  cfg->g_odr  | cfg->g_fs)  != HAL_OK) return HAL_ERROR;
-  LSM6DSOX_UpdateSensitivity(cfg->xl_fs, cfg->g_fs);
+
+  /* Read back CTRL1_XL to verify FS bits were actually written (chip may be damaged/hot) */
+  {
+    uint8_t actual = 0;
+    uint8_t actual_fs;
+    if (LSM6DSOX_ReadReg(LSM6DSOX_REG_CTRL1_XL, &actual) != HAL_OK) return HAL_ERROR;
+    actual_fs = actual & 0x0CU;
+    if (actual_fs != (cfg->xl_fs & 0x0CU))
+    {
+      printf("[LSM6DSOX] WARN: CTRL1_XL FS mismatch wrote=0x%02X read=0x%02X, using actual\r\n",
+             (unsigned int)(cfg->xl_odr | cfg->xl_fs), (unsigned int)actual);
+    }
+    LSM6DSOX_UpdateSensitivity(actual_fs, cfg->g_fs);
+  }
   return HAL_OK;
 }
 
