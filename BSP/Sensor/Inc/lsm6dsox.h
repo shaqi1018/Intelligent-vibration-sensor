@@ -60,6 +60,46 @@ extern "C" {
 #define LSM6DSOX_REG_OUTZ_L_A       0x2C
 #define LSM6DSOX_REG_OUTZ_H_A       0x2D
 
+/* ======================== FIFO registers =================================== */
+#define LSM6DSOX_REG_FIFO_CTRL1     0x07  /* WTM[7:0] */
+#define LSM6DSOX_REG_FIFO_CTRL2     0x08  /* WTM[8] in bit0 */
+#define LSM6DSOX_REG_FIFO_CTRL3     0x09  /* BDR_GY[3:0] | BDR_XL[3:0] */
+#define LSM6DSOX_REG_FIFO_CTRL4     0x0A  /* DEC_TS|ODR_T|0|FIFO_MODE[2:0] */
+#define LSM6DSOX_REG_INT1_CTRL      0x0D
+#define LSM6DSOX_REG_FIFO_STATUS1   0x3A  /* DIFF_FIFO[7:0] */
+#define LSM6DSOX_REG_FIFO_STATUS2   0x3B  /* DIFF_FIFO[9:8] in bits[1:0] */
+#define LSM6DSOX_REG_FIFO_DATA_TAG  0x78  /* tag byte; +1..+6 = 6 data bytes */
+
+/* FIFO_CTRL3 BDR codes (matched to ODR codes) */
+#define LSM6DSOX_BDR_OFF            0x00
+#define LSM6DSOX_BDR_12_5Hz         0x01
+#define LSM6DSOX_BDR_26Hz           0x02
+#define LSM6DSOX_BDR_52Hz           0x03
+#define LSM6DSOX_BDR_104Hz          0x04
+#define LSM6DSOX_BDR_208Hz          0x05
+#define LSM6DSOX_BDR_417Hz          0x06
+#define LSM6DSOX_BDR_833Hz          0x07
+#define LSM6DSOX_BDR_1667Hz         0x08
+#define LSM6DSOX_BDR_3333Hz         0x09
+#define LSM6DSOX_BDR_6667Hz         0x0A
+
+/* FIFO_CTRL4 modes */
+#define LSM6DSOX_FIFO_MODE_BYPASS     0x00
+#define LSM6DSOX_FIFO_MODE_FIFO       0x01
+#define LSM6DSOX_FIFO_MODE_CONTINUOUS 0x06
+
+/* INT1_CTRL bits */
+#define LSM6DSOX_INT1_FIFO_TH       0x08
+
+/* FIFO_STATUS2 bits */
+#define LSM6DSOX_FIFO_WTM_IA_BIT    0x80
+
+/* FIFO TAG: tag_byte >> 3, see datasheet table 197 */
+#define LSM6DSOX_TAG_GYRO_NC        0x01
+#define LSM6DSOX_TAG_ACC_NC         0x02
+#define LSM6DSOX_TAG_TEMP           0x03
+#define LSM6DSOX_TAG_TIMESTAMP      0x04
+
 /* ======================== CTRL1_XL: Accel ODR & FS ========================= */
 #define LSM6DSOX_XL_ODR_OFF         0x00
 #define LSM6DSOX_XL_ODR_12_5Hz      0x10
@@ -121,11 +161,11 @@ extern "C" {
 #define LSM6DSOX_TEMP_OFFSET          25.0f
 #define LSM6DSOX_DMA_DEBUG_LOG        0
 
-/* ======================== INT pins (optional) ============================== */
-#define LSM6DSOX_INT1_PIN           GPIO_PIN_0
-#define LSM6DSOX_INT1_GPIO_PORT     GPIOE
-#define LSM6DSOX_INT2_PIN           GPIO_PIN_1
-#define LSM6DSOX_INT2_GPIO_PORT     GPIOE
+/* ======================== INT pins ========================================= */
+#define LSM6DSOX_INT1_PIN           GPIO_PIN_1
+#define LSM6DSOX_INT1_GPIO_PORT     GPIOB
+#define LSM6DSOX_INT2_PIN           GPIO_PIN_0
+#define LSM6DSOX_INT2_GPIO_PORT     GPIOB
 
 /* ======================== Data types ======================================= */
 typedef struct { int16_t x, y, z; } LSM6DSOX_RawData_t;
@@ -153,6 +193,44 @@ HAL_StatusTypeDef LSM6DSOX_ReadTemp(float *temp_C);
 HAL_StatusTypeDef LSM6DSOX_ReadAllData(LSM6DSOX_AllData_t *all);
 HAL_StatusTypeDef LSM6DSOX_ReadAllData_DMA(LSM6DSOX_AllData_t *all);
 uint32_t LSM6DSOX_GetDmaCallCount(void);
+
+/* ======================== FIFO API ========================================== */
+/**
+ * @brief Configure LSM6DSOX FIFO: continuous mode, ACC+GYRO batched at given
+ *        BDR code, watermark = wtm_samples (1..511), watermark interrupt
+ *        routed to INT1 pin (push-pull, active high).
+ *        Call after LSM6DSOX_Init().
+ */
+HAL_StatusTypeDef LSM6DSOX_FIFO_Config(uint16_t wtm_samples,
+                                       uint8_t bdr_xl_code,
+                                       uint8_t bdr_gy_code);
+
+/**
+ * @brief Reset FIFO content (set bypass mode then continuous mode).
+ */
+HAL_StatusTypeDef LSM6DSOX_FIFO_Reset(void);
+
+/**
+ * @brief Read FIFO fill level (number of TAG+6 byte words pending).
+ */
+HAL_StatusTypeDef LSM6DSOX_FIFO_GetLevel(uint16_t *level);
+
+/**
+ * @brief Read N FIFO words back-to-back. buf must hold n_words * 7 bytes.
+ *        Each word: [tag][xL][xH][yL][yH][zL][zH].
+ */
+HAL_StatusTypeDef LSM6DSOX_FIFO_ReadBlock(uint8_t *buf, uint16_t n_words);
+
+/**
+ * @brief Get current accelerometer sensitivity (mg/LSB) — for converting raw
+ *        FIFO ACC samples after reading them.
+ */
+float LSM6DSOX_GetAccSensitivity(void);
+
+/**
+ * @brief Get current gyroscope sensitivity (mdps/LSB).
+ */
+float LSM6DSOX_GetGyroSensitivity(void);
 
 #ifdef __cplusplus
 }

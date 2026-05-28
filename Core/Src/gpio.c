@@ -39,12 +39,27 @@ void MX_GPIO_Init(void)
 {
   GPIO_InitTypeDef GPIO_InitStruct = {0};
 
+  __HAL_RCC_GPIOB_CLK_ENABLE();
   __HAL_RCC_GPIOC_CLK_ENABLE();
 
+  /* SDMMC1 card-detect (PC13) */
   GPIO_InitStruct.Pin = SDMMC1_DET_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
   GPIO_InitStruct.Pull = GPIO_PULLUP;
   HAL_GPIO_Init(SDMMC1_DET_GPIO_Port, &GPIO_InitStruct);
+
+  /* LSM6DSOX INT1 on PB1: rising-edge EXTI for FIFO watermark interrupt.
+     Pull-down keeps line stable when sensor is inactive; the sensor drives
+     active-high in default configuration. NVIC priority must be >= 5 so the
+     ISR can safely call FromISR FreeRTOS APIs. */
+  GPIO_InitStruct.Pin = GPIO_PIN_1;
+  GPIO_InitStruct.Mode = GPIO_MODE_IT_RISING;
+  GPIO_InitStruct.Pull = GPIO_PULLDOWN;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_HIGH;
+  HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
+
+  HAL_NVIC_SetPriority(EXTI1_IRQn, 6, 0);
+  HAL_NVIC_EnableIRQ(EXTI1_IRQn);
 }
 
 /* USER CODE BEGIN 2 */

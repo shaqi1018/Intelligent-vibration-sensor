@@ -152,8 +152,8 @@ HAL_StatusTypeDef LSM6DSOX_Init(void)
   uint8_t id = 0, reg_val = 0;
   uint8_t retry;
   LSM6DSOX_Config_t default_cfg = {
-    .xl_odr = LSM6DSOX_XL_ODR_833Hz, .xl_fs = LSM6DSOX_XL_FS_4G,
-    .g_odr = LSM6DSOX_G_ODR_833Hz,   .g_fs = LSM6DSOX_G_FS_2000DPS,
+    .xl_odr = LSM6DSOX_XL_ODR_6664Hz, .xl_fs = LSM6DSOX_XL_FS_4G,
+    .g_odr = LSM6DSOX_G_ODR_6664Hz,   .g_fs = LSM6DSOX_G_FS_2000DPS,
     .enable_bdu = 1, .enable_inc = 1
   };
 
@@ -175,7 +175,7 @@ HAL_StatusTypeDef LSM6DSOX_Init(void)
   HAL_Delay(10);
 
   if (LSM6DSOX_Configure(&default_cfg) != HAL_OK) return HAL_ERROR;
-  printf("[LSM6DSOX] 初始化成功 (加速度:+/-4g 833Hz, 陀螺仪:+/-2000dps 833Hz)\r\n");
+  printf("[LSM6DSOX] 初始化成功 (加速度:+/-4g 6664Hz, 陀螺仪:+/-2000dps 6664Hz)\r\n");
   return HAL_OK;
 }
 
@@ -343,4 +343,83 @@ HAL_StatusTypeDef LSM6DSOX_ReadAllData_DMA(LSM6DSOX_AllData_t *all)
 uint32_t LSM6DSOX_GetDmaCallCount(void)
 {
   return dma_call_count;
+}
+
+/* ======================== FIFO public API ================================== */
+
+float LSM6DSOX_GetAccSensitivity(void)  { return xl_sensitivity; }
+float LSM6DSOX_GetGyroSensitivity(void) { return g_sensitivity; }
+
+HAL_StatusTypeDef LSM6DSOX_FIFO_Config(uint16_t wtm_samples,
+                                       uint8_t bdr_xl_code,
+                                       uint8_t bdr_gy_code)
+{
+  /* Step 1: bypass mode to reset FIFO */
+  if (LSM6DSOX_WriteReg(LSM6DSOX_REG_FIFO_CTRL4, LSM6DSOX_FIFO_MODE_BYPASS) != HAL_OK) return HAL_ERROR;
+
+  /* Step 2: watermark threshold (9-bit) */
+  if (LSM6DSOX_WriteReg(LSM6DSOX_REG_FIFO_CTRL1, (uint8_t)(wtm_samples & 0xFFU)) != HAL_OK) return HAL_ERROR;
+  if (LSM6DSOX_WriteReg(LSM6DSOX_REG_FIFO_CTRL2, (uint8_t)((wtm_samples >> 8) & 0x01U)) != HAL_OK) return HAL_ERROR;
+
+  /* Step 3: BDR for accel + gyro (BDR_GY high nibble, BDR_XL low nibble) */
+  if (LSM6DSOX_WriteReg(LSM6DSOX_REG_FIFO_CTRL3,
+                        (uint8_t)((bdr_gy_code << 4) | (bdr_xl_code & 0x0FU))) != HAL_OK) return HAL_ERROR;
+
+  /* Step 4: route FIFO threshold flag to INT1 pin */
+  if (LSM6DSOX_WriteReg(LSM6DSOX_REG_INT1_CTRL, LSM6DSOX_INT1_FIFO_TH) != HAL_OK) return HAL_ERROR;
+
+  /* Step 5: enter continuous mode */
+  if (LSM6DSOX_WriteReg(LSM6DSOX_REG_FIFO_CTRL4, LSM6DSOX_FIFO_MODE_CONTINUOUS) != HAL_OK) return HAL_ERROR;
+
+  printf("[LSM6DSOX] FIFO configured: wtm=%u BDR_XL=0x%X BDR_GY=0x%X mode=Continuous INT1=FIFO_TH\r\n",
+         (unsigned)wtm_samples, (unsigned)bdr_xl_code, (unsigned)bdr_gy_code);
+  return HAL_OK;
+}
+
+HAL_StatusTypeDef LSM6DSOX_FIFO_Reset(void)
+{
+  if (LSM6DSOX_WriteReg(LSM6DSOX_REG_FIFO_CTRL4, LSM6DSOX_FIFO_MODE_BYPASS) != HAL_OK) return HAL_ERROR;
+  HAL_Delay(1);
+  return LSM6DSOX_WriteReg(LSM6DSOX_REG_FIFO_CTRL4, LSM6DSOX_FIFO_MODE_CONTINUOUS);
+}
+
+HAL_StatusTypeDef LSM6DSOX_FIFO_GetLevel(uint16_t *level)
+{
+  uint8_t s1 = 0, s2 = 0;
+  if (level == NULL) return HAL_ERROR;
+  if (LSM6DSOX_ReadReg(LSM6DSOX_REG_FIFO_STATUS1, &s1) != HAL_OK) return HAL_ERROR;
+  if (LSM6DSOX_ReadReg(LSM6DSOX_REG_FIFO_STATUS2, &s2) != HAL_OK) return HAL_ERROR;
+  *level = (uint16_t)(((uint16_t)(s2 & 0x03U) << 8) | s1);
+  return HAL_OK;
+}
+
+HAL_StatusTypeDef LSM6DSOX_FIFO_ReadBlock(uint8_t *buf, uint16_t n_words)
+{
+  /* Each FIFO word = 7 bytes (1 tag + 6 data). Auto-increment is enabled
+   * (CTRL3_C IF_INC), and reads of register 0x78 stream the FIFO content. */
+  uint8_t tx_cmd;
+  HAL_StatusTypeDef ret;
+  uint16_t total = (uint16_t)(n_words * 7U);
+
+  if ((buf == NULL) || (n_words == 0U)) return HAL_ERROR;
+
+  tx_cmd = (uint8_t)(LSM6DSOX_REG_FIFO_DATA_TAG | LSM6DSOX_SPI_READ_FLAG);
+
+  LSM_SPI_CS_LOW();
+  LSM6DSOX_DelayUs(1);
+  ret = HAL_SPI_Transmit(&hspi1, &tx_cmd, 1, LSM_SPI_TIMEOUT_MS);
+  if (ret == HAL_OK)
+  {
+    uint8_t dummy = 0x00U;
+    /* Stream-read: send dummies, capture into buf. Use a single TX/RX call
+     * for speed if SPI HAL supports it; here loop is simpler and bounded. */
+    for (uint16_t i = 0; i < total; i++)
+    {
+      ret = HAL_SPI_TransmitReceive(&hspi1, &dummy, &buf[i], 1, LSM_SPI_TIMEOUT_MS);
+      if (ret != HAL_OK) break;
+    }
+  }
+  LSM_SPI_CS_HIGH();
+  LSM6DSOX_DelayUs(1);
+  return ret;
 }

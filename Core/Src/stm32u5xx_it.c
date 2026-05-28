@@ -212,6 +212,14 @@ void SDMMC1_IRQHandler(void)
   HAL_SD_IRQHandler(&hsd1);
 }
 
+/**
+  * @brief This function handles EXTI line 1 interrupt (PB1 = LSM6DSOX INT1).
+  */
+void EXTI1_IRQHandler(void)
+{
+  HAL_GPIO_EXTI_IRQHandler(GPIO_PIN_1);
+}
+
 /* USER CODE BEGIN 1 */
 
 /* USER CODE END 1 */

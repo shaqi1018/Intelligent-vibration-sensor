@@ -79,6 +79,7 @@ static osMutexId_t spi2_mutex;
 static osMutexId_t snapshot_mutex;
 static osMutexId_t frame_buffer_mutex;
 static osMutexId_t acq_ctrl_mutex;
+static osSemaphoreId_t s_lsm_fifo_sem;  /* released by EXTI1 ISR on PB1 rising edge */
 static AppSensorSnapshot_t g_sensor_snapshot;
 
 typedef struct
@@ -104,6 +105,16 @@ typedef struct
   uint32_t dropped;
   uint32_t high_watermark;
 } AppFrameBuffer_t;
+
+typedef struct
+{
+  AppLsmBatch_t batches[APP_LSM_BATCH_BUFFER_DEPTH];
+  uint32_t head;
+  uint32_t tail;
+  uint32_t count;
+  uint32_t dropped;
+  uint32_t high_watermark;
+} AppLsmBatchBuffer_t;
 
 typedef struct
 {
@@ -133,6 +144,7 @@ typedef struct
 static AppFlowStats_t g_flow_stats;
 static AppAcqControl_t g_acq_ctrl;
 static AppFrameBuffer_t g_frame_buffer;
+static AppLsmBatchBuffer_t g_lsm_batch_buffer;
 static const osMutexAttr_t spi2_mutex_attr = {
   .name      = "spi2Mutex",
   .attr_bits = osMutexPrioInherit,
@@ -157,7 +169,7 @@ osThreadId_t lsm6dsoxTaskHandle;
 const osThreadAttr_t lsm6dsoxTask_attributes = {
   .name = "lsm6dsoxTask",
   .priority = (osPriority_t)osPriorityAboveNormal,
-  .stack_size = 512 * 4
+  .stack_size = 2048 * 4  /* 8KB — holds AppLsmBatch_t (~1.5KB) + fifo_buf (1.8KB) */
 };
 
 osThreadId_t qma6100pTaskHandle;
@@ -178,7 +190,7 @@ osThreadId_t loggerTaskHandle;
 const osThreadAttr_t loggerTask_attributes = {
   .name = "loggerTask",
   .priority = (osPriority_t)osPriorityNormal,
-  .stack_size = 1024 * 4
+  .stack_size = 4096 * 4  /* 16KB — large enough to hold AppLsmBatch_t (~1.5KB) on stack */
 };
 
 osThreadId_t usbCdcTaskHandle;
@@ -200,6 +212,8 @@ const osThreadAttr_t usbUploadTask_attributes = {
 
 static uint32_t AppFrameBufferPush(const AppSensorFrame_t *frame);
 static uint32_t AppFrameBufferPop(AppSensorFrame_t *frame);
+static uint32_t AppLsmBatchPush(const AppLsmBatch_t *batch);
+static uint32_t AppLsmBatchPop(AppLsmBatch_t *batch);
 static void AppFramePopulateLsm6dsox(AppSensorFrame_t *frame, const LSM6DSOX_AllData_t *data, uint32_t tick_ms);
 static void AppFramePopulateH3lis100dl(AppSensorFrame_t *frame, const H3LIS100DL_Data_t *data, uint32_t tick_ms);
 static void AppFramePopulateQma6100p(AppSensorFrame_t *frame, const QMA6100P_Data_t *data, uint32_t tick_ms);
@@ -280,6 +294,7 @@ void MX_FREERTOS_Init(void)
   /* USER CODE END RTOS_MUTEX */
 
   /* USER CODE BEGIN RTOS_SEMAPHORES */
+  s_lsm_fifo_sem = osSemaphoreNew(1, 0, NULL);  /* binary semaphore, init=0 */
   /* USER CODE END RTOS_SEMAPHORES */
 
   /* USER CODE BEGIN RTOS_TIMERS */
@@ -313,6 +328,18 @@ void MX_FREERTOS_Init(void)
 
 /* Private application code --------------------------------------------------*/
 /* USER CODE BEGIN Application */
+
+/* EXTI rising-edge callback. PB1 is wired to LSM6DSOX INT1 (FIFO watermark). */
+void HAL_GPIO_EXTI_Rising_Callback(uint16_t GPIO_Pin)
+{
+  if (GPIO_Pin == GPIO_PIN_1)
+  {
+    if (s_lsm_fifo_sem != NULL)
+    {
+      osSemaphoreRelease(s_lsm_fifo_sem);
+    }
+  }
+}
 
 static void AppFramePopulateLsm6dsox(AppSensorFrame_t *frame, const LSM6DSOX_AllData_t *data, uint32_t tick_ms)
 {
@@ -837,6 +864,49 @@ static uint32_t AppFrameBufferPop(AppSensorFrame_t *frame)
   g_frame_buffer.tail = (g_frame_buffer.tail + 1U) % APP_SENSOR_FRAME_BUFFER_DEPTH;
   g_frame_buffer.count--;
   AppFlowStatsUpdateBufferStatsLocked();
+  osMutexRelease(frame_buffer_mutex);
+  return 1U;
+}
+
+static uint32_t AppLsmBatchPush(const AppLsmBatch_t *batch)
+{
+  if ((frame_buffer_mutex == NULL) || (batch == NULL)) return 0U;
+
+  osMutexAcquire(frame_buffer_mutex, osWaitForever);
+
+  if (g_lsm_batch_buffer.count >= APP_LSM_BATCH_BUFFER_DEPTH)
+  {
+    g_lsm_batch_buffer.dropped++;
+    osMutexRelease(frame_buffer_mutex);
+    return 0U;
+  }
+
+  g_lsm_batch_buffer.batches[g_lsm_batch_buffer.head] = *batch;
+  g_lsm_batch_buffer.head = (g_lsm_batch_buffer.head + 1U) % APP_LSM_BATCH_BUFFER_DEPTH;
+  g_lsm_batch_buffer.count++;
+  if (g_lsm_batch_buffer.count > g_lsm_batch_buffer.high_watermark)
+  {
+    g_lsm_batch_buffer.high_watermark = g_lsm_batch_buffer.count;
+  }
+  osMutexRelease(frame_buffer_mutex);
+  return 1U;
+}
+
+static uint32_t AppLsmBatchPop(AppLsmBatch_t *batch)
+{
+  if ((frame_buffer_mutex == NULL) || (batch == NULL)) return 0U;
+
+  osMutexAcquire(frame_buffer_mutex, osWaitForever);
+
+  if (g_lsm_batch_buffer.count == 0U)
+  {
+    osMutexRelease(frame_buffer_mutex);
+    return 0U;
+  }
+
+  *batch = g_lsm_batch_buffer.batches[g_lsm_batch_buffer.tail];
+  g_lsm_batch_buffer.tail = (g_lsm_batch_buffer.tail + 1U) % APP_LSM_BATCH_BUFFER_DEPTH;
+  g_lsm_batch_buffer.count--;
   osMutexRelease(frame_buffer_mutex);
   return 1U;
 }
@@ -1784,10 +1854,21 @@ void StartLsm6dsoxTask(void *argument)
     return;
   }
 
+  /* Configure LSM FIFO: ACC+GYRO batched at 6664 Hz (max ODR), watermark
+   * at 256 samples (~19ms latency: 256/(6664*2)=19.2ms). INT1 (PB1)
+   * triggers EXTI when FIFO fill reaches the watermark. */
+  if (LSM6DSOX_FIFO_Config(256U, LSM6DSOX_BDR_6667Hz, LSM6DSOX_BDR_6667Hz) != HAL_OK)
+  {
+    printf("[LSM6DSOX] FIFO config failed, task exit\r\n");
+    osThreadTerminate(NULL);
+    return;
+  }
+
+  /* Local FIFO read scratch: 256 words × 7 bytes */
+  static uint8_t fifo_buf[256U * 7U];
+
   for (;;)
   {
-    uint32_t delay_ms = AppAcqCurrentPeriodMs();
-
     AppAcqCheckAutoStop();
     if (AppAcqIsRunning() == 0U)
     {
@@ -1795,63 +1876,127 @@ void StartLsm6dsoxTask(void *argument)
       continue;
     }
 
+    /* Block on FIFO watermark interrupt (released by EXTI1 ISR on PB1).
+     * Use 100ms timeout so we still poll the FIFO level periodically — this
+     * also covers any interrupt we might miss during heavy SPI bus traffic. */
+    if (s_lsm_fifo_sem == NULL ||
+        osSemaphoreAcquire(s_lsm_fifo_sem, 100U) != osOK)
+    {
+      /* Timeout: still check FIFO — sensor may have produced data without us
+       * catching the rising edge. */
+    }
+
+    /* Drain FIFO completely — keep reading 256-word chunks until below wtm.
+     * Each chunk is parsed into a single AppLsmBatch_t (up to 128 sample
+     * pairs) and pushed to the batch ring buffer for the logger to consume. */
+    uint16_t fifo_level = 0;
+    while (1)
+    {
+      if (LSM6DSOX_FIFO_GetLevel(&fifo_level) != HAL_OK || fifo_level == 0U)
+      {
+        break;
+      }
+      uint16_t to_read = (fifo_level > 256U) ? 256U : fifo_level;
+
+      if (LSM6DSOX_FIFO_ReadBlock(fifo_buf, to_read) != HAL_OK)
+      {
+        break;
+      }
+
+      /* Parse FIFO words into a batch. ACC and GYR samples are interleaved
+       * at the same BDR; we accumulate them as pairs. */
+      AppLsmBatch_t batch;
+      memset(&batch, 0, sizeof(batch));
+      batch.base_tick_ms = osKernelGetTickCount();
+      batch.period_us = 150U;  /* 1/6664Hz ≈ 150us */
+      batch.acc_sensitivity  = LSM6DSOX_GetAccSensitivity();
+      batch.gyro_sensitivity = LSM6DSOX_GetGyroSensitivity();
+
+      uint8_t cur_has_acc = 0, cur_has_gyr = 0;
+      int16_t cur_acc[3] = {0}, cur_gyr[3] = {0};
+
+      for (uint16_t i = 0; i < to_read; i++)
+      {
+        uint8_t *w = &fifo_buf[i * 7U];
+        uint8_t tag_id = (uint8_t)(w[0] >> 3);
+        int16_t rx = (int16_t)((uint16_t)w[2] << 8 | w[1]);
+        int16_t ry = (int16_t)((uint16_t)w[4] << 8 | w[3]);
+        int16_t rz = (int16_t)((uint16_t)w[6] << 8 | w[5]);
+
+        if (tag_id == LSM6DSOX_TAG_ACC_NC)
+        {
+          cur_acc[0] = rx; cur_acc[1] = ry; cur_acc[2] = rz;
+          cur_has_acc = 1;
+        }
+        else if (tag_id == LSM6DSOX_TAG_GYRO_NC)
+        {
+          cur_gyr[0] = rx; cur_gyr[1] = ry; cur_gyr[2] = rz;
+          cur_has_gyr = 1;
+        }
+        else continue;
+
+        if (cur_has_acc && cur_has_gyr)
+        {
+          if (batch.n_pairs < APP_LSM_BATCH_MAX_PAIRS)
+          {
+            batch.acc[batch.n_pairs][0] = cur_acc[0];
+            batch.acc[batch.n_pairs][1] = cur_acc[1];
+            batch.acc[batch.n_pairs][2] = cur_acc[2];
+            batch.gyro[batch.n_pairs][0] = cur_gyr[0];
+            batch.gyro[batch.n_pairs][1] = cur_gyr[1];
+            batch.gyro[batch.n_pairs][2] = cur_gyr[2];
+            batch.n_pairs++;
+          }
+          cur_has_acc = 0;
+          cur_has_gyr = 0;
+        }
+      }
+
+      if (batch.n_pairs > 0U)
+      {
+        if (snapshot_mutex != NULL)
+        {
+          osMutexAcquire(snapshot_mutex, osWaitForever);
+          g_flow_stats.frame_id += batch.n_pairs;
+          batch.base_frame_id = g_flow_stats.frame_id;
+          osMutexRelease(snapshot_mutex);
+        }
+        (void)AppLsmBatchPush(&batch);
+      }
+
+      /* Stop once FIFO is back below the high-water mark; otherwise continue
+       * reading the next chunk in this same iteration. */
+      if (to_read < 256U) break;
+    }
+
+    /* Once per FIFO drain, also sample H3/QMA so they keep flowing */
     {
       AppSensorFrame_t frame;
-      uint8_t status_reg = 0U;
-      HAL_StatusTypeDef status_ret;
       int h3_ret;
       HAL_StatusTypeDef qma_ret;
-      uint32_t tick_ms = osKernelGetTickCount();
+      uint32_t now_ms = osKernelGetTickCount();
 
       memset(&frame, 0, sizeof(frame));
-      frame.tick_ms = tick_ms;
+      frame.tick_ms = now_ms;
       frame.enabled_mask = APP_SENSOR_MASK_ALL;
 
       if (snapshot_mutex != NULL)
       {
         osMutexAcquire(snapshot_mutex, osWaitForever);
-        frame.frame_id = g_flow_stats.frame_id + 1U;
-        g_flow_stats.frame_id = frame.frame_id;
+        frame.frame_id = ++g_flow_stats.frame_id;
         osMutexRelease(snapshot_mutex);
-      }
-      else
-      {
-        frame.frame_id = 0U;
-      }
-
-      status_ret = LSM6DSOX_ReadStatus(&status_reg);
-
-      static uint32_t loop_count = 0;
-#if LSM6DSOX_DMA_DEBUG_LOG
-      if (++loop_count <= 5U)
-      {
-        printf("[LSM Task] Loop %lu: status_ret=%d, status_reg=0x%02X, XLDA=%d\r\n",
-               (unsigned long)loop_count, (int)status_ret, (unsigned int)status_reg,
-               ((status_reg & LSM6DSOX_STATUS_XLDA) != 0U) ? 1 : 0);
-      }
-#else
-      loop_count++;
-#endif
-
-      if ((status_ret == HAL_OK) && ((status_reg & LSM6DSOX_STATUS_XLDA) != 0U))
-      {
-        if (LSM6DSOX_ReadAllData_DMA(&all_data) == HAL_OK)
-        {
-          AppFramePopulateLsm6dsox(&frame, &all_data, tick_ms);
-        }
       }
 
       osMutexAcquire(spi2_mutex, osWaitForever);
       h3_ret = H3LIS100DL_ReadAccXYZ(&frame.h3lis100dl.data);
       if (h3_ret == 0)
       {
-        AppFramePopulateH3lis100dl(&frame, &frame.h3lis100dl.data, tick_ms);
+        AppFramePopulateH3lis100dl(&frame, &frame.h3lis100dl.data, now_ms);
       }
-
       qma_ret = QMA6100P_ReadAccXYZ(&frame.qma6100p.data);
       if (qma_ret == HAL_OK)
       {
-        AppFramePopulateQma6100p(&frame, &frame.qma6100p.data, tick_ms);
+        AppFramePopulateQma6100p(&frame, &frame.qma6100p.data, now_ms);
       }
       osMutexRelease(spi2_mutex);
 
@@ -1860,8 +2005,6 @@ void StartLsm6dsoxTask(void *argument)
         (void)AppFrameBufferPush(&frame);
       }
     }
-
-    osDelay(delay_ms);
   }
 #endif
 }
@@ -2035,6 +2178,25 @@ void StartLoggerTask(void *argument)
         AppFlowStatsSetMode(0U, 0U);
         osDelay(LOGGER_RETRY_DELAY_MS);
         continue;
+      }
+    }
+
+    /* Drain LSM batch buffer first — these are bulk-write batches that contain
+     * up to 128 sample pairs each and should be processed before the per-sample
+     * H3/QMA frame buffer to keep up with high-rate FIFO output. */
+    {
+      AppLsmBatch_t batch;
+      while ((sd_file_open != 0U) && (AppAcqIsSdSessionActive() != 0U) && (AppLsmBatchPop(&batch) != 0U))
+      {
+        result = FatFs_SD_LoggerAppendLsmBatch(&batch);
+        if (result != FR_OK)
+        {
+          printf("[Logger] batch fail err=%s (%d)\r\n",
+                 FatFs_SD_ResultToString(result), (int)result);
+          AppFlowStatsRecordWriteFailure();
+          break;
+        }
+        rows_since_sync += batch.n_pairs;
       }
     }
 
