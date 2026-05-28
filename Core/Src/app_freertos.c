@@ -80,6 +80,7 @@ static osMutexId_t snapshot_mutex;
 static osMutexId_t frame_buffer_mutex;
 static osMutexId_t acq_ctrl_mutex;
 static osSemaphoreId_t s_lsm_fifo_sem;  /* released by EXTI1 ISR on PB1 rising edge */
+static osSemaphoreId_t s_qma_fifo_sem;  /* released by EXTI15 ISR on PB15 rising edge */
 static AppSensorSnapshot_t g_sensor_snapshot;
 
 typedef struct
@@ -145,6 +146,14 @@ static AppFlowStats_t g_flow_stats;
 static AppAcqControl_t g_acq_ctrl;
 static AppFrameBuffer_t g_frame_buffer;
 static AppLsmBatchBuffer_t g_lsm_batch_buffer;
+
+/* Static data backing for the SPSC ring buffers (.bss, no heap pressure). */
+static uint8_t s_lsm_imu_ringbuf[APP_RING_LSM_IMU_SIZE];
+static uint8_t s_qma_acc_ringbuf[APP_RING_QMA_ACC_SIZE];
+static AppRingBuffer_t g_ring_lsm_imu;
+static AppRingBuffer_t g_ring_qma_acc;
+static volatile uint32_t g_lsm_frame_id_counter;
+static volatile uint32_t g_qma_frame_id_counter;
 static const osMutexAttr_t spi2_mutex_attr = {
   .name      = "spi2Mutex",
   .attr_bits = osMutexPrioInherit,
@@ -176,7 +185,7 @@ osThreadId_t qma6100pTaskHandle;
 const osThreadAttr_t qma6100pTask_attributes = {
   .name = "qma6100pTask",
   .priority = (osPriority_t)osPriorityAboveNormal,
-  .stack_size = 256 * 4
+  .stack_size = 1024 * 4  /* 4KB — small char rowbuf + fifo_buf static */
 };
 
 osThreadId_t h3lis100dlTaskHandle;
@@ -214,6 +223,13 @@ static uint32_t AppFrameBufferPush(const AppSensorFrame_t *frame);
 static uint32_t AppFrameBufferPop(AppSensorFrame_t *frame);
 static uint32_t AppLsmBatchPush(const AppLsmBatch_t *batch);
 static uint32_t AppLsmBatchPop(AppLsmBatch_t *batch);
+static void     RingBuf_Init(AppRingBuffer_t *rb, uint8_t *data, uint32_t size);
+static uint32_t RingBuf_Available(const AppRingBuffer_t *rb);
+static uint32_t RingBuf_Write(AppRingBuffer_t *rb, const uint8_t *src, uint32_t len);
+static uint32_t RingBuf_PeekContiguous(AppRingBuffer_t *rb, const uint8_t **out_ptr, uint32_t *out_len);
+static void     RingBuf_Consume(AppRingBuffer_t *rb, uint32_t len);
+static inline uint32_t AppU32ToDec(char *out, uint32_t v);
+static inline uint32_t AppI32ToDec(char *out, int32_t v);
 static void AppFramePopulateLsm6dsox(AppSensorFrame_t *frame, const LSM6DSOX_AllData_t *data, uint32_t tick_ms);
 static void AppFramePopulateH3lis100dl(AppSensorFrame_t *frame, const H3LIS100DL_Data_t *data, uint32_t tick_ms);
 static void AppFramePopulateQma6100p(AppSensorFrame_t *frame, const QMA6100P_Data_t *data, uint32_t tick_ms);
@@ -295,7 +311,12 @@ void MX_FREERTOS_Init(void)
 
   /* USER CODE BEGIN RTOS_SEMAPHORES */
   s_lsm_fifo_sem = osSemaphoreNew(1, 0, NULL);  /* binary semaphore, init=0 */
+  s_qma_fifo_sem = osSemaphoreNew(1, 0, NULL);
   /* USER CODE END RTOS_SEMAPHORES */
+
+  /* Initialise SPSC ring buffers (data arrays are static, no allocation). */
+  RingBuf_Init(&g_ring_lsm_imu, s_lsm_imu_ringbuf, APP_RING_LSM_IMU_SIZE);
+  RingBuf_Init(&g_ring_qma_acc, s_qma_acc_ringbuf, APP_RING_QMA_ACC_SIZE);
 
   /* USER CODE BEGIN RTOS_TIMERS */
   /* USER CODE END RTOS_TIMERS */
@@ -329,7 +350,8 @@ void MX_FREERTOS_Init(void)
 /* Private application code --------------------------------------------------*/
 /* USER CODE BEGIN Application */
 
-/* EXTI rising-edge callback. PB1 is wired to LSM6DSOX INT1 (FIFO watermark). */
+/* EXTI rising-edge callback. PB1 = LSM6DSOX INT1 (FIFO watermark);
+ * PB15 = QMA6100P INT2 (FIFO watermark). */
 void HAL_GPIO_EXTI_Rising_Callback(uint16_t GPIO_Pin)
 {
   if (GPIO_Pin == GPIO_PIN_1)
@@ -337,6 +359,13 @@ void HAL_GPIO_EXTI_Rising_Callback(uint16_t GPIO_Pin)
     if (s_lsm_fifo_sem != NULL)
     {
       osSemaphoreRelease(s_lsm_fifo_sem);
+    }
+  }
+  else if (GPIO_Pin == GPIO_PIN_15)
+  {
+    if (s_qma_fifo_sem != NULL)
+    {
+      osSemaphoreRelease(s_qma_fifo_sem);
     }
   }
 }
@@ -909,6 +938,99 @@ static uint32_t AppLsmBatchPop(AppLsmBatch_t *batch)
   g_lsm_batch_buffer.count--;
   osMutexRelease(frame_buffer_mutex);
   return 1U;
+}
+
+/* === Lock-free SPSC ring buffer ============================================ */
+static inline uint32_t AppU32ToDec(char *out, uint32_t v)
+{
+  /* Fast unsigned->decimal — replaces snprintf in hot paths. newlib's
+   * snprintf isn't safe to call from multiple FreeRTOS tasks at high rates
+   * because it uses static reentrancy state without __malloc_lock here. */
+  char tmp[10];
+  uint32_t n = 0;
+  if (v == 0U) { out[0] = '0'; return 1U; }
+  while (v > 0U) { tmp[n++] = (char)('0' + (v % 10U)); v /= 10U; }
+  for (uint32_t i = 0; i < n; i++) out[i] = tmp[n - 1U - i];
+  return n;
+}
+
+static inline uint32_t AppI32ToDec(char *out, int32_t v)
+{
+  if (v < 0) { out[0] = '-'; return 1U + AppU32ToDec(out + 1, (uint32_t)(-v)); }
+  return AppU32ToDec(out, (uint32_t)v);
+}
+
+static void RingBuf_Init(AppRingBuffer_t *rb, uint8_t *data, uint32_t size)
+{
+  rb->data = data;
+  rb->size = size;
+  rb->wr_idx = 0U;
+  rb->rd_idx = 0U;
+  rb->dropped = 0U;
+  rb->high_watermark = 0U;
+}
+
+static uint32_t RingBuf_Available(const AppRingBuffer_t *rb)
+{
+  uint32_t wr = rb->wr_idx;
+  uint32_t rd = rb->rd_idx;
+  if (wr >= rd) return wr - rd;
+  return rb->size - rd + wr;
+}
+
+static uint32_t RingBuf_FreeSpace(const AppRingBuffer_t *rb)
+{
+  return rb->size - 1U - RingBuf_Available(rb);
+}
+
+static uint32_t RingBuf_Write(AppRingBuffer_t *rb, const uint8_t *src, uint32_t len)
+{
+  if (rb == NULL || rb->data == NULL || src == NULL || len == 0U) return 0U;
+  if (RingBuf_FreeSpace(rb) < len)
+  {
+    rb->dropped += len;
+    return 0U;
+  }
+  uint32_t wr = rb->wr_idx;
+  uint32_t first = rb->size - wr;
+  if (first >= len)
+  {
+    memcpy(&rb->data[wr], src, len);
+    wr = (wr + len) % rb->size;
+  }
+  else
+  {
+    memcpy(&rb->data[wr], src, first);
+    memcpy(&rb->data[0], src + first, len - first);
+    wr = len - first;
+  }
+  rb->wr_idx = wr;
+  uint32_t avail = RingBuf_Available(rb);
+  if (avail > rb->high_watermark) rb->high_watermark = avail;
+  return len;
+}
+
+/* Return pointer to next contiguous chunk of unread bytes (no wrap), capped
+ * at APP_RING_FLUSH_CHUNK. Caller calls RingBuf_Consume after a successful
+ * f_write to advance rd_idx. */
+static uint32_t RingBuf_PeekContiguous(AppRingBuffer_t *rb, const uint8_t **out_ptr, uint32_t *out_len)
+{
+  if (rb == NULL || rb->data == NULL || out_ptr == NULL || out_len == NULL) return 0U;
+  uint32_t wr = rb->wr_idx;
+  uint32_t rd = rb->rd_idx;
+  if (wr == rd) return 0U;
+
+  uint32_t span = (wr > rd) ? (wr - rd) : (rb->size - rd);
+  if (span > APP_RING_FLUSH_CHUNK) span = APP_RING_FLUSH_CHUNK;
+  *out_ptr = &rb->data[rd];
+  *out_len = span;
+  return span;
+}
+
+static void RingBuf_Consume(AppRingBuffer_t *rb, uint32_t len)
+{
+  if (rb == NULL || len == 0U) return;
+  rb->rd_idx = (rb->rd_idx + len) % rb->size;
 }
 
 static uint32_t AppSnapshotComputeAgeMs(uint32_t tick_ms, uint32_t last_update_ms)
@@ -1903,65 +2025,76 @@ void StartLsm6dsoxTask(void *argument)
         break;
       }
 
-      /* Parse FIFO words into a batch. ACC and GYR samples are interleaved
-       * at the same BDR; we accumulate them as pairs. */
-      AppLsmBatch_t batch;
-      memset(&batch, 0, sizeof(batch));
-      batch.base_tick_ms = osKernelGetTickCount();
-      batch.period_us = 150U;  /* 1/6664Hz ≈ 150us */
-      batch.acc_sensitivity  = LSM6DSOX_GetAccSensitivity();
-      batch.gyro_sensitivity = LSM6DSOX_GetGyroSensitivity();
-
+      /* Two-pass parse:
+       *   pass 1: count ACC/GYR pairs (needed for back-extrapolated tick_ms)
+       *   pass 2: emit one CSV row per pair into the LSM_IMU ring buffer.
+       * Each row carries 6 raw int16 values (ACC + GYR). PC-side scales by
+       * the sensitivity constants to recover physical units. */
+      uint32_t batch_base_us = osKernelGetTickCount() * 1000U;
       uint8_t cur_has_acc = 0, cur_has_gyr = 0;
       int16_t cur_acc[3] = {0}, cur_gyr[3] = {0};
-
+      uint16_t n_pairs = 0;
       for (uint16_t i = 0; i < to_read; i++)
       {
-        uint8_t *w = &fifo_buf[i * 7U];
-        uint8_t tag_id = (uint8_t)(w[0] >> 3);
-        int16_t rx = (int16_t)((uint16_t)w[2] << 8 | w[1]);
-        int16_t ry = (int16_t)((uint16_t)w[4] << 8 | w[3]);
-        int16_t rz = (int16_t)((uint16_t)w[6] << 8 | w[5]);
-
+        uint8_t tag_id = fifo_buf[i * 7U] >> 3;
         if (tag_id == LSM6DSOX_TAG_ACC_NC)
         {
-          cur_acc[0] = rx; cur_acc[1] = ry; cur_acc[2] = rz;
-          cur_has_acc = 1;
+          if (cur_has_gyr) { n_pairs++; cur_has_gyr = 0; } else cur_has_acc = 1;
         }
         else if (tag_id == LSM6DSOX_TAG_GYRO_NC)
         {
-          cur_gyr[0] = rx; cur_gyr[1] = ry; cur_gyr[2] = rz;
-          cur_has_gyr = 1;
+          if (cur_has_acc) { n_pairs++; cur_has_acc = 0; } else cur_has_gyr = 1;
         }
+      }
+      cur_has_acc = cur_has_gyr = 0;
+
+      uint32_t pair_idx = 0;
+      char rowbuf[80];
+      for (uint16_t i = 0; i < to_read; i++)
+      {
+        uint8_t *w = &fifo_buf[i * 7U];
+        uint8_t tag_id = w[0] >> 3;
+        int16_t rx = (int16_t)((uint16_t)w[2] << 8 | w[1]);
+        int16_t ry = (int16_t)((uint16_t)w[4] << 8 | w[3]);
+        int16_t rz = (int16_t)((uint16_t)w[6] << 8 | w[5]);
+        if (tag_id == LSM6DSOX_TAG_ACC_NC) { cur_acc[0]=rx; cur_acc[1]=ry; cur_acc[2]=rz; cur_has_acc = 1; }
+        else if (tag_id == LSM6DSOX_TAG_GYRO_NC) { cur_gyr[0]=rx; cur_gyr[1]=ry; cur_gyr[2]=rz; cur_has_gyr = 1; }
         else continue;
 
         if (cur_has_acc && cur_has_gyr)
         {
-          if (batch.n_pairs < APP_LSM_BATCH_MAX_PAIRS)
-          {
-            batch.acc[batch.n_pairs][0] = cur_acc[0];
-            batch.acc[batch.n_pairs][1] = cur_acc[1];
-            batch.acc[batch.n_pairs][2] = cur_acc[2];
-            batch.gyro[batch.n_pairs][0] = cur_gyr[0];
-            batch.gyro[batch.n_pairs][1] = cur_gyr[1];
-            batch.gyro[batch.n_pairs][2] = cur_gyr[2];
-            batch.n_pairs++;
-          }
+          uint32_t pairs_remaining = (n_pairs > pair_idx + 1U) ? (n_pairs - pair_idx - 1U) : 0U;
+          uint32_t back_us = pairs_remaining * 150U;
+          uint32_t tick_ms_i = (batch_base_us - back_us) / 1000U;
+          uint32_t fid = ++g_lsm_frame_id_counter;
+
+          /* Hand-rolled int -> decimal: snprintf at 13328 calls/sec breaks
+           * newlib's static reentrancy state across threads (FreeRTOS doesn't
+           * provide __malloc_lock by default). Inline format avoids that. */
+          uint32_t off = 0;
+          off += AppU32ToDec(&rowbuf[off], fid);
+          rowbuf[off++] = ',';
+          off += AppU32ToDec(&rowbuf[off], tick_ms_i);
+          rowbuf[off++] = ',';
+          off += AppI32ToDec(&rowbuf[off], (int32_t)cur_acc[0]);
+          rowbuf[off++] = ',';
+          off += AppI32ToDec(&rowbuf[off], (int32_t)cur_acc[1]);
+          rowbuf[off++] = ',';
+          off += AppI32ToDec(&rowbuf[off], (int32_t)cur_acc[2]);
+          rowbuf[off++] = ',';
+          off += AppI32ToDec(&rowbuf[off], (int32_t)cur_gyr[0]);
+          rowbuf[off++] = ',';
+          off += AppI32ToDec(&rowbuf[off], (int32_t)cur_gyr[1]);
+          rowbuf[off++] = ',';
+          off += AppI32ToDec(&rowbuf[off], (int32_t)cur_gyr[2]);
+          rowbuf[off++] = '\r';
+          rowbuf[off++] = '\n';
+          RingBuf_Write(&g_ring_lsm_imu, (const uint8_t *)rowbuf, off);
+
           cur_has_acc = 0;
           cur_has_gyr = 0;
+          pair_idx++;
         }
-      }
-
-      if (batch.n_pairs > 0U)
-      {
-        if (snapshot_mutex != NULL)
-        {
-          osMutexAcquire(snapshot_mutex, osWaitForever);
-          g_flow_stats.frame_id += batch.n_pairs;
-          batch.base_frame_id = g_flow_stats.frame_id;
-          osMutexRelease(snapshot_mutex);
-        }
-        (void)AppLsmBatchPush(&batch);
       }
 
       /* Stop once FIFO is back below the high-water mark; otherwise continue
@@ -1973,7 +2106,6 @@ void StartLsm6dsoxTask(void *argument)
     {
       AppSensorFrame_t frame;
       int h3_ret;
-      HAL_StatusTypeDef qma_ret;
       uint32_t now_ms = osKernelGetTickCount();
 
       memset(&frame, 0, sizeof(frame));
@@ -1993,11 +2125,7 @@ void StartLsm6dsoxTask(void *argument)
       {
         AppFramePopulateH3lis100dl(&frame, &frame.h3lis100dl.data, now_ms);
       }
-      qma_ret = QMA6100P_ReadAccXYZ(&frame.qma6100p.data);
-      if (qma_ret == HAL_OK)
-      {
-        AppFramePopulateQma6100p(&frame, &frame.qma6100p.data, now_ms);
-      }
+      /* QMA now drives its own EXTI on PB15 — no longer poll-fetched here */
       osMutexRelease(spi2_mutex);
 
       /* LSM6DSOX temperature: low-rate, sampled once per FIFO drain.
@@ -2076,8 +2204,6 @@ void StartH3lis100dlTask(void *argument)
 
 void StartQma6100pTask(void *argument)
 {
-  QMA6100P_Data_t data;
-
   (void)argument;
 
   osMutexAcquire(spi2_mutex, osWaitForever);
@@ -2091,15 +2217,38 @@ void StartQma6100pTask(void *argument)
   osMutexRelease(spi2_mutex);
 
 #if APP_SENSOR_TEST_TARGET == APP_SENSOR_TEST_QMA6100P
-  printf("[QMA6100P TEST] started, print every %lu ms\r\n", (unsigned long)SAMPLE_PERIOD_MS);
-#endif
+  printf("[QMA6100P TEST] started\r\n");
+  for (;;)
+  {
+    QMA6100P_Data_t data;
+    AppAcqCheckAutoStop();
+    if (AppAcqIsRunning() == 0U) { osDelay(APP_ACQ_IDLE_DELAY_MS); continue; }
+    osMutexAcquire(spi2_mutex, osWaitForever);
+    HAL_StatusTypeDef ret = QMA6100P_ReadAccXYZ(&data);
+    osMutexRelease(spi2_mutex);
+    if (ret == HAL_OK)
+    {
+      printf("QMA6100P: acc(mg) X:%7.1f Y:%7.1f Z:%7.1f\r\n",
+             data.acc_mg[0], data.acc_mg[1], data.acc_mg[2]);
+    }
+    osDelay(AppAcqCurrentPeriodMs());
+  }
+#else
+  /* FIFO + watermark 16 frames @ ODR=1600Hz -> ~10ms cadence per IRQ. */
+  osMutexAcquire(spi2_mutex, osWaitForever);
+  if (QMA6100P_FIFO_Config(16U) != HAL_OK)
+  {
+    osMutexRelease(spi2_mutex);
+    printf("[QMA6100P] FIFO config failed, task exit\r\n");
+    osThreadTerminate(NULL);
+    return;
+  }
+  osMutexRelease(spi2_mutex);
+
+  static uint8_t fifo_buf[32U * 6U];
 
   for (;;)
   {
-#if APP_SENSOR_TEST_TARGET == APP_SENSOR_TEST_QMA6100P
-    HAL_StatusTypeDef ret;
-    uint32_t delay_ms = AppAcqCurrentPeriodMs();
-
     AppAcqCheckAutoStop();
     if (AppAcqIsRunning() == 0U)
     {
@@ -2107,25 +2256,73 @@ void StartQma6100pTask(void *argument)
       continue;
     }
 
+    if (s_qma_fifo_sem == NULL ||
+        osSemaphoreAcquire(s_qma_fifo_sem, 100U) != osOK)
+    {
+      continue;  /* timeout — re-poll AppAcqIsRunning */
+    }
+
     osMutexAcquire(spi2_mutex, osWaitForever);
-    ret = QMA6100P_ReadAccXYZ(&data);
+
+    uint8_t fifo_level = 0;
+    if (QMA6100P_FIFO_GetLevel(&fifo_level) != HAL_OK || fifo_level == 0U)
+    {
+      uint8_t int_st;
+      (void)QMA6100P_ReadStatus(&int_st);
+      osMutexRelease(spi2_mutex);
+      continue;
+    }
+    if (fifo_level > 32U) fifo_level = 32U;
+
+    if (QMA6100P_FIFO_ReadBlock(fifo_buf, fifo_level) != HAL_OK)
+    {
+      osMutexRelease(spi2_mutex);
+      continue;
+    }
+
+    /* Order: clear INT_ST first (drops latched pin low), then re-arm FIFO_MODE
+     * so the next watermark crossing creates a fresh rising edge. */
+    {
+      uint8_t int_st;
+      (void)QMA6100P_ReadStatus(&int_st);
+    }
+    (void)QMA6100P_FIFO_Rearm();
+
     osMutexRelease(spi2_mutex);
 
-    if (ret == HAL_OK)
+    /* Parse 6-byte frames into raw int14 (data is 14-bit left-justified in
+     * 16 bits, so >>2 strips the unused LSBs) and emit one CSV row per frame
+     * directly to the QMA ring buffer. */
+    uint32_t batch_base_us = osKernelGetTickCount() * 1000U;
+    char rowbuf[56];
+    for (uint8_t i = 0; i < fifo_level; i++)
     {
-      printf("QMA6100P: acc(mg) X:%7.1f Y:%7.1f Z:%7.1f\r\n",
-             data.acc_mg[0], data.acc_mg[1], data.acc_mg[2]);
-    }
-    else
-    {
-      printf("[QMA6100P TEST] read failed\r\n");
-    }
+      uint8_t *p = &fifo_buf[i * 6U];
+      int16_t rx = (int16_t)(((int16_t)((uint16_t)p[1] << 8 | p[0])) >> 2);
+      int16_t ry = (int16_t)(((int16_t)((uint16_t)p[3] << 8 | p[2])) >> 2);
+      int16_t rz = (int16_t)(((int16_t)((uint16_t)p[5] << 8 | p[4])) >> 2);
 
-    osDelay(delay_ms);
-#else
-    osDelay(APP_ACQ_IDLE_DELAY_MS);
-#endif
+      uint32_t samples_remaining = (uint32_t)(fifo_level - 1U - i);
+      uint32_t back_us = samples_remaining * 625U;  /* 1/1600Hz */
+      uint32_t tick_ms_i = (batch_base_us - back_us) / 1000U;
+      uint32_t fid = ++g_qma_frame_id_counter;
+
+      uint32_t off = 0;
+      off += AppU32ToDec(&rowbuf[off], fid);
+      rowbuf[off++] = ',';
+      off += AppU32ToDec(&rowbuf[off], tick_ms_i);
+      rowbuf[off++] = ',';
+      off += AppI32ToDec(&rowbuf[off], (int32_t)rx);
+      rowbuf[off++] = ',';
+      off += AppI32ToDec(&rowbuf[off], (int32_t)ry);
+      rowbuf[off++] = ',';
+      off += AppI32ToDec(&rowbuf[off], (int32_t)rz);
+      rowbuf[off++] = '\r';
+      rowbuf[off++] = '\n';
+      RingBuf_Write(&g_ring_qma_acc, (const uint8_t *)rowbuf, off);
+    }
   }
+#endif
 }
 
 void StartLoggerTask(void *argument)
@@ -2191,22 +2388,50 @@ void StartLoggerTask(void *argument)
       }
     }
 
-    /* Drain LSM batch buffer first — these are bulk-write batches that contain
-     * up to 128 sample pairs each and should be processed before the per-sample
-     * H3/QMA frame buffer to keep up with high-rate FIFO output. */
+    /* Round-robin drain of the two ring buffers. Each loop iteration pops
+     * one contiguous chunk (up to APP_RING_FLUSH_CHUNK = 16KB) from each
+     * ring and writes it to its file. Both rings are checked every cycle so
+     * neither stream starves under heavy load. */
     {
-      AppLsmBatch_t batch;
-      while ((sd_file_open != 0U) && (AppAcqIsSdSessionActive() != 0U) && (AppLsmBatchPop(&batch) != 0U))
+      const uint8_t *p; uint32_t n;
+      uint8_t did_work = 1;
+      while (did_work && (sd_file_open != 0U) && (AppAcqIsSdSessionActive() != 0U))
       {
-        result = FatFs_SD_LoggerAppendLsmBatch(&batch);
-        if (result != FR_OK)
+        did_work = 0;
+        if (RingBuf_PeekContiguous(&g_ring_lsm_imu, &p, &n))
         {
-          printf("[Logger] batch fail err=%s (%d)\r\n",
-                 FatFs_SD_ResultToString(result), (int)result);
-          AppFlowStatsRecordWriteFailure();
-          break;
+          result = FatFs_SD_LoggerWriteFileIndex(0U, p, n);  /* LSM_IMU */
+          if (result == FR_OK)
+          {
+            RingBuf_Consume(&g_ring_lsm_imu, n);
+            rows_since_sync += n;
+            did_work = 1;
+          }
+          else
+          {
+            printf("[Logger] LSM_IMU write fail %s (%d)\r\n",
+                   FatFs_SD_ResultToString(result), (int)result);
+            AppFlowStatsRecordWriteFailure();
+            break;
+          }
         }
-        rows_since_sync += batch.n_pairs;
+        if (RingBuf_PeekContiguous(&g_ring_qma_acc, &p, &n))
+        {
+          result = FatFs_SD_LoggerWriteFileIndex(3U, p, n);  /* QMA_ACC */
+          if (result == FR_OK)
+          {
+            RingBuf_Consume(&g_ring_qma_acc, n);
+            rows_since_sync += n;
+            did_work = 1;
+          }
+          else
+          {
+            printf("[Logger] QMA_ACC write fail %s (%d)\r\n",
+                   FatFs_SD_ResultToString(result), (int)result);
+            AppFlowStatsRecordWriteFailure();
+            break;
+          }
+        }
       }
     }
 

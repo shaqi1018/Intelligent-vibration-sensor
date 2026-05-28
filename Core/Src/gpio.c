@@ -21,6 +21,7 @@
 /* Includes ------------------------------------------------------------------*/
 #include "gpio.h"
 #include "main.h"
+#include "qma6100p.h"
 
 /* USER CODE BEGIN 0 */
 
@@ -60,6 +61,17 @@ void MX_GPIO_Init(void)
 
   HAL_NVIC_SetPriority(EXTI1_IRQn, 6, 0);
   HAL_NVIC_EnableIRQ(EXTI1_IRQn);
+
+  /* QMA6100P INT (currently INT2 routed to PB15 — see qma6100p.h INT macros).
+     Pull-up because INT2 default is open-drain low-active on this chip. */
+  GPIO_InitStruct.Pin = QMA6100P_INT_PIN;
+  GPIO_InitStruct.Mode = GPIO_MODE_IT_RISING;
+  GPIO_InitStruct.Pull = GPIO_PULLUP;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_HIGH;
+  HAL_GPIO_Init(QMA6100P_INT_GPIO_PORT, &GPIO_InitStruct);
+
+  HAL_NVIC_SetPriority(QMA6100P_INT_EXTI_IRQn, 6, 0);
+  HAL_NVIC_EnableIRQ(QMA6100P_INT_EXTI_IRQn);
 }
 
 /* USER CODE BEGIN 2 */

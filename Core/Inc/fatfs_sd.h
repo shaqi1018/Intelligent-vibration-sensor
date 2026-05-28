@@ -17,7 +17,10 @@ void FatFs_SD_ForceReinit(void);
 const char *FatFs_SD_GetSessionDir(void);
 FRESULT FatFs_SD_LoggerStart(void);
 FRESULT FatFs_SD_LoggerAppendFrame(const AppSensorFrame_t *frame);
-FRESULT FatFs_SD_LoggerAppendLsmBatch(const AppLsmBatch_t *batch);
+/* Write a raw byte stream to log file `idx`
+ *   0=LSM_IMU, 1=LSM_TMP, 2=H3_ACC, 3=QMA_ACC
+ * Used by the ring buffer flush path in StartLoggerTask. */
+FRESULT FatFs_SD_LoggerWriteFileIndex(uint8_t idx, const uint8_t *data, uint32_t len);
 FRESULT FatFs_SD_LoggerSync(void);
 void FatFs_SD_LoggerStop(void);
 void FatFs_SD_RunPhaseBSmokeTest(void);

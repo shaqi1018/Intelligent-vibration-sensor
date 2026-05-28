@@ -743,3 +743,49 @@ void QMA6100P_DumpRegs(void)
   }
   printf("\r\n");
 }
+/* ======================== FIFO public API ================================== */
+
+uint16_t QMA6100P_GetLsbPer1g(void) { return g_qma.lsb_1g; }
+
+HAL_StatusTypeDef QMA6100P_FIFO_Config(uint8_t wtm_samples)
+{
+  /* Datasheet 7.8: writing 0x3E or 0x31 clears FIFO + INT_ST.
+   * Sequence: BYPASS reset -> set watermark -> route INT -> enable WM int ->
+   * latch -> enter FIFO mode. Watermark fires on the 0->wtm crossing only;
+   * call QMA6100P_FIFO_Rearm() after each batch read to re-trigger. */
+  if (wtm_samples == 0U || wtm_samples > 63U) wtm_samples = 16U;
+
+  if (QMA6100P_WriteReg(QMA6100P_REG_FIFO_CFG, QMA6100P_FIFO_MODE_BYPASS | QMA6100P_FIFO_CH_XYZ) != HAL_OK) return HAL_ERROR;
+  HAL_Delay(2);
+  if (QMA6100P_WriteReg(QMA6100P_REG_FIFO_WM, wtm_samples) != HAL_OK) return HAL_ERROR;
+  HAL_Delay(2);
+  if (QMA6100P_WriteReg(QMA6100P_INT_MAP_REG, QMA6100P_INT_WM_BIT) != HAL_OK) return HAL_ERROR;
+  if (QMA6100P_WriteReg(QMA6100P_REG_INT_EN1, QMA6100P_INT_WM_BIT) != HAL_OK) return HAL_ERROR;
+  if (QMA6100P_WriteReg(QMA6100P_REG_INT_CFG, 0x01U) != HAL_OK) return HAL_ERROR;  /* LATCH_INT=1 */
+  if (QMA6100P_WriteReg(QMA6100P_REG_FIFO_CFG, QMA6100P_FIFO_MODE_FIFO | QMA6100P_FIFO_CH_XYZ) != HAL_OK) return HAL_ERROR;
+
+  printf("[QMA6100P] FIFO configured: wtm=%u INT_MAP%c=0x40 (PB%u)\r\n",
+         (unsigned)wtm_samples,
+         (QMA6100P_INT_MAP_REG == QMA6100P_REG_INT_MAP1) ? '1' : '2',
+         (unsigned)__builtin_ctz(QMA6100P_INT_PIN));
+  return HAL_OK;
+}
+
+HAL_StatusTypeDef QMA6100P_FIFO_Rearm(void)
+{
+  if (QMA6100P_WriteReg(QMA6100P_REG_FIFO_CFG, QMA6100P_FIFO_MODE_BYPASS | QMA6100P_FIFO_CH_XYZ) != HAL_OK) return HAL_ERROR;
+  if (QMA6100P_WriteReg(QMA6100P_REG_FIFO_CFG, QMA6100P_FIFO_MODE_FIFO   | QMA6100P_FIFO_CH_XYZ) != HAL_OK) return HAL_ERROR;
+  return HAL_OK;
+}
+
+HAL_StatusTypeDef QMA6100P_FIFO_GetLevel(uint8_t *level)
+{
+  if (level == NULL) return HAL_ERROR;
+  return QMA6100P_ReadReg(QMA6100P_REG_FIFO_CNT, level, 1U);
+}
+
+HAL_StatusTypeDef QMA6100P_FIFO_ReadBlock(uint8_t *buf, uint8_t n_frames)
+{
+  if (buf == NULL || n_frames == 0U) return HAL_ERROR;
+  return QMA6100P_ReadReg(QMA6100P_REG_FIFO_DATA, buf, (uint16_t)(n_frames * 6U));
+}

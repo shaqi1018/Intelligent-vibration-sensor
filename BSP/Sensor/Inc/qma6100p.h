@@ -20,6 +20,7 @@
 extern "C" {
 #endif
 
+#include "main.h"      /* for IRQn enum (EXTI15_IRQn etc.) */
 #include "bsp_spi.h"
 #include <stdint.h>
 #include <stdio.h>
@@ -74,6 +75,34 @@ typedef enum {
 
 #define QMA6100P_DRDY_BIT           0x10U
 
+/* ======================== FIFO registers =================================== */
+#define QMA6100P_REG_INT_ST         0x0BU  /* bit7=FIFO_OR, bit6=FIFO_WM_INT, bit5=FIFO_FULL */
+#define QMA6100P_REG_FIFO_CNT       0x0EU  /* FIFO_FRAME_COUNTER[7:0] */
+#define QMA6100P_REG_INT_EN1        0x17U  /* bit6=INT_FWM_EN, bit5=INT_FFULL_EN */
+#define QMA6100P_REG_INT_MAP1       0x1AU  /* bit6=INT1_FWM, bit5=INT1_FFULL */
+#define QMA6100P_REG_INT_MAP2       0x1CU  /* bit6=INT2_FWM, bit5=INT2_FFULL */
+#define QMA6100P_REG_INT_PIN_CFG    0x20U
+#define QMA6100P_REG_INT_CFG        0x21U  /* bit0=LATCH_INT */
+#define QMA6100P_REG_FIFO_WM        0x31U  /* watermark level [7:0] */
+#define QMA6100P_REG_FIFO_CFG       0x3EU  /* bit[7:6]=FIFO_MODE, bit[2:0]=FIFO_CH */
+#define QMA6100P_REG_FIFO_DATA      0x3FU
+
+#define QMA6100P_FIFO_MODE_BYPASS   0x00U
+#define QMA6100P_FIFO_MODE_FIFO     0x40U
+#define QMA6100P_FIFO_MODE_STREAM   0x80U
+#define QMA6100P_FIFO_CH_XYZ        0x07U
+
+#define QMA6100P_INT_WM_BIT         0x40U
+
+/* ======================== INT pin wiring (PCB-specific) =================== */
+/* Current board: INT2 → PB15 works; INT1 → PB12 is non-functional. To swap
+ * back to INT1 on a fixed board, change QMA6100P_INT_MAP_REG to INT_MAP1
+ * and update QMA6100P_INT_PIN/IRQn to match the new GPIO. */
+#define QMA6100P_INT_PIN            GPIO_PIN_15
+#define QMA6100P_INT_GPIO_PORT      GPIOB
+#define QMA6100P_INT_EXTI_IRQn      EXTI15_IRQn
+#define QMA6100P_INT_MAP_REG        QMA6100P_REG_INT_MAP2
+
 typedef struct {
   QMA6100P_Range_t range;
   QMA6100P_Bandwidth_t bw;
@@ -91,6 +120,13 @@ HAL_StatusTypeDef QMA6100P_ReadAccXYZ(QMA6100P_Data_t *data);
 HAL_StatusTypeDef QMA6100P_ReadChipID(uint8_t *id);
 HAL_StatusTypeDef QMA6100P_ReadStatus(uint8_t *status);
 void QMA6100P_DumpRegs(void);
+
+/* ======================== FIFO API ========================================= */
+HAL_StatusTypeDef QMA6100P_FIFO_Config(uint8_t wtm_samples);
+HAL_StatusTypeDef QMA6100P_FIFO_Rearm(void);
+HAL_StatusTypeDef QMA6100P_FIFO_GetLevel(uint8_t *level);
+HAL_StatusTypeDef QMA6100P_FIFO_ReadBlock(uint8_t *buf, uint8_t n_frames);
+uint16_t QMA6100P_GetLsbPer1g(void);
 
 #ifdef __cplusplus
 }

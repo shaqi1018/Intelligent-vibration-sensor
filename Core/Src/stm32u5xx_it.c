@@ -220,6 +220,14 @@ void EXTI1_IRQHandler(void)
   HAL_GPIO_EXTI_IRQHandler(GPIO_PIN_1);
 }
 
+/**
+  * @brief This function handles EXTI line 15 interrupt (PB15 = QMA6100P INT2).
+  */
+void EXTI15_IRQHandler(void)
+{
+  HAL_GPIO_EXTI_IRQHandler(GPIO_PIN_15);
+}
+
 /* USER CODE BEGIN 1 */
 
 /* USER CODE END 1 */

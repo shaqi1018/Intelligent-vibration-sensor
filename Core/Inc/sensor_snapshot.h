@@ -105,6 +105,30 @@ typedef struct {
   float    gyro_sensitivity;          /* mdps/LSB at the time of capture */
 } AppLsmBatch_t;
 
+/* === Lock-free SPSC ring buffer ============================================
+ * Single producer (sensor task) calls RingBuf_Write to append CSV bytes.
+ * Single consumer (logger) calls RingBuf_PeekContiguous + RingBuf_Consume to
+ * flush via one large f_write per file. wr_idx/rd_idx are volatile single
+ * 32-bit writes so no mutex is needed. The buffer is full when
+ * (wr_idx + 1) % size == rd_idx (one byte sentinel reserved).
+ *
+ * The data array is provided externally (statically allocated in .bss).
+ */
+typedef struct {
+  uint8_t *data;
+  uint32_t size;
+  volatile uint32_t wr_idx;
+  volatile uint32_t rd_idx;
+  volatile uint32_t dropped;          /* bytes dropped due to full buffer */
+  volatile uint32_t high_watermark;   /* peak fill level for diagnostics */
+} AppRingBuffer_t;
+
+#define APP_RING_LSM_IMU_SIZE   (64U * 1024U)   /* combined ACC+GYR rows */
+#define APP_RING_QMA_ACC_SIZE   (32U * 1024U)
+/* Largest contiguous chunk handed to f_write per call. Bigger = fewer FAT
+ * cluster traversals; smaller = lower latency. 16KB is a good trade-off. */
+#define APP_RING_FLUSH_CHUNK    (16U * 1024U)
+
 #ifdef __cplusplus
 }
 #endif
