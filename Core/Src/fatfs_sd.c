@@ -291,33 +291,10 @@ FRESULT FatFs_SD_LoggerAppendFrame(const AppSensorFrame_t *frame)
     return FR_NOT_READY;
   }
 
-  /* LSM6DSOX acc — 文件索引 0 */
-  if (frame->lsm6dsox.valid != 0U)
-  {
-    len = snprintf(line, sizeof(line), "%lu,%lu,%.1f,%.1f,%.1f\r\n",
-                   (unsigned long)frame->frame_id,
-                   (unsigned long)frame->tick_ms,
-                   frame->lsm6dsox.data.acc.x,
-                   frame->lsm6dsox.data.acc.y,
-                   frame->lsm6dsox.data.acc.z);
-    if ((len > 0) && ((size_t)len < sizeof(line)))
-      result = FatFs_SD_WriteExact(&g_log_files[0], line, (UINT)len);
-    if (result != FR_OK) return result;
-  }
-
-  /* LSM6DSOX gyro — 文件索引 1 */
-  if (frame->lsm6dsox.valid != 0U)
-  {
-    len = snprintf(line, sizeof(line), "%lu,%lu,%.1f,%.1f,%.1f\r\n",
-                   (unsigned long)frame->frame_id,
-                   (unsigned long)frame->tick_ms,
-                   frame->lsm6dsox.data.gyro.x,
-                   frame->lsm6dsox.data.gyro.y,
-                   frame->lsm6dsox.data.gyro.z);
-    if ((len > 0) && ((size_t)len < sizeof(line)))
-      result = FatFs_SD_WriteExact(&g_log_files[1], line, (UINT)len);
-    if (result != FR_OK) return result;
-  }
+  /* LSM6DSOX acc/gyr in FIFO mode go through LoggerAppendLsmBatch with raw
+   * int16 format. The per-frame path here only writes the slow temperature
+   * sample (LSM_TMP.CSV); ACC/GYR are intentionally skipped to avoid mixing
+   * mg/mdps float rows into the raw int16 CSV files. */
 
   /* LSM6DSOX temp — 文件索引 2 */
   if (frame->lsm6dsox.valid != 0U)

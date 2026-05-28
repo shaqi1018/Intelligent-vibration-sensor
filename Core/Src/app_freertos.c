@@ -2000,6 +2000,16 @@ void StartLsm6dsoxTask(void *argument)
       }
       osMutexRelease(spi2_mutex);
 
+      /* LSM6DSOX temperature: low-rate, sampled once per FIFO drain.
+       * Independent of FIFO/watermark — only fills the temp_C field, ACC/GYR
+       * stay zeroed in this frame so LoggerAppendFrame writes only LSM_TMP. */
+      LSM6DSOX_AllData_t lsm_tmp_data;
+      memset(&lsm_tmp_data, 0, sizeof(lsm_tmp_data));
+      if (LSM6DSOX_ReadTemp(&lsm_tmp_data.temp_C) == HAL_OK)
+      {
+        AppFramePopulateLsm6dsox(&frame, &lsm_tmp_data, now_ms);
+      }
+
       if (frame.present_mask != 0U)
       {
         (void)AppFrameBufferPush(&frame);
