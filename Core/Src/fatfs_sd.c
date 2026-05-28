@@ -384,10 +384,13 @@ FRESULT FatFs_SD_LoggerSync(void)
     }
   }
 
-  printf("[FatFs] sync rows=%lu result=%s (%d)\r\n",
-         (unsigned long)g_logger_rows_written,
-         FatFs_SD_ResultToString(result),
-         (int)result);
+  if (result != FR_OK)
+  {
+    printf("[FatFs] sync rows=%lu result=%s (%d)\r\n",
+           (unsigned long)g_logger_rows_written,
+           FatFs_SD_ResultToString(result),
+           (int)result);
+  }
   return result;
 }
 

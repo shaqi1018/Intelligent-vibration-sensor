@@ -191,7 +191,6 @@ HAL_StatusTypeDef LSM6DSOX_ReadAccel(LSM6DSOX_Data_t *data);
 HAL_StatusTypeDef LSM6DSOX_ReadGyro(LSM6DSOX_Data_t *data);
 HAL_StatusTypeDef LSM6DSOX_ReadTemp(float *temp_C);
 HAL_StatusTypeDef LSM6DSOX_ReadAllData(LSM6DSOX_AllData_t *all);
-HAL_StatusTypeDef LSM6DSOX_ReadAllData_DMA(LSM6DSOX_AllData_t *all);
 uint32_t LSM6DSOX_GetDmaCallCount(void);
 
 /* ======================== FIFO API ========================================== */
