@@ -205,7 +205,7 @@ FRESULT FatFs_SD_LoggerStart(void)
   static const char kHdrLsmImu[] =
       "frame_id,tick_ms,acc_x,acc_y,acc_z,gyr_x,gyr_y,gyr_z\r\n";
   static const char kHdrLsmTmp[] = "frame_id,tick_ms,temp_C\r\n";
-  static const char kHdrH3Acc[]  = "frame_id,tick_ms,raw_x,raw_y,raw_z,acc_x_mg,acc_y_mg,acc_z_mg\r\n";
+  static const char kHdrH3Acc[]  = "frame_id,tick_ms,raw_x,raw_y,raw_z\r\n";
   static const char kHdrQmaAcc[] = "frame_id,tick_ms,raw_x,raw_y,raw_z\r\n";
 
   static const char *headers[FATFS_SD_NUM_FILES] = {
@@ -310,25 +310,8 @@ FRESULT FatFs_SD_LoggerAppendFrame(const AppSensorFrame_t *frame)
     if (result != FR_OK) return result;
   }
 
-  /* H3LIS100DL acc — 文件索引 H3_ACC */
-  if (frame->h3lis100dl.valid != 0U)
-  {
-    len = snprintf(line, sizeof(line), "%lu,%lu,%d,%d,%d,%.1f,%.1f,%.1f\r\n",
-                   (unsigned long)frame->frame_id,
-                   (unsigned long)frame->tick_ms,
-                   (int)frame->h3lis100dl.data.raw[0],
-                   (int)frame->h3lis100dl.data.raw[1],
-                   (int)frame->h3lis100dl.data.raw[2],
-                   frame->h3lis100dl.data.acc_mg[0],
-                   frame->h3lis100dl.data.acc_mg[1],
-                   frame->h3lis100dl.data.acc_mg[2]);
-    if ((len > 0) && ((size_t)len < sizeof(line)))
-      result = FatFs_SD_WriteExact(&g_log_files[FATFS_SD_FILE_H3_ACC], line, (UINT)len);
-    if (result != FR_OK) return result;
-  }
-
-  /* QMA6100P now writes via the LSM_IMU ring buffer route (LoggerWriteFileIndex
-   * with FATFS_SD_FILE_QMA_ACC), see ringbuf flush in app_freertos.c. */
+  /* H3LIS100DL acc and QMA6100P acc now write via their own ring buffers,
+   * see RingBuf_PeekContiguous + LoggerWriteFileIndex in StartLoggerTask. */
 
   g_logger_rows_written++;
   return FR_OK;

@@ -137,14 +137,16 @@ int H3LIS100DL_Init(void)
 
   if ((H3LIS100DL_WriteReg(H3LIS100DL_REG_CTRL_REG2, 0x80U) != HAL_OK) ||  /* BOOT */
       (H3LIS100DL_WriteReg(H3LIS100DL_REG_CTRL_REG1, 0x37U) != HAL_OK) ||  /* PM=001 normal, DR=10 400Hz, XYZ EN */
-      (H3LIS100DL_WriteReg(H3LIS100DL_REG_CTRL_REG4, 0x00U) != HAL_OK))    /* default range */
+      (H3LIS100DL_WriteReg(H3LIS100DL_REG_CTRL_REG4, 0x00U) != HAL_OK) ||  /* default range */
+      (H3LIS100DL_WriteReg(H3LIS100DL_REG_CTRL_REG3, H3LIS100DL_CTRL_REG3_DRDY_INT1) != HAL_OK))
   {
     printf("[H3LIS100DL] init write failed\r\n");
     return -1;
   }
   HAL_Delay(10U);
 
-  printf("[H3LIS100DL] init ok (+/-100g 400Hz)\r\n");
+  printf("[H3LIS100DL] init ok (+/-100g 400Hz, DRDY->INT1/PB%u)\r\n",
+         (unsigned)__builtin_ctz(H3LIS100DL_INT_PIN));
   return 0;
 }
 
@@ -185,33 +187,24 @@ int H3LIS100DL_Configure(const H3LIS100DL_Config_t *config)
 
 int H3LIS100DL_ReadAccXYZ(H3LIS100DL_Data_t *data)
 {
-  uint8_t status = 0U;
+  if (data == NULL) return -1;
 
-  if (data == NULL)
+  /* Read OUT_X (0x29), OUT_Y (0x2B), OUT_Z (0x2D) individually. The
+   * non-contiguous addressing makes a single MS-burst unreliable here:
+   * when MS auto-increment crosses the reserved bytes (0x2A/0x2C) the chip
+   * sometimes does not consider the data set "consumed" and leaves the DRDY
+   * line latched high — three single-byte reads always clear it. */
+  uint8_t x = 0, y = 0, z = 0;
+  if ((H3LIS100DL_ReadReg(H3LIS100DL_REG_OUT_X, &x) != HAL_OK) ||
+      (H3LIS100DL_ReadReg(H3LIS100DL_REG_OUT_Y, &y) != HAL_OK) ||
+      (H3LIS100DL_ReadReg(H3LIS100DL_REG_OUT_Z, &z) != HAL_OK))
   {
     return -1;
   }
 
-  if (H3LIS100DL_ReadReg(H3LIS100DL_REG_STATUS, &status) != HAL_OK)
-  {
-    return -1;
-  }
-  if ((status & H3LIS100DL_STATUS_ZYXDA) == 0U)
-  {
-    return -2;
-  }
-
-  /* OUT_X=0x29, OUT_Y=0x2B, OUT_Z=0x2D — reserved bytes at 0x2A and 0x2C.
-     Auto-increment steps through every address, so read 5 bytes and pick [0],[2],[4]. */
-  uint8_t raw5[5] = {0};
-  if (H3LIS100DL_ReadRegs(H3LIS100DL_REG_OUT_X, raw5, 5U) != HAL_OK)
-  {
-    return -1;
-  }
-
-  data->raw[0] = (int8_t)raw5[0];  /* 0x29 OUT_X */
-  data->raw[1] = (int8_t)raw5[2];  /* 0x2B OUT_Y (skip reserved 0x2A) */
-  data->raw[2] = (int8_t)raw5[4];  /* 0x2D OUT_Z (skip reserved 0x2C) */
+  data->raw[0] = (int8_t)x;
+  data->raw[1] = (int8_t)y;
+  data->raw[2] = (int8_t)z;
 
   data->acc_mg[0] = (float)data->raw[0] * H3LIS100DL_SENSITIVITY_MG;
   data->acc_mg[1] = (float)data->raw[1] * H3LIS100DL_SENSITIVITY_MG;

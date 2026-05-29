@@ -221,6 +221,14 @@ void EXTI1_IRQHandler(void)
 }
 
 /**
+  * @brief This function handles EXTI line 4 interrupt (PB4 = H3LIS100DL INT1 DRDY).
+  */
+void EXTI4_IRQHandler(void)
+{
+  HAL_GPIO_EXTI_IRQHandler(GPIO_PIN_4);
+}
+
+/**
   * @brief This function handles EXTI line 15 interrupt (PB15 = QMA6100P INT2).
   */
 void EXTI15_IRQHandler(void)

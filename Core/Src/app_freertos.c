@@ -81,6 +81,7 @@ static osMutexId_t frame_buffer_mutex;
 static osMutexId_t acq_ctrl_mutex;
 static osSemaphoreId_t s_lsm_fifo_sem;  /* released by EXTI1 ISR on PB1 rising edge */
 static osSemaphoreId_t s_qma_fifo_sem;  /* released by EXTI15 ISR on PB15 rising edge */
+static osSemaphoreId_t s_h3_drdy_sem;   /* released by EXTI4 ISR on PB4 rising edge */
 static AppSensorSnapshot_t g_sensor_snapshot;
 
 typedef struct
@@ -150,10 +151,13 @@ static AppLsmBatchBuffer_t g_lsm_batch_buffer;
 /* Static data backing for the SPSC ring buffers (.bss, no heap pressure). */
 static uint8_t s_lsm_imu_ringbuf[APP_RING_LSM_IMU_SIZE];
 static uint8_t s_qma_acc_ringbuf[APP_RING_QMA_ACC_SIZE];
+static uint8_t s_h3_acc_ringbuf[APP_RING_H3_ACC_SIZE];
 static AppRingBuffer_t g_ring_lsm_imu;
 static AppRingBuffer_t g_ring_qma_acc;
+static AppRingBuffer_t g_ring_h3_acc;
 static volatile uint32_t g_lsm_frame_id_counter;
 static volatile uint32_t g_qma_frame_id_counter;
+static volatile uint32_t g_h3_frame_id_counter;
 static const osMutexAttr_t spi2_mutex_attr = {
   .name      = "spi2Mutex",
   .attr_bits = osMutexPrioInherit,
@@ -192,14 +196,14 @@ osThreadId_t h3lis100dlTaskHandle;
 const osThreadAttr_t h3lis100dlTask_attributes = {
   .name = "h3lis100dlTask",
   .priority = (osPriority_t)osPriorityAboveNormal,
-  .stack_size = 256 * 4
+  .stack_size = 1024 * 4  /* 4KB — small char rowbuf + locals */
 };
 
 osThreadId_t loggerTaskHandle;
 const osThreadAttr_t loggerTask_attributes = {
   .name = "loggerTask",
   .priority = (osPriority_t)osPriorityNormal,
-  .stack_size = 4096 * 4  /* 16KB — large enough to hold AppLsmBatch_t (~1.5KB) on stack */
+  .stack_size = 1024 * 4  /* 4KB — logger only buffers small line[128] + locals */
 };
 
 osThreadId_t usbCdcTaskHandle;
@@ -224,6 +228,7 @@ static uint32_t AppFrameBufferPop(AppSensorFrame_t *frame);
 static uint32_t AppLsmBatchPush(const AppLsmBatch_t *batch);
 static uint32_t AppLsmBatchPop(AppLsmBatch_t *batch);
 static void     RingBuf_Init(AppRingBuffer_t *rb, uint8_t *data, uint32_t size);
+static void     RingBuf_Reset(AppRingBuffer_t *rb);
 static uint32_t RingBuf_Available(const AppRingBuffer_t *rb);
 static uint32_t RingBuf_Write(AppRingBuffer_t *rb, const uint8_t *src, uint32_t len);
 static uint32_t RingBuf_PeekContiguous(AppRingBuffer_t *rb, const uint8_t **out_ptr, uint32_t *out_len);
@@ -312,11 +317,13 @@ void MX_FREERTOS_Init(void)
   /* USER CODE BEGIN RTOS_SEMAPHORES */
   s_lsm_fifo_sem = osSemaphoreNew(1, 0, NULL);  /* binary semaphore, init=0 */
   s_qma_fifo_sem = osSemaphoreNew(1, 0, NULL);
+  s_h3_drdy_sem  = osSemaphoreNew(1, 0, NULL);
   /* USER CODE END RTOS_SEMAPHORES */
 
   /* Initialise SPSC ring buffers (data arrays are static, no allocation). */
   RingBuf_Init(&g_ring_lsm_imu, s_lsm_imu_ringbuf, APP_RING_LSM_IMU_SIZE);
   RingBuf_Init(&g_ring_qma_acc, s_qma_acc_ringbuf, APP_RING_QMA_ACC_SIZE);
+  RingBuf_Init(&g_ring_h3_acc,  s_h3_acc_ringbuf,  APP_RING_H3_ACC_SIZE);
 
   /* USER CODE BEGIN RTOS_TIMERS */
   /* USER CODE END RTOS_TIMERS */
@@ -351,7 +358,7 @@ void MX_FREERTOS_Init(void)
 /* USER CODE BEGIN Application */
 
 /* EXTI rising-edge callback. PB1 = LSM6DSOX INT1 (FIFO watermark);
- * PB15 = QMA6100P INT2 (FIFO watermark). */
+ * PB4 = H3LIS100DL INT1 (DRDY); PB15 = QMA6100P INT2 (FIFO watermark). */
 void HAL_GPIO_EXTI_Rising_Callback(uint16_t GPIO_Pin)
 {
   if (GPIO_Pin == GPIO_PIN_1)
@@ -359,6 +366,13 @@ void HAL_GPIO_EXTI_Rising_Callback(uint16_t GPIO_Pin)
     if (s_lsm_fifo_sem != NULL)
     {
       osSemaphoreRelease(s_lsm_fifo_sem);
+    }
+  }
+  else if (GPIO_Pin == GPIO_PIN_4)
+  {
+    if (s_h3_drdy_sem != NULL)
+    {
+      osSemaphoreRelease(s_h3_drdy_sem);
     }
   }
   else if (GPIO_Pin == GPIO_PIN_15)
@@ -718,6 +732,9 @@ static uint32_t AppAcqStart(uint8_t sink, uint32_t requested_hz, uint32_t durati
   g_acq_ctrl.effective_hz = effective_hz;
   g_acq_ctrl.duration_ms = duration_ms;
   g_acq_ctrl.start_tick_ms = now_ms;
+  g_acq_ctrl.stop_pending = 0U;  /* clear any stale pending-stop so the new
+                                  * session is not immediately torn down by
+                                  * the logger's drain-pending-stop path */
   osMutexRelease(acq_ctrl_mutex);
 
   AppFlowStatsSetMode((uint8_t)((sink == APP_ACQ_SINK_USB) ? 1U : 0U),
@@ -968,6 +985,17 @@ static void RingBuf_Init(AppRingBuffer_t *rb, uint8_t *data, uint32_t size)
   rb->rd_idx = 0U;
   rb->dropped = 0U;
   rb->high_watermark = 0U;
+}
+
+/* Discard all buffered bytes. Called by the logger when a new SD session
+ * starts so stale data produced between sessions does not leak into the
+ * new file. Safe because the producer only appends and the consumer is the
+ * caller; setting rd_idx = wr_idx empties the buffer atomically enough for
+ * the SPSC pattern (a concurrent producer write just adds fresh data). */
+static void RingBuf_Reset(AppRingBuffer_t *rb)
+{
+  rb->rd_idx = rb->wr_idx;
+  rb->dropped = 0U;
 }
 
 static uint32_t RingBuf_Available(const AppRingBuffer_t *rb)
@@ -2102,10 +2130,10 @@ void StartLsm6dsoxTask(void *argument)
       if (to_read < 256U) break;
     }
 
-    /* Once per FIFO drain, also sample H3/QMA so they keep flowing */
+    /* Once per FIFO drain, sample LSM temperature only. H3 and QMA are now
+     * driven by their own EXTI / ringbuf paths and no longer poll here. */
     {
       AppSensorFrame_t frame;
-      int h3_ret;
       uint32_t now_ms = osKernelGetTickCount();
 
       memset(&frame, 0, sizeof(frame));
@@ -2119,18 +2147,6 @@ void StartLsm6dsoxTask(void *argument)
         osMutexRelease(snapshot_mutex);
       }
 
-      osMutexAcquire(spi2_mutex, osWaitForever);
-      h3_ret = H3LIS100DL_ReadAccXYZ(&frame.h3lis100dl.data);
-      if (h3_ret == 0)
-      {
-        AppFramePopulateH3lis100dl(&frame, &frame.h3lis100dl.data, now_ms);
-      }
-      /* QMA now drives its own EXTI on PB15 — no longer poll-fetched here */
-      osMutexRelease(spi2_mutex);
-
-      /* LSM6DSOX temperature: low-rate, sampled once per FIFO drain.
-       * Independent of FIFO/watermark — only fills the temp_C field, ACC/GYR
-       * stay zeroed in this frame so LoggerAppendFrame writes only LSM_TMP. */
       LSM6DSOX_AllData_t lsm_tmp_data;
       memset(&lsm_tmp_data, 0, sizeof(lsm_tmp_data));
       if (LSM6DSOX_ReadTemp(&lsm_tmp_data.temp_C) == HAL_OK)
@@ -2149,57 +2165,85 @@ void StartLsm6dsoxTask(void *argument)
 
 void StartH3lis100dlTask(void *argument)
 {
-  H3LIS100DL_Data_t data;
-
   (void)argument;
 
   osMutexAcquire(spi2_mutex, osWaitForever);
-  if (H3LIS100DL_Init() != 0)
+  int init_ret = H3LIS100DL_Init();
+  osMutexRelease(spi2_mutex);
+  if (init_ret != 0)
   {
-    osMutexRelease(spi2_mutex);
     printf("[H3LIS100DL] init failed, task exit\r\n");
     osThreadTerminate(NULL);
     return;
   }
-  osMutexRelease(spi2_mutex);
 
 #if APP_SENSOR_TEST_TARGET == APP_SENSOR_TEST_H3LIS100DL
-  printf("[H3LIS100DL TEST] started, print every %lu ms\r\n", (unsigned long)SAMPLE_PERIOD_MS);
-#endif
-
+  printf("[H3LIS100DL TEST] started\r\n");
   for (;;)
   {
-#if APP_SENSOR_TEST_TARGET == APP_SENSOR_TEST_H3LIS100DL
-    int ret;
-    uint32_t delay_ms = AppAcqCurrentPeriodMs();
-
+    H3LIS100DL_Data_t data;
     AppAcqCheckAutoStop();
-    if (AppAcqIsRunning() == 0U)
-    {
-      osDelay(APP_ACQ_IDLE_DELAY_MS);
-      continue;
-    }
-
+    if (AppAcqIsRunning() == 0U) { osDelay(APP_ACQ_IDLE_DELAY_MS); continue; }
     osMutexAcquire(spi2_mutex, osWaitForever);
-    ret = H3LIS100DL_ReadAccXYZ(&data);
+    int ret = H3LIS100DL_ReadAccXYZ(&data);
     osMutexRelease(spi2_mutex);
-
     if (ret == 0)
     {
       printf("H3LIS100DL: raw[%4d,%4d,%4d]  acc(mg)[%7.1f,%7.1f,%7.1f]\r\n",
              data.raw[0], data.raw[1], data.raw[2],
              data.acc_mg[0], data.acc_mg[1], data.acc_mg[2]);
     }
-    else if (ret != -2)
+    osDelay(AppAcqCurrentPeriodMs());
+  }
+#else
+  /* 400Hz polling. EXTI-driven mode (DRDY routed to PB4) was unreliable on
+   * this board: INT1 latched high and never re-pulsed after the first batch
+   * of samples regardless of how the data registers were drained. Polling
+   * at the ODR period delivers the same throughput without depending on the
+   * INT pin behaviour. */
+  uint32_t next_wake = osKernelGetTickCount();
+  for (;;)
+  {
+    AppAcqCheckAutoStop();
+    if (AppAcqIsRunning() == 0U)
     {
-      printf("[H3LIS100DL TEST] read failed (ret=%d)\r\n", ret);
+      osDelay(APP_ACQ_IDLE_DELAY_MS);
+      next_wake = osKernelGetTickCount();
+      continue;
     }
 
-    osDelay(delay_ms);
-#else
-    osDelay(APP_ACQ_IDLE_DELAY_MS);
-#endif
+    H3LIS100DL_Data_t data;
+    osMutexAcquire(spi2_mutex, osWaitForever);
+    int ret = H3LIS100DL_ReadAccXYZ(&data);
+    osMutexRelease(spi2_mutex);
+
+    if (ret == 0)
+    {
+      uint32_t fid = ++g_h3_frame_id_counter;
+      uint32_t tick_ms_i = osKernelGetTickCount();
+      char rowbuf[24];
+      uint32_t off = 0;
+      off += AppU32ToDec(&rowbuf[off], fid);
+      rowbuf[off++] = ',';
+      off += AppU32ToDec(&rowbuf[off], tick_ms_i);
+      rowbuf[off++] = ',';
+      off += AppI32ToDec(&rowbuf[off], (int32_t)data.raw[0]);
+      rowbuf[off++] = ',';
+      off += AppI32ToDec(&rowbuf[off], (int32_t)data.raw[1]);
+      rowbuf[off++] = ',';
+      off += AppI32ToDec(&rowbuf[off], (int32_t)data.raw[2]);
+      rowbuf[off++] = '\r';
+      rowbuf[off++] = '\n';
+      RingBuf_Write(&g_ring_h3_acc, (const uint8_t *)rowbuf, off);
+    }
+
+    /* Pace the loop at ~400Hz. osDelayUntil bounds cumulative drift even when
+     * an iteration stalls behind a higher-priority task. 1ms tick limits real
+     * granularity to ~333..500Hz; H3 high-g shock detection tolerates this. */
+    next_wake += 2U;
+    osDelayUntil(next_wake);
   }
+#endif
 }
 
 void StartQma6100pTask(void *argument)
@@ -2256,10 +2300,15 @@ void StartQma6100pTask(void *argument)
       continue;
     }
 
-    if (s_qma_fifo_sem == NULL ||
-        osSemaphoreAcquire(s_qma_fifo_sem, 100U) != osOK)
+    /* Wait for the watermark EXTI, but fall through to a FIFO poll on timeout.
+     * The watermark interrupt is edge-triggered (0→wtm crossing). Under SPI2
+     * bus contention with H3 the read can be delayed enough that the FIFO
+     * stays above the watermark after re-arm, so no fresh edge is produced
+     * and the EXTI never fires again. A short timeout + unconditional FIFO
+     * level check makes the path self-healing regardless of edge delivery. */
+    if (s_qma_fifo_sem != NULL)
     {
-      continue;  /* timeout — re-poll AppAcqIsRunning */
+      (void)osSemaphoreAcquire(s_qma_fifo_sem, 20U);
     }
 
     osMutexAcquire(spi2_mutex, osWaitForever);
@@ -2372,6 +2421,12 @@ void StartLoggerTask(void *argument)
         /* 将当前配置快照写入会话目录 */
         (void)DeviceCfg_WriteConfigToDir(FatFs_SD_GetSessionDir());
 
+        /* Discard data buffered between sessions so each file starts clean
+         * and frame_id/tick_ms in the new session align with real samples. */
+        RingBuf_Reset(&g_ring_lsm_imu);
+        RingBuf_Reset(&g_ring_qma_acc);
+        RingBuf_Reset(&g_ring_h3_acc);
+
         sd_file_open = 1U;
         rows_since_sync = 0U;
         AppFlowStatsSetMode(0U, 1U);
@@ -2427,6 +2482,23 @@ void StartLoggerTask(void *argument)
           else
           {
             printf("[Logger] QMA_ACC write fail %s (%d)\r\n",
+                   FatFs_SD_ResultToString(result), (int)result);
+            AppFlowStatsRecordWriteFailure();
+            break;
+          }
+        }
+        if (RingBuf_PeekContiguous(&g_ring_h3_acc, &p, &n))
+        {
+          result = FatFs_SD_LoggerWriteFileIndex(2U, p, n);  /* H3_ACC */
+          if (result == FR_OK)
+          {
+            RingBuf_Consume(&g_ring_h3_acc, n);
+            rows_since_sync += n;
+            did_work = 1;
+          }
+          else
+          {
+            printf("[Logger] H3_ACC write fail %s (%d)\r\n",
                    FatFs_SD_ResultToString(result), (int)result);
             AppFlowStatsRecordWriteFailure();
             break;

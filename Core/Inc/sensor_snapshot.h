@@ -125,6 +125,7 @@ typedef struct {
 
 #define APP_RING_LSM_IMU_SIZE   (64U * 1024U)   /* combined ACC+GYR rows */
 #define APP_RING_QMA_ACC_SIZE   (32U * 1024U)
+#define APP_RING_H3_ACC_SIZE    (16U * 1024U)   /* 400Hz × 14B/row × 5s ≈ 28KB cap, 16KB enough with logger drain */
 /* Largest contiguous chunk handed to f_write per call. Bigger = fewer FAT
  * cluster traversals; smaller = lower latency. 16KB is a good trade-off. */
 #define APP_RING_FLUSH_CHUNK    (16U * 1024U)

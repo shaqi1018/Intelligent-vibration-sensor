@@ -22,6 +22,7 @@
 #include "gpio.h"
 #include "main.h"
 #include "qma6100p.h"
+#include "h3lis100dl.h"
 
 /* USER CODE BEGIN 0 */
 
@@ -72,6 +73,16 @@ void MX_GPIO_Init(void)
 
   HAL_NVIC_SetPriority(QMA6100P_INT_EXTI_IRQn, 6, 0);
   HAL_NVIC_EnableIRQ(QMA6100P_INT_EXTI_IRQn);
+
+  /* H3LIS100DL DRDY → INT1 → PB4. Push-pull active-high default. */
+  GPIO_InitStruct.Pin = H3LIS100DL_INT_PIN;
+  GPIO_InitStruct.Mode = GPIO_MODE_IT_RISING;
+  GPIO_InitStruct.Pull = GPIO_PULLDOWN;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_HIGH;
+  HAL_GPIO_Init(H3LIS100DL_INT_GPIO_PORT, &GPIO_InitStruct);
+
+  HAL_NVIC_SetPriority(H3LIS100DL_INT_EXTI_IRQn, 6, 0);
+  HAL_NVIC_EnableIRQ(H3LIS100DL_INT_EXTI_IRQn);
 }
 
 /* USER CODE BEGIN 2 */
