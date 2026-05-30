@@ -469,11 +469,6 @@
               <FilePath>../Core/Src/acq_config.c</FilePath>
             </File>
             <File>
-              <FileName>acq_timer.c</FileName>
-              <FileType>1</FileType>
-              <FilePath>../Core/Src/acq_timer.c</FilePath>
-            </File>
-            <File>
               <FileName>sensor_bin.c</FileName>
               <FileType>1</FileType>
               <FilePath>../Core/Src/sensor_bin.c</FilePath>

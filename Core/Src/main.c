@@ -95,6 +95,13 @@ int main(void)
   /* Configure the system clock */
   SystemClock_Config();
 
+  /* Enable DWT cycle counter for microsecond timestamps (160MHz, ~6ns resolution).
+   * Used by sensor tasks for precise back-extrapolation of FIFO batch timestamps.
+   * 32-bit counter wraps at ~26.8s — acceptable for sessions up to ~20s. */
+  CoreDebug->DEMCR |= CoreDebug_DEMCR_TRCENA_Msk;
+  DWT->CYCCNT = 0U;
+  DWT->CTRL |= DWT_CTRL_CYCCNTENA_Msk;
+
   /* Configure the System Power */
   SystemPower_Config();
 

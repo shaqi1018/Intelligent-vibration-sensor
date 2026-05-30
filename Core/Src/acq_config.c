@@ -40,12 +40,12 @@ static void AcqCfgLoadDefaults(void)
   s_cfg.duration_ms      = 0U;
   s_cfg.sd_ring_max_bytes = ACQ_CFG_DEFAULT_RING_BYTES;
 
-  /* LSM6DSOX：±4g XL, ±2000dps 陀螺，6664Hz ODR
+  /* LSM6DSOX：±4g XL, ±2000dps 陀螺，1666Hz ODR
    * range / range2 存物理量（g 值 / dps），由 AppLsmXlRangeToReg 换算寄存器编码 */
   s_cfg.lsm6dsox.enabled = 1U;
   s_cfg.lsm6dsox.range   = 4U;      /* ±4 g   */
   s_cfg.lsm6dsox.range2  = 2000U;   /* ±2000 dps */
-  s_cfg.lsm6dsox.odr_hz  = 6664U;
+  s_cfg.lsm6dsox.odr_hz  = 1666U;
 
   /* H3LIS100DL：±100g 固定，ODR 最高 400Hz */
   s_cfg.h3lis100dl.enabled = 1U;
@@ -53,12 +53,12 @@ static void AcqCfgLoadDefaults(void)
   s_cfg.h3lis100dl.range2  = 0U;
   s_cfg.h3lis100dl.odr_hz  = 400U;
 
-  /* QMA6100P：±4g，BW=800Hz
+  /* QMA6100P：±4g，BW=100Hz
    * range 存物理 g 值，由 AppQmaRangeToReg 换算 */
   s_cfg.qma6100p.enabled = 1U;
   s_cfg.qma6100p.range   = 4U;      /* ±4 g  */
   s_cfg.qma6100p.range2  = 0U;
-  s_cfg.qma6100p.odr_hz  = 800U;
+  s_cfg.qma6100p.odr_hz  = 100U;
 }
 
 void AcqConfig_Init(void)

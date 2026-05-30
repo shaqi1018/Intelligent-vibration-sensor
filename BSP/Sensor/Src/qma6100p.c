@@ -295,6 +295,15 @@ HAL_StatusTypeDef QMA6100P_Configure(const QMA6100P_Config_t *cfg)
     return HAL_ERROR;
   }
 
+  /* Go to Standby before changing BW/RANGE — the datasheet (similar to
+   * MMA8451 architecture) requires these registers to be written in Standby
+   * mode.  0x80 = NVM load trigger + Standby. */
+  if (QMA6100P_WriteReg(QMA6100P_REG_POWER_MANAGE, 0x80U) != HAL_OK)
+  {
+    return HAL_ERROR;
+  }
+  HAL_Delay(2U);
+
   if (QMA6100P_SetRange(cfg->range) != HAL_OK)
   {
     return HAL_ERROR;
@@ -310,6 +319,7 @@ HAL_StatusTypeDef QMA6100P_Configure(const QMA6100P_Config_t *cfg)
     return HAL_ERROR;
   }
 
+  HAL_Delay(2U);
   return HAL_OK;
 }
 
@@ -416,10 +426,10 @@ uint16_t QMA6100P_GetLsbPer1g(void) { return g_qma.lsb_1g; }
 
 HAL_StatusTypeDef QMA6100P_FIFO_Config(uint8_t wtm_samples)
 {
-  /* Datasheet 7.8: writing 0x3E or 0x31 clears FIFO + INT_ST.
-   * Sequence: BYPASS reset -> set watermark -> route INT -> enable WM int ->
-   * latch -> enter FIFO mode. Watermark fires on the 0->wtm crossing only;
-   * call QMA6100P_FIFO_Rearm() after each batch read to re-trigger. */
+  /* STREAM mode: FIFO is a circular buffer. When it wraps from 63→0 the fill
+   * level drops below watermark and the edge-triggered interrupt fires again
+   * automatically. No Rearm (Bypass→FIFO) needed, eliminating the race where
+   * a delayed rearm loses the interrupt edge under SPI2 bus contention. */
   if (wtm_samples == 0U || wtm_samples > 63U) wtm_samples = 16U;
 
   if (QMA6100P_WriteReg(QMA6100P_REG_FIFO_CFG, QMA6100P_FIFO_MODE_BYPASS | QMA6100P_FIFO_CH_XYZ) != HAL_OK) return HAL_ERROR;
@@ -429,9 +439,9 @@ HAL_StatusTypeDef QMA6100P_FIFO_Config(uint8_t wtm_samples)
   if (QMA6100P_WriteReg(QMA6100P_INT_MAP_REG, QMA6100P_INT_WM_BIT) != HAL_OK) return HAL_ERROR;
   if (QMA6100P_WriteReg(QMA6100P_REG_INT_EN1, QMA6100P_INT_WM_BIT) != HAL_OK) return HAL_ERROR;
   if (QMA6100P_WriteReg(QMA6100P_REG_INT_CFG, 0x01U) != HAL_OK) return HAL_ERROR;  /* LATCH_INT=1 */
-  if (QMA6100P_WriteReg(QMA6100P_REG_FIFO_CFG, QMA6100P_FIFO_MODE_FIFO | QMA6100P_FIFO_CH_XYZ) != HAL_OK) return HAL_ERROR;
+  if (QMA6100P_WriteReg(QMA6100P_REG_FIFO_CFG, QMA6100P_FIFO_MODE_STREAM | QMA6100P_FIFO_CH_XYZ) != HAL_OK) return HAL_ERROR;
 
-  printf("[QMA6100P] FIFO configured: wtm=%u INT_MAP%c=0x40 (PB%u)\r\n",
+  printf("[QMA6100P] FIFO STREAM mode: wtm=%u INT_MAP%c=0x40 (PB%u)\r\n",
          (unsigned)wtm_samples,
          (QMA6100P_INT_MAP_REG == QMA6100P_REG_INT_MAP1) ? '1' : '2',
          (unsigned)__builtin_ctz(QMA6100P_INT_PIN));

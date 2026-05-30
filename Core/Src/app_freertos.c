@@ -158,6 +158,9 @@ static AppRingBuffer_t g_ring_h3_acc;
 static volatile uint32_t g_lsm_frame_id_counter;
 static volatile uint32_t g_qma_frame_id_counter;
 static volatile uint32_t g_h3_frame_id_counter;
+static uint32_t s_qma_odr_interval_us = 625U;  /* 1/1600Hz, updated by QMA task init */
+static uint32_t s_lsm_odr_interval_us = 150U;  /* 1/6667Hz, updated by LSM task init */
+static uint32_t s_h3_odr_interval_us  = 2500U; /* 1/400Hz, updated by H3 task init */
 static const osMutexAttr_t spi2_mutex_attr = {
   .name      = "spi2Mutex",
   .attr_bits = osMutexPrioInherit,
@@ -238,6 +241,7 @@ static inline uint32_t AppI32ToDec(char *out, int32_t v);
 static void AppFramePopulateLsm6dsox(AppSensorFrame_t *frame, const LSM6DSOX_AllData_t *data, uint32_t tick_ms);
 static void AppFramePopulateH3lis100dl(AppSensorFrame_t *frame, const H3LIS100DL_Data_t *data, uint32_t tick_ms);
 static void AppFramePopulateQma6100p(AppSensorFrame_t *frame, const QMA6100P_Data_t *data, uint32_t tick_ms);
+static QMA6100P_Bandwidth_t AppQmaBwToEnum(uint32_t odr_hz);
 static uint32_t AppAcqResolvePeriodMs(uint32_t requested_hz);
 static uint32_t AppAcqResolveEffectiveHz(uint32_t period_ms);
 static const char *AppAcqSinkToString(uint8_t sink);
@@ -319,6 +323,10 @@ void MX_FREERTOS_Init(void)
   s_qma_fifo_sem = osSemaphoreNew(1, 0, NULL);
   s_h3_drdy_sem  = osSemaphoreNew(1, 0, NULL);
   /* USER CODE END RTOS_SEMAPHORES */
+
+  /* Load device config from SD card (DEVCFG.JSN) before tasks start,
+   * so sensor tasks read the correct ODR/range/enabled values. */
+  (void)DeviceCfg_LoadFromSD();
 
   /* Initialise SPSC ring buffers (data arrays are static, no allocation). */
   RingBuf_Init(&g_ring_lsm_imu, s_lsm_imu_ringbuf, APP_RING_LSM_IMU_SIZE);
@@ -522,6 +530,55 @@ static uint32_t AppAcqResolveEffectiveHz(uint32_t period_ms)
   return 1000U / period_ms;
 }
 
+static QMA6100P_Bandwidth_t AppQmaBwToEnum(uint32_t odr_hz)
+{
+  if (odr_hz >= 1600U) return QMA6100P_BW_1600;
+  if (odr_hz >= 800U)  return QMA6100P_BW_800;
+  if (odr_hz >= 400U)  return QMA6100P_BW_400;
+  if (odr_hz >= 200U)  return QMA6100P_BW_200;
+  if (odr_hz >= 100U)  return QMA6100P_BW_100;
+  if (odr_hz >= 50U)   return QMA6100P_BW_50;
+  if (odr_hz >= 25U)   return QMA6100P_BW_25;
+  return QMA6100P_BW_12_5;
+}
+
+/* DWT cycle counter → microseconds (160MHz, wraps at ~26.8s) */
+static inline uint32_t AppDwtUs(void)
+{
+  return DWT->CYCCNT / (SystemCoreClock / 1000000U);
+}
+
+static uint8_t AppLsmBdrToEnum(uint16_t odr_hz)
+{
+  if (odr_hz >= 6664U) return LSM6DSOX_BDR_6667Hz;
+  if (odr_hz >= 3332U) return LSM6DSOX_BDR_3333Hz;
+  if (odr_hz >= 1666U) return LSM6DSOX_BDR_1667Hz;
+  if (odr_hz >= 833U)  return LSM6DSOX_BDR_833Hz;
+  if (odr_hz >= 416U)  return LSM6DSOX_BDR_417Hz;
+  if (odr_hz >= 208U)  return LSM6DSOX_BDR_208Hz;
+  if (odr_hz >= 104U)  return LSM6DSOX_BDR_104Hz;
+  if (odr_hz >= 52U)   return LSM6DSOX_BDR_52Hz;
+  if (odr_hz >= 26U)   return LSM6DSOX_BDR_26Hz;
+  return LSM6DSOX_BDR_12_5Hz;
+}
+
+static uint32_t AppLsmBdrToIntervalUs(uint8_t bdr)
+{
+  switch (bdr)
+  {
+    case LSM6DSOX_BDR_6667Hz: return 150U;
+    case LSM6DSOX_BDR_3333Hz: return 300U;
+    case LSM6DSOX_BDR_1667Hz: return 600U;
+    case LSM6DSOX_BDR_833Hz:  return 1200U;
+    case LSM6DSOX_BDR_417Hz:  return 2400U;
+    case LSM6DSOX_BDR_208Hz:  return 4808U;
+    case LSM6DSOX_BDR_104Hz:  return 9615U;
+    case LSM6DSOX_BDR_52Hz:   return 19231U;
+    case LSM6DSOX_BDR_26Hz:   return 38462U;
+    default:                  return 80000U;  /* 12.5Hz */
+  }
+}
+
 static const char *AppAcqSinkToString(uint8_t sink)
 {
   switch (sink)
@@ -703,6 +760,77 @@ static void AppAcqCheckAutoStop(void)
     AppAcqStopInternal(now_ms);
   }
 }
+/* Apply current AcqConfig to all three sensors. Called on each acq_start so
+ * set_sensor changes take effect without restarting the tasks. */
+static void AppApplySensorConfig(void)
+{
+  AcqConfig_t cfg;
+  AcqConfig_GetCopy(&cfg);
+
+  /* --- LSM6DSOX (SPI1, no mutex needed) --- */
+  if (cfg.lsm6dsox.enabled != 0U)
+  {
+    uint8_t bdr = AppLsmBdrToEnum(cfg.lsm6dsox.odr_hz);
+    s_lsm_odr_interval_us = AppLsmBdrToIntervalUs(bdr);
+    (void)LSM6DSOX_FIFO_Config(256U, bdr, bdr);
+    printf("[LSM6DSOX] reconfig: %u Hz BDR=0x%02X (interval=%lu us)\r\n",
+           (unsigned)cfg.lsm6dsox.odr_hz, (unsigned)bdr,
+           (unsigned long)s_lsm_odr_interval_us);
+  }
+  else
+  {
+    printf("[LSM6DSOX] disabled, skip reconfig\r\n");
+  }
+
+  /* --- QMA6100P + H3LIS100DL (SPI2, need mutex) --- */
+  osMutexAcquire(spi2_mutex, osWaitForever);
+
+  /* QMA */
+  if (cfg.qma6100p.enabled != 0U)
+  {
+    QMA6100P_Bandwidth_t bw = AppQmaBwToEnum((uint32_t)cfg.qma6100p.odr_hz);
+    QMA6100P_Config_t qcfg = { .range = QMA6100P_RANGE_4G, .bw = bw };
+    if (QMA6100P_Configure(&qcfg) == HAL_OK)
+    {
+      uint32_t actual_odr;
+      switch (bw)
+      {
+        case QMA6100P_BW_1600: actual_odr = 1600U; break;
+        case QMA6100P_BW_800:  actual_odr = 800U;  break;
+        case QMA6100P_BW_400:  actual_odr = 400U;  break;
+        case QMA6100P_BW_200:  actual_odr = 200U;  break;
+        case QMA6100P_BW_100:  actual_odr = 100U;  break;
+        case QMA6100P_BW_50:   actual_odr = 50U;   break;
+        case QMA6100P_BW_25:   actual_odr = 25U;   break;
+        default:               actual_odr = 12U;   break;
+      }
+      s_qma_odr_interval_us = 1000000U / actual_odr;
+      printf("[QMA6100P] reconfig: %lu Hz (interval=%lu us)\r\n",
+             (unsigned long)actual_odr, (unsigned long)s_qma_odr_interval_us);
+    }
+    (void)QMA6100P_FIFO_Config(16U);
+  }
+  else
+  {
+    printf("[QMA6100P] disabled, skip reconfig\r\n");
+  }
+
+  /* H3 polling interval */
+  if (cfg.h3lis100dl.enabled != 0U)
+  {
+    uint32_t h3_odr = (cfg.h3lis100dl.odr_hz > 0U) ? (uint32_t)cfg.h3lis100dl.odr_hz : 400U;
+    s_h3_odr_interval_us = 1000000U / h3_odr;
+    printf("[H3LIS100DL] reconfig: %lu Hz (interval=%lu us)\r\n",
+           (unsigned long)h3_odr, (unsigned long)s_h3_odr_interval_us);
+  }
+  else
+  {
+    printf("[H3LIS100DL] disabled, skip reconfig\r\n");
+  }
+
+  osMutexRelease(spi2_mutex);
+}
+
 static uint32_t AppAcqStart(uint8_t sink, uint32_t requested_hz, uint32_t duration_ms)
 {
   uint32_t now_ms = osKernelGetTickCount();
@@ -721,6 +849,9 @@ static uint32_t AppAcqStart(uint8_t sink, uint32_t requested_hz, uint32_t durati
   {
     return 0U;
   }
+
+  /* Apply latest sensor config before starting acquisition */
+  AppApplySensorConfig();
 
   AppSnapshotReset();
 
@@ -1300,8 +1431,130 @@ static void UsbCmd_Ping(void)
 
 static void UsbCmd_Help(void)
 {
-  const char *msg = "Commands: ping, help, status, snapshot, flowstat, dmastat, stat, acq_start, acq_stop, acq_status, msc\r\n";
+  const char *msg = "Commands: ping, help, status, snapshot, flowstat, dmastat, stat, acq_start, acq_stop, acq_status, s <lsm|h3|qma> <odr|range|en> <val>, msc\r\n";
   UsbCdcService_Write((const uint8_t *)msg, strlen(msg));
+}
+
+static void UsbCmd_SetSensor(const char *cmd)
+{
+  char sensor[8];
+  char param[8];
+  unsigned long val;
+  char line[80];
+  int len;
+  int updated = 0;
+
+  if (sscanf(cmd, "s %7s %7s %lu", sensor, param, &val) != 3)
+  {
+    const char *msg = "Usage: s <lsm|h3|qma> <odr|range|en> <value>\r\n";
+    UsbCdcService_Write((const uint8_t *)msg, strlen(msg));
+    return;
+  }
+
+  uint8_t which;
+  if      (strcmp(sensor, "lsm") == 0) which = 0U;
+  else if (strcmp(sensor, "h3")  == 0) which = 1U;
+  else if (strcmp(sensor, "qma") == 0) which = 2U;
+  else
+  {
+    len = snprintf(line, sizeof(line), "ERR: use lsm/h3/qma\r\n");
+    UsbCdcService_Write((const uint8_t *)line, (uint32_t)len);
+    return;
+  }
+
+  AcqConfig_t cfg;
+  AcqConfig_GetCopy(&cfg);
+
+  if (strcmp(param, "odr") == 0)
+  {
+    /* Snap to nearest supported ODR so CONFIG.JSN matches actual hardware */
+    uint16_t snapped = (uint16_t)val;
+    switch (which)
+    {
+      case 0U: {
+        static const uint16_t lsm_odrs[] = {12,26,52,104,208,416,833,1666,3332,6664};
+        snapped = lsm_odrs[0];
+        for (unsigned i = 1; i < sizeof(lsm_odrs)/sizeof(lsm_odrs[0]); i++)
+          if (abs((int)val - (int)lsm_odrs[i]) < abs((int)val - (int)snapped))
+            snapped = lsm_odrs[i];
+        cfg.lsm6dsox.odr_hz = snapped;
+        break;
+      }
+      case 1U: {
+        static const uint16_t h3_odrs[] = {50,100,400};
+        snapped = h3_odrs[0];
+        for (unsigned i = 1; i < sizeof(h3_odrs)/sizeof(h3_odrs[0]); i++)
+          if (abs((int)val - (int)h3_odrs[i]) < abs((int)val - (int)snapped))
+            snapped = h3_odrs[i];
+        cfg.h3lis100dl.odr_hz = snapped;
+        break;
+      }
+      case 2U: {
+        static const uint16_t qma_odrs[] = {100,200,400,800,1600};
+        snapped = qma_odrs[0];
+        for (unsigned i = 1; i < sizeof(qma_odrs)/sizeof(qma_odrs[0]); i++)
+          if (abs((int)val - (int)qma_odrs[i]) < abs((int)val - (int)snapped))
+            snapped = qma_odrs[i];
+        cfg.qma6100p.odr_hz = snapped;
+        break;
+      }
+    }
+    if (AcqConfig_Set(&cfg) == 0)
+    {
+      if (snapped != (uint16_t)val)
+        len = snprintf(line, sizeof(line), "OK %s odr=%lu->%u\r\n", sensor, val, (unsigned)snapped);
+      else
+        len = snprintf(line, sizeof(line), "OK %s odr=%lu\r\n", sensor, val);
+      updated = 1;
+    }
+    else
+      len = snprintf(line, sizeof(line), "ERR\r\n");
+  }
+  else if (strcmp(param, "range") == 0)
+  {
+    switch (which)
+    {
+      case 0U: cfg.lsm6dsox.range   = (uint16_t)val; break;
+      case 1U: cfg.h3lis100dl.range = (uint16_t)val; break;
+      case 2U: cfg.qma6100p.range   = (uint16_t)val; break;
+    }
+    if (AcqConfig_Set(&cfg) == 0)
+    {
+      len = snprintf(line, sizeof(line), "OK %s range=%lu\r\n", sensor, val);
+      updated = 1;
+    }
+    else
+      len = snprintf(line, sizeof(line), "ERR\r\n");
+  }
+  else if (strcmp(param, "en") == 0)
+  {
+    uint8_t en = (val != 0U) ? 1U : 0U;
+    switch (which)
+    {
+      case 0U: cfg.lsm6dsox.enabled   = en; break;
+      case 1U: cfg.h3lis100dl.enabled = en; break;
+      case 2U: cfg.qma6100p.enabled   = en; break;
+    }
+    if (AcqConfig_Set(&cfg) == 0)
+    {
+      len = snprintf(line, sizeof(line), "OK %s en=%u\r\n", sensor, (unsigned)en);
+      updated = 1;
+    }
+    else
+      len = snprintf(line, sizeof(line), "ERR\r\n");
+  }
+  else
+  {
+    len = snprintf(line, sizeof(line), "ERR: use odr, range, or en\r\n");
+  }
+  UsbCdcService_Write((const uint8_t *)line, (uint32_t)len);
+
+  /* 同步写回 SD 卡 + 立即配置传感器硬件 */
+  if (updated)
+  {
+    (void)DeviceCfg_WriteCurrentToSD();
+    AppApplySensorConfig();
+  }
 }
 
 static void UsbCmd_Status(void)
@@ -1603,12 +1856,17 @@ static void UsbCmd_Process(const char *cmd)
   {
     UsbCmd_AcqStatus();
   }
+  else if (cmd[0] == 's' && cmd[1] == ' ')
+  {
+    UsbCmd_SetSensor(cmd);
+  }
   else if (strcmp(cmd, "msc") == 0)
   {
     const char *msg = "Switching to USB MSC mode...\r\n";
     UsbCdcService_Write((const uint8_t *)msg, strlen(msg));
     UsbCmd_AcqStop();
     osDelay(500U);
+    (void)DeviceCfg_WriteCurrentToSD();
     BootMode_Write(BOOT_MODE_USB_MSC);
     /* Verify write before reset */
     boot_mode_t verify = BootMode_Read();
@@ -1997,6 +2255,16 @@ void StartLsm6dsoxTask(void *argument)
     osDelay(SAMPLE_PERIOD_MS);
   }
 #else
+  {
+    AcqConfig_t acfg_init;
+    AcqConfig_GetCopy(&acfg_init);
+    if (acfg_init.lsm6dsox.enabled == 0U)
+    {
+      printf("[LSM6DSOX] disabled by config, task idle\r\n");
+      for (;;) { osDelay(1000U); }
+    }
+  }
+
   if (LSM6DSOX_Init() != HAL_OK)
   {
     printf("[LSM6DSOX] init failed, task exit\r\n");
@@ -2004,14 +2272,23 @@ void StartLsm6dsoxTask(void *argument)
     return;
   }
 
-  /* Configure LSM FIFO: ACC+GYRO batched at 6664 Hz (max ODR), watermark
-   * at 256 samples (~19ms latency: 256/(6664*2)=19.2ms). INT1 (PB1)
-   * triggers EXTI when FIFO fill reaches the watermark. */
-  if (LSM6DSOX_FIFO_Config(256U, LSM6DSOX_BDR_6667Hz, LSM6DSOX_BDR_6667Hz) != HAL_OK)
+  /* Configure LSM FIFO: ACC+GYRO batched at configured ODR, watermark
+   * at 256 samples. INT1 (PB1) triggers EXTI when FIFO fill reaches
+   * the watermark. */
   {
-    printf("[LSM6DSOX] FIFO config failed, task exit\r\n");
-    osThreadTerminate(NULL);
-    return;
+    AcqConfig_t acfg;
+    AcqConfig_GetCopy(&acfg);
+    uint8_t bdr = AppLsmBdrToEnum(acfg.lsm6dsox.odr_hz);
+    s_lsm_odr_interval_us = AppLsmBdrToIntervalUs(bdr);
+    printf("[LSM6DSOX] ODR config: %u Hz -> BDR=0x%02X (interval=%lu us)\r\n",
+           (unsigned)acfg.lsm6dsox.odr_hz, (unsigned)bdr,
+           (unsigned long)s_lsm_odr_interval_us);
+    if (LSM6DSOX_FIFO_Config(256U, bdr, bdr) != HAL_OK)
+    {
+      printf("[LSM6DSOX] FIFO config failed, task exit\r\n");
+      osThreadTerminate(NULL);
+      return;
+    }
   }
 
   /* Local FIFO read scratch: 256 words × 7 bytes */
@@ -2054,11 +2331,13 @@ void StartLsm6dsoxTask(void *argument)
       }
 
       /* Two-pass parse:
-       *   pass 1: count ACC/GYR pairs (needed for back-extrapolated tick_ms)
+       *   pass 1: count ACC/GYR pairs
        *   pass 2: emit one CSV row per pair into the LSM_IMU ring buffer.
        * Each row carries 6 raw int16 values (ACC + GYR). PC-side scales by
        * the sensitivity constants to recover physical units. */
-      uint32_t batch_base_us = osKernelGetTickCount() * 1000U;
+      static uint32_t lsm_ts_us = 0U;
+      static uint8_t lsm_ts_init = 0U;
+      if (lsm_ts_init == 0U) { lsm_ts_us = AppDwtUs(); lsm_ts_init = 1U; }
       uint8_t cur_has_acc = 0, cur_has_gyr = 0;
       int16_t cur_acc[3] = {0}, cur_gyr[3] = {0};
       uint16_t n_pairs = 0;
@@ -2076,7 +2355,6 @@ void StartLsm6dsoxTask(void *argument)
       }
       cur_has_acc = cur_has_gyr = 0;
 
-      uint32_t pair_idx = 0;
       char rowbuf[80];
       for (uint16_t i = 0; i < to_read; i++)
       {
@@ -2091,9 +2369,8 @@ void StartLsm6dsoxTask(void *argument)
 
         if (cur_has_acc && cur_has_gyr)
         {
-          uint32_t pairs_remaining = (n_pairs > pair_idx + 1U) ? (n_pairs - pair_idx - 1U) : 0U;
-          uint32_t back_us = pairs_remaining * 150U;
-          uint32_t tick_ms_i = (batch_base_us - back_us) / 1000U;
+          lsm_ts_us += s_lsm_odr_interval_us;
+          uint32_t tick_ms_i = lsm_ts_us / 1000U;
           uint32_t fid = ++g_lsm_frame_id_counter;
 
           /* Hand-rolled int -> decimal: snprintf at 13328 calls/sec breaks
@@ -2121,7 +2398,6 @@ void StartLsm6dsoxTask(void *argument)
 
           cur_has_acc = 0;
           cur_has_gyr = 0;
-          pair_idx++;
         }
       }
 
@@ -2196,11 +2472,27 @@ void StartH3lis100dlTask(void *argument)
     osDelay(AppAcqCurrentPeriodMs());
   }
 #else
-  /* 400Hz polling. EXTI-driven mode (DRDY routed to PB4) was unreliable on
-   * this board: INT1 latched high and never re-pulsed after the first batch
-   * of samples regardless of how the data registers were drained. Polling
-   * at the ODR period delivers the same throughput without depending on the
-   * INT pin behaviour. */
+  {
+    AcqConfig_t acfg_init;
+    AcqConfig_GetCopy(&acfg_init);
+    if (acfg_init.h3lis100dl.enabled == 0U)
+    {
+      printf("[H3LIS100DL] disabled by config, task idle\r\n");
+      for (;;) { osDelay(1000U); }
+    }
+  }
+
+  /* Polling mode. EXTI-driven mode (DRDY routed to PB4) was unreliable on
+   * this board. Polling at the configured ODR period delivers the same
+   * throughput without depending on the INT pin behaviour. */
+  {
+    AcqConfig_t acfg;
+    AcqConfig_GetCopy(&acfg);
+    uint32_t h3_odr = (acfg.h3lis100dl.odr_hz > 0U) ? (uint32_t)acfg.h3lis100dl.odr_hz : 400U;
+    s_h3_odr_interval_us = 1000000U / h3_odr;
+    printf("[H3LIS100DL] ODR config: %lu Hz (interval=%lu us)\r\n",
+           (unsigned long)h3_odr, (unsigned long)s_h3_odr_interval_us);
+  }
   uint32_t next_wake = osKernelGetTickCount();
   for (;;)
   {
@@ -2219,8 +2511,14 @@ void StartH3lis100dlTask(void *argument)
 
     if (ret == 0)
     {
+      /* Monotonic timestamp: seed with DWT on first sample, then +interval per sample. */
+      static uint32_t h3_ts_us = 0U;
+      static uint8_t h3_ts_init = 0U;
+      if (h3_ts_init == 0U) { h3_ts_us = AppDwtUs(); h3_ts_init = 1U; }
+      h3_ts_us += s_h3_odr_interval_us;
+
       uint32_t fid = ++g_h3_frame_id_counter;
-      uint32_t tick_ms_i = osKernelGetTickCount();
+      uint32_t tick_ms_i = h3_ts_us / 1000U;
       char rowbuf[24];
       uint32_t off = 0;
       off += AppU32ToDec(&rowbuf[off], fid);
@@ -2237,10 +2535,10 @@ void StartH3lis100dlTask(void *argument)
       RingBuf_Write(&g_ring_h3_acc, (const uint8_t *)rowbuf, off);
     }
 
-    /* Pace the loop at ~400Hz. osDelayUntil bounds cumulative drift even when
-     * an iteration stalls behind a higher-priority task. 1ms tick limits real
-     * granularity to ~333..500Hz; H3 high-g shock detection tolerates this. */
-    next_wake += 2U;
+    /* Pace the loop at the configured ODR. osDelayUntil bounds cumulative drift
+     * even when an iteration stalls behind a higher-priority task. 1ms tick
+     * limits real granularity; H3 high-g shock detection tolerates this. */
+    next_wake += s_h3_odr_interval_us / 1000U;
     osDelayUntil(next_wake);
   }
 #endif
@@ -2257,6 +2555,35 @@ void StartQma6100pTask(void *argument)
     printf("[QMA6100P] init failed, task exit\r\n");
     osThreadTerminate(NULL);
     return;
+  }
+
+  /* Apply configured ODR (overrides the hardcoded 1600Hz in Init).
+   * QMA6100P_Configure goes Standby→BW→Active so the ODR change takes effect. */
+  {
+    AcqConfig_t acfg;
+    AcqConfig_GetCopy(&acfg);
+    QMA6100P_Bandwidth_t bw = AppQmaBwToEnum((uint32_t)acfg.qma6100p.odr_hz);
+    QMA6100P_Config_t qcfg = { .range = QMA6100P_RANGE_4G, .bw = bw };
+    if (QMA6100P_Configure(&qcfg) == HAL_OK)
+    {
+      /* Compute actual interval for back-extrapolation.
+       * BW enum is not sequential, so use a switch. */
+      uint32_t actual_odr;
+      switch (bw)
+      {
+        case QMA6100P_BW_1600: actual_odr = 1600U; break;
+        case QMA6100P_BW_800:  actual_odr = 800U;  break;
+        case QMA6100P_BW_400:  actual_odr = 400U;  break;
+        case QMA6100P_BW_200:  actual_odr = 200U;  break;
+        case QMA6100P_BW_100:  actual_odr = 100U;  break;
+        case QMA6100P_BW_50:   actual_odr = 50U;   break;
+        case QMA6100P_BW_25:   actual_odr = 25U;   break;
+        default:               actual_odr = 12U;   break;
+      }
+      s_qma_odr_interval_us = 1000000U / actual_odr;
+      printf("[QMA6100P] ODR configured: %lu Hz (interval=%lu us)\r\n",
+             (unsigned long)actual_odr, (unsigned long)s_qma_odr_interval_us);
+    }
   }
   osMutexRelease(spi2_mutex);
 
@@ -2278,7 +2605,17 @@ void StartQma6100pTask(void *argument)
     osDelay(AppAcqCurrentPeriodMs());
   }
 #else
-  /* FIFO + watermark 16 frames @ ODR=1600Hz -> ~10ms cadence per IRQ. */
+  {
+    AcqConfig_t acfg_init;
+    AcqConfig_GetCopy(&acfg_init);
+    if (acfg_init.qma6100p.enabled == 0U)
+    {
+      printf("[QMA6100P] disabled by config, task idle\r\n");
+      for (;;) { osDelay(1000U); }
+    }
+  }
+
+  /* FIFO + watermark 16 frames -> ~10ms cadence per IRQ. */
   osMutexAcquire(spi2_mutex, osWaitForever);
   if (QMA6100P_FIFO_Config(16U) != HAL_OK)
   {
@@ -2289,7 +2626,9 @@ void StartQma6100pTask(void *argument)
   }
   osMutexRelease(spi2_mutex);
 
-  static uint8_t fifo_buf[32U * 6U];
+  static uint8_t fifo_buf[63U * 6U];
+  uint32_t qma_ts_us = 0U;  /* running µs counter, strictly monotonic */
+  uint8_t qma_ts_init = 0U;
 
   for (;;)
   {
@@ -2300,15 +2639,12 @@ void StartQma6100pTask(void *argument)
       continue;
     }
 
-    /* Wait for the watermark EXTI, but fall through to a FIFO poll on timeout.
-     * The watermark interrupt is edge-triggered (0→wtm crossing). Under SPI2
-     * bus contention with H3 the read can be delayed enough that the FIFO
-     * stays above the watermark after re-arm, so no fresh edge is produced
-     * and the EXTI never fires again. A short timeout + unconditional FIFO
-     * level check makes the path self-healing regardless of edge delivery. */
+    /* Wait for the watermark EXTI, with a short timeout for self-healing.
+     * In STREAM mode the FIFO is circular and re-triggers automatically,
+     * so 2ms timeout keeps recovery fast without busy-spinning. */
     if (s_qma_fifo_sem != NULL)
     {
-      (void)osSemaphoreAcquire(s_qma_fifo_sem, 20U);
+      (void)osSemaphoreAcquire(s_qma_fifo_sem, 2U);
     }
 
     osMutexAcquire(spi2_mutex, osWaitForever);
@@ -2316,12 +2652,10 @@ void StartQma6100pTask(void *argument)
     uint8_t fifo_level = 0;
     if (QMA6100P_FIFO_GetLevel(&fifo_level) != HAL_OK || fifo_level == 0U)
     {
-      uint8_t int_st;
-      (void)QMA6100P_ReadStatus(&int_st);
       osMutexRelease(spi2_mutex);
       continue;
     }
-    if (fifo_level > 32U) fifo_level = 32U;
+    if (fifo_level > 63U) fifo_level = 63U;
 
     if (QMA6100P_FIFO_ReadBlock(fifo_buf, fifo_level) != HAL_OK)
     {
@@ -2329,20 +2663,20 @@ void StartQma6100pTask(void *argument)
       continue;
     }
 
-    /* Order: clear INT_ST first (drops latched pin low), then re-arm FIFO_MODE
-     * so the next watermark crossing creates a fresh rising edge. */
-    {
-      uint8_t int_st;
-      (void)QMA6100P_ReadStatus(&int_st);
-    }
-    (void)QMA6100P_FIFO_Rearm();
+    /* STREAM mode: no Rearm needed. The FIFO is circular and re-triggers
+     * the watermark interrupt automatically on wrap. */
 
     osMutexRelease(spi2_mutex);
 
-    /* Parse 6-byte frames into raw int14 (data is 14-bit left-justified in
-     * 16 bits, so >>2 strips the unused LSBs) and emit one CSV row per frame
-     * directly to the QMA ring buffer. */
-    uint32_t batch_base_us = osKernelGetTickCount() * 1000U;
+    /* Strictly monotonic timestamps: each sample = previous + interval.
+     * Seed with DWT on first batch; after that the counter never regresses.
+     * The FIFO delivers oldest-first, so sample[0] is the oldest. */
+    if (qma_ts_init == 0U)
+    {
+      qma_ts_us = AppDwtUs();
+      qma_ts_init = 1U;
+    }
+
     char rowbuf[56];
     for (uint8_t i = 0; i < fifo_level; i++)
     {
@@ -2351,9 +2685,8 @@ void StartQma6100pTask(void *argument)
       int16_t ry = (int16_t)(((int16_t)((uint16_t)p[3] << 8 | p[2])) >> 2);
       int16_t rz = (int16_t)(((int16_t)((uint16_t)p[5] << 8 | p[4])) >> 2);
 
-      uint32_t samples_remaining = (uint32_t)(fifo_level - 1U - i);
-      uint32_t back_us = samples_remaining * 625U;  /* 1/1600Hz */
-      uint32_t tick_ms_i = (batch_base_us - back_us) / 1000U;
+      qma_ts_us += s_qma_odr_interval_us;
+      uint32_t tick_ms_i = qma_ts_us / 1000U;
       uint32_t fid = ++g_qma_frame_id_counter;
 
       uint32_t off = 0;
@@ -2385,12 +2718,6 @@ void StartLoggerTask(void *argument)
 
   AppFlowStatsSetMode(0U, 0U);
   printf("[Logger] task started, SD card mode\r\n");
-
-  /* 从SD卡读取 DeviceConfig.json 并应用到运行时配置；
-   * 文件不存在时写入默认模板，两种情况均不中断启动流程 */
-  printf("[Logger] loading config from SD...\r\n");
-  (void)DeviceCfg_LoadFromSD();
-  printf("[Logger] config loaded, entering main loop\r\n");
 
   for (;;)
   {

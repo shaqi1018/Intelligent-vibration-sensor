@@ -32,11 +32,16 @@
 #define DEV_CFG_SNAPSHOT_DIR   "0:/LOG"
 #define DEV_CFG_SNAPSHOT_MAX   32U       /* 快照路径最大长度 */
 #define DEV_CFG_READ_BUF_SZ    1024U     /* 配置文件读取缓冲区字节数 */
-#define DEV_CFG_OBJ_BUF_SZ     256U      /* 子对象提取缓冲区字节数   */
+#define DEV_CFG_OBJ_BUF_SZ     384U      /* 子对象提取缓冲区字节数   */
 
-/* 上电写入的默认模板（与解析器所支持的字段保持一致） */
+/* 上电写入的默认模板（与解析器所支持的字段保持一致）
+ * _doc / _options_* 等以 _ 开头的键仅作文档用途，解析器会自动忽略。 */
 static const char kCfgTemplate[] =
 "{\r\n"
+"  \"_doc\": \"Sensor Box device config. On power-up the MCU reads this file and applies range/ODR to sensors.\",\r\n"
+"  \"_doc_units\": \"range_g = +/- g | range_dps = +/- deg/s | odr_hz = output data rate (Hz)\",\r\n"
+"  \"_doc_unknown_keys\": \"Any key starting with _ is documentation only and silently ignored by the parser.\",\r\n"
+"\r\n"
 "  \"sample_rate_hz\": 1000,\r\n"
 "  \"sink\": \"USB\",\r\n"
 "  \"storage_mode\": \"LINEAR\",\r\n"
@@ -44,21 +49,36 @@ static const char kCfgTemplate[] =
 "  \"trigger_delay_ms\": 0,\r\n"
 "  \"duration_ms\": 0,\r\n"
 "  \"sd_ring_max_bytes\": 0,\r\n"
+"\r\n"
 "  \"lsm6dsox\": {\r\n"
+"    \"_doc\": \"ST 6-axis IMU (ACC + GYR + TEMP) on SPI1 (dedicated bus)\",\r\n"
 "    \"enabled\": 1,\r\n"
 "    \"range_g\": 4,\r\n"
+"    \"_options_range_g\": [2, 4, 8, 16],\r\n"
 "    \"range_dps\": 2000,\r\n"
-"    \"odr_hz\": 6664\r\n"
+"    \"_options_range_dps\": [250, 500, 1000, 2000],\r\n"
+"    \"odr_hz\": 1666,\r\n"
+"    \"_options_odr_hz\": [12, 26, 52, 104, 208, 416, 833, 1666, 3332, 6664]\r\n"
 "  },\r\n"
+"\r\n"
 "  \"h3lis100dl\": {\r\n"
+"    \"_doc\": \"ST high-g accelerometer (+/-100 g fixed) on SPI2 (shared bus)\",\r\n"
 "    \"enabled\": 1,\r\n"
 "    \"range_g\": 100,\r\n"
-"    \"odr_hz\": 400\r\n"
+"    \"_options_range_g\": [100],\r\n"
+"    \"odr_hz\": 400,\r\n"
+"    \"_options_odr_hz_normal\": [50, 100, 400],\r\n"
+"    \"_options_odr_hz_lowpower\": [1, 2, 5, 10]\r\n"
 "  },\r\n"
+"\r\n"
 "  \"qma6100p\": {\r\n"
+"    \"_doc\": \"QST 3-axis accelerometer (up to 1600 Hz, +/-32 g) on SPI2 (shared bus)\",\r\n"
 "    \"enabled\": 1,\r\n"
 "    \"range_g\": 4,\r\n"
-"    \"odr_hz\": 800\r\n"
+"    \"_options_range_g\": [2, 4, 8, 16, 32],\r\n"
+"    \"odr_hz\": 100,\r\n"
+"    \"_options_odr_hz\": [100, 200, 400, 800, 1600],\r\n"
+"    \"_options_odr_hz_lowpower\": [12, 25, 50]\r\n"
 "  }\r\n"
 "}\r\n";
 
@@ -415,7 +435,7 @@ FRESULT DeviceCfg_WriteSnapshotToSD(const AcqConfig_t *cfg, uint32_t session_id)
     const char *storage_str;
     const char *trigger_str;
     int         path_len;
-    static char s_line[512]; /* static 避免栈压力 */
+    static char s_line[1024]; /* static 避免栈压力 */
     int         line_len;
 
     /* 若未提供配置指针则读取当前运行时配置 */
@@ -504,10 +524,14 @@ FRESULT DeviceCfg_WriteSnapshotToSD(const AcqConfig_t *cfg, uint32_t session_id)
         default:                   trigger_str = "NONE";     break;
     }
 
-    /* 序列化为 JSON */
+    /* 序列化为 JSON（_doc / _options_* 为文档字段，解析器自动忽略） */
     line_len = snprintf(
         s_line, sizeof(s_line),
         "{\r\n"
+        "  \"_doc\": \"Sensor Box device config. On power-up the MCU reads this file and applies range/ODR to sensors.\",\r\n"
+        "  \"_doc_units\": \"range_g = +/- g | range_dps = +/- deg/s | odr_hz = output data rate (Hz)\",\r\n"
+        "  \"_doc_unknown_keys\": \"Any key starting with _ is documentation only and silently ignored by the parser.\",\r\n"
+        "\r\n"
         "  \"sample_rate_hz\": %lu,\r\n"
         "  \"sink\": \"%s\",\r\n"
         "  \"storage_mode\": \"%s\",\r\n"
@@ -515,21 +539,36 @@ FRESULT DeviceCfg_WriteSnapshotToSD(const AcqConfig_t *cfg, uint32_t session_id)
         "  \"trigger_delay_ms\": %lu,\r\n"
         "  \"duration_ms\": %lu,\r\n"
         "  \"sd_ring_max_bytes\": %lu,\r\n"
+        "\r\n"
         "  \"lsm6dsox\": {\r\n"
+        "    \"_doc\": \"ST 6-axis IMU (ACC + GYR + TEMP) on SPI1 (dedicated bus)\",\r\n"
         "    \"enabled\": %u,\r\n"
         "    \"range_g\": %u,\r\n"
+        "    \"_options_range_g\": [2, 4, 8, 16],\r\n"
         "    \"range_dps\": %u,\r\n"
-        "    \"odr_hz\": %u\r\n"
+        "    \"_options_range_dps\": [250, 500, 1000, 2000],\r\n"
+        "    \"odr_hz\": %u,\r\n"
+        "    \"_options_odr_hz\": [12, 26, 52, 104, 208, 416, 833, 1666, 3332, 6664]\r\n"
         "  },\r\n"
+        "\r\n"
         "  \"h3lis100dl\": {\r\n"
+        "    \"_doc\": \"ST high-g accelerometer (+/-100 g fixed) on SPI2 (shared bus)\",\r\n"
         "    \"enabled\": %u,\r\n"
         "    \"range_g\": %u,\r\n"
-        "    \"odr_hz\": %u\r\n"
+        "    \"_options_range_g\": [100],\r\n"
+        "    \"odr_hz\": %u,\r\n"
+        "    \"_options_odr_hz_normal\": [50, 100, 400],\r\n"
+        "    \"_options_odr_hz_lowpower\": [1, 2, 5, 10]\r\n"
         "  },\r\n"
+        "\r\n"
         "  \"qma6100p\": {\r\n"
+        "    \"_doc\": \"QST 3-axis accelerometer (up to 1600 Hz, +/-32 g) on SPI2 (shared bus)\",\r\n"
         "    \"enabled\": %u,\r\n"
         "    \"range_g\": %u,\r\n"
-        "    \"odr_hz\": %u\r\n"
+        "    \"_options_range_g\": [2, 4, 8, 16, 32],\r\n"
+        "    \"odr_hz\": %u,\r\n"
+        "    \"_options_odr_hz\": [100, 200, 400, 800, 1600],\r\n"
+        "    \"_options_odr_hz_lowpower\": [12, 25, 50]\r\n"
         "  }\r\n"
         "}\r\n",
         (unsigned long)cfg->sample_rate_hz,
@@ -586,7 +625,7 @@ FRESULT DeviceCfg_WriteCurrentToSD(void)
     const char *sink_name;
     const char *storage_str;
     const char *trigger_str;
-    static char s_line[512];
+    static char s_line[1024];
     int         line_len;
 
     AcqConfig_GetCopy(&cfg);
@@ -622,6 +661,10 @@ FRESULT DeviceCfg_WriteCurrentToSD(void)
     line_len = snprintf(
         s_line, sizeof(s_line),
         "{\r\n"
+        "  \"_doc\": \"Sensor Box device config. On power-up the MCU reads this file and applies range/ODR to sensors.\",\r\n"
+        "  \"_doc_units\": \"range_g = +/- g | range_dps = +/- deg/s | odr_hz = output data rate (Hz)\",\r\n"
+        "  \"_doc_unknown_keys\": \"Any key starting with _ is documentation only and silently ignored by the parser.\",\r\n"
+        "\r\n"
         "  \"sample_rate_hz\": %lu,\r\n"
         "  \"sink\": \"%s\",\r\n"
         "  \"storage_mode\": \"%s\",\r\n"
@@ -629,21 +672,36 @@ FRESULT DeviceCfg_WriteCurrentToSD(void)
         "  \"trigger_delay_ms\": %lu,\r\n"
         "  \"duration_ms\": %lu,\r\n"
         "  \"sd_ring_max_bytes\": %lu,\r\n"
+        "\r\n"
         "  \"lsm6dsox\": {\r\n"
+        "    \"_doc\": \"ST 6-axis IMU (ACC + GYR + TEMP) on SPI1 (dedicated bus)\",\r\n"
         "    \"enabled\": %u,\r\n"
         "    \"range_g\": %u,\r\n"
+        "    \"_options_range_g\": [2, 4, 8, 16],\r\n"
         "    \"range_dps\": %u,\r\n"
-        "    \"odr_hz\": %u\r\n"
+        "    \"_options_range_dps\": [250, 500, 1000, 2000],\r\n"
+        "    \"odr_hz\": %u,\r\n"
+        "    \"_options_odr_hz\": [12, 26, 52, 104, 208, 416, 833, 1666, 3332, 6664]\r\n"
         "  },\r\n"
+        "\r\n"
         "  \"h3lis100dl\": {\r\n"
+        "    \"_doc\": \"ST high-g accelerometer (+/-100 g fixed) on SPI2 (shared bus)\",\r\n"
         "    \"enabled\": %u,\r\n"
         "    \"range_g\": %u,\r\n"
-        "    \"odr_hz\": %u\r\n"
+        "    \"_options_range_g\": [100],\r\n"
+        "    \"odr_hz\": %u,\r\n"
+        "    \"_options_odr_hz_normal\": [50, 100, 400],\r\n"
+        "    \"_options_odr_hz_lowpower\": [1, 2, 5, 10]\r\n"
         "  },\r\n"
+        "\r\n"
         "  \"qma6100p\": {\r\n"
+        "    \"_doc\": \"QST 3-axis accelerometer (up to 1600 Hz, +/-32 g) on SPI2 (shared bus)\",\r\n"
         "    \"enabled\": %u,\r\n"
         "    \"range_g\": %u,\r\n"
-        "    \"odr_hz\": %u\r\n"
+        "    \"_options_range_g\": [2, 4, 8, 16, 32],\r\n"
+        "    \"odr_hz\": %u,\r\n"
+        "    \"_options_odr_hz\": [100, 200, 400, 800, 1600],\r\n"
+        "    \"_options_odr_hz_lowpower\": [12, 25, 50]\r\n"
         "  }\r\n"
         "}\r\n",
         (unsigned long)cfg.sample_rate_hz,
@@ -696,9 +754,6 @@ FRESULT DeviceCfg_WriteConfigToDir(const char *dir)
     FRESULT     r;
     FIL         file;
     AcqConfig_t cfg;
-    const char *sink_name;
-    const char *storage_str;
-    const char *trigger_str;
     char        path[48];
     static char s_line[512];
     int         line_len;
@@ -707,26 +762,6 @@ FRESULT DeviceCfg_WriteConfigToDir(const char *dir)
 
     AcqConfig_GetCopy(&cfg);
 
-    switch (cfg.sink_mask)
-    {
-        case ACQ_SINK_SD:   sink_name = "SD";   break;
-        case ACQ_SINK_BOTH: sink_name = "BOTH"; break;
-        default:            sink_name = "USB";  break;
-    }
-
-    switch (cfg.storage_mode)
-    {
-        case ACQ_STORAGE_RING: storage_str = "RING"; break;
-        default:               storage_str = "LINEAR"; break;
-    }
-
-    switch (cfg.trigger_mode)
-    {
-        case ACQ_TRIGGER_EXTERNAL: trigger_str = "EXTERNAL"; break;
-        case ACQ_TRIGGER_TIMER:    trigger_str = "TIMER";    break;
-        default:                   trigger_str = "NONE";     break;
-    }
-
     line_len = snprintf(
         s_line, sizeof(s_line),
         "{\r\n"
@@ -734,9 +769,7 @@ FRESULT DeviceCfg_WriteConfigToDir(const char *dir)
         "  \"sink\": \"%s\",\r\n"
         "  \"storage_mode\": \"%s\",\r\n"
         "  \"trigger_mode\": \"%s\",\r\n"
-        "  \"trigger_delay_ms\": %lu,\r\n"
         "  \"duration_ms\": %lu,\r\n"
-        "  \"sd_ring_max_bytes\": %lu,\r\n"
         "  \"lsm6dsox\": {\r\n"
         "    \"enabled\": %u,\r\n"
         "    \"range_g\": %u,\r\n"
@@ -755,12 +788,12 @@ FRESULT DeviceCfg_WriteConfigToDir(const char *dir)
         "  }\r\n"
         "}\r\n",
         (unsigned long)cfg.sample_rate_hz,
-        sink_name,
-        storage_str,
-        trigger_str,
-        (unsigned long)cfg.trigger_delay_ms,
+        (cfg.sink_mask == ACQ_SINK_SD) ? "SD" :
+            ((cfg.sink_mask == ACQ_SINK_BOTH) ? "BOTH" : "USB"),
+        (cfg.storage_mode == ACQ_STORAGE_RING) ? "RING" : "LINEAR",
+        (cfg.trigger_mode == ACQ_TRIGGER_EXTERNAL) ? "EXTERNAL" :
+            ((cfg.trigger_mode == ACQ_TRIGGER_TIMER) ? "TIMER" : "NONE"),
         (unsigned long)cfg.duration_ms,
-        (unsigned long)cfg.sd_ring_max_bytes,
         (unsigned int)cfg.lsm6dsox.enabled,
         (unsigned int)cfg.lsm6dsox.range,
         (unsigned int)cfg.lsm6dsox.range2,
