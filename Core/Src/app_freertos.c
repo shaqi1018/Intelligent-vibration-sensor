@@ -242,8 +242,6 @@ static void AppFramePopulateLsm6dsox(AppSensorFrame_t *frame, const LSM6DSOX_All
 static void AppFramePopulateH3lis100dl(AppSensorFrame_t *frame, const H3LIS100DL_Data_t *data, uint32_t tick_ms);
 static void AppFramePopulateQma6100p(AppSensorFrame_t *frame, const QMA6100P_Data_t *data, uint32_t tick_ms);
 static QMA6100P_Bandwidth_t AppQmaBwToEnum(uint32_t odr_hz);
-static uint32_t AppAcqResolvePeriodMs(uint32_t requested_hz);
-static uint32_t AppAcqResolveEffectiveHz(uint32_t period_ms);
 static const char *AppAcqSinkToString(uint8_t sink);
 static uint8_t AppAcqParseSink(const char *text, uint8_t *sink_out);
 static void AppAcqGetCopy(AppAcqControl_t *ctrl);
@@ -257,7 +255,7 @@ static void AppFlowStatsSetMode(uint8_t usb_active, uint8_t sd_active);
 static void AppLoggerStopSdSession(uint8_t *sd_file_open, uint32_t *rows_since_sync);
 static void AppAcqStopInternal(uint32_t now_ms);
 static void AppAcqCheckAutoStop(void);
-static uint32_t AppAcqStart(uint8_t sink, uint32_t requested_hz, uint32_t duration_ms);
+static uint32_t AppAcqStart(uint8_t sink, uint32_t duration_ms);
 static uint32_t AppAcqStop(void);
 static uint32_t AppAcqDrainPendingStop(void);
 static void UsbCmd_AcqStatus(void);
@@ -500,34 +498,6 @@ static void AppSnapshotReset(void)
     memset(&g_frame_buffer, 0, sizeof(g_frame_buffer));
     osMutexRelease(frame_buffer_mutex);
   }
-}
-
-static uint32_t AppAcqResolvePeriodMs(uint32_t requested_hz)
-{
-  if (requested_hz == 0U)
-  {
-    return SAMPLE_PERIOD_MS;
-  }
-
-  if (requested_hz >= 1000U)
-  {
-    return 1U;
-  }
-
-  {
-    uint32_t period_ms = (1000U + requested_hz - 1U) / requested_hz;
-    return (period_ms == 0U) ? 1U : period_ms;
-  }
-}
-
-static uint32_t AppAcqResolveEffectiveHz(uint32_t period_ms)
-{
-  if (period_ms == 0U)
-  {
-    return 0U;
-  }
-
-  return 1000U / period_ms;
 }
 
 static QMA6100P_Bandwidth_t AppQmaBwToEnum(uint32_t odr_hz)
@@ -831,19 +801,14 @@ static void AppApplySensorConfig(void)
   osMutexRelease(spi2_mutex);
 }
 
-static uint32_t AppAcqStart(uint8_t sink, uint32_t requested_hz, uint32_t duration_ms)
+static uint32_t AppAcqStart(uint8_t sink, uint32_t duration_ms)
 {
   uint32_t now_ms = osKernelGetTickCount();
-  uint32_t period_ms;
-  uint32_t effective_hz;
 
   if ((sink != APP_ACQ_SINK_USB) && (sink != APP_ACQ_SINK_SD))
   {
     return 0U;
   }
-
-  period_ms = AppAcqResolvePeriodMs(requested_hz);
-  effective_hz = AppAcqResolveEffectiveHz(period_ms);
 
   if (acq_ctrl_mutex == NULL)
   {
@@ -858,14 +823,12 @@ static uint32_t AppAcqStart(uint8_t sink, uint32_t requested_hz, uint32_t durati
   osMutexAcquire(acq_ctrl_mutex, osWaitForever);
   g_acq_ctrl.running = 1U;
   g_acq_ctrl.sink = sink;
-  g_acq_ctrl.requested_hz = requested_hz;
-  g_acq_ctrl.period_ms = period_ms;
-  g_acq_ctrl.effective_hz = effective_hz;
+  g_acq_ctrl.requested_hz = 0U;
+  g_acq_ctrl.period_ms = 0U;
+  g_acq_ctrl.effective_hz = 0U;
   g_acq_ctrl.duration_ms = duration_ms;
   g_acq_ctrl.start_tick_ms = now_ms;
-  g_acq_ctrl.stop_pending = 0U;  /* clear any stale pending-stop so the new
-                                  * session is not immediately torn down by
-                                  * the logger's drain-pending-stop path */
+  g_acq_ctrl.stop_pending = 0U;
   osMutexRelease(acq_ctrl_mutex);
 
   AppFlowStatsSetMode((uint8_t)((sink == APP_ACQ_SINK_USB) ? 1U : 0U),
@@ -919,12 +882,9 @@ static void UsbCmd_AcqStatus(void)
     } \
   } while (0)
 
-  USB_ACQ_LINE("ACQ state=%s sink=%s req_hz=%lu eff_period_ms=%lu eff_hz=%lu duration_ms=%lu elapsed_ms=%lu remaining_ms=%lu\r\n",
+  USB_ACQ_LINE("ACQ state=%s sink=%s duration_ms=%lu elapsed_ms=%lu remaining_ms=%lu\r\n",
                (ctrl.running != 0U) ? "running" : "stopped",
                AppAcqSinkToString(ctrl.sink),
-               (unsigned long)ctrl.requested_hz,
-               (unsigned long)ctrl.period_ms,
-               (unsigned long)ctrl.effective_hz,
                (unsigned long)ctrl.duration_ms,
                (unsigned long)elapsed_ms,
                (unsigned long)remaining_ms);
@@ -935,27 +895,27 @@ static void UsbCmd_AcqStatus(void)
 static void UsbCmd_AcqStart(const char *cmd)
 {
   char sink_text[8];
-  unsigned long requested_hz = 0UL;
   unsigned long duration_ms = 0UL;
   uint8_t sink = 0U;
   char line[128];
   int len;
 
-  if (sscanf(cmd, "acq_start %7s %lu %lu", sink_text, &requested_hz, &duration_ms) != 3)
+  int n = sscanf(cmd, "acq_start %7s %lu", sink_text, &duration_ms);
+  if (n < 1)
   {
-    const char *msg = "Usage: acq_start <usb|sd> <freq_hz> <duration_ms>\r\n";
+    const char *msg = "Usage: acq_start <usb|sd> [duration_ms]\r\n";
     UsbCdcService_Write((const uint8_t *)msg, strlen(msg));
     return;
   }
 
-  if ((AppAcqParseSink(sink_text, &sink) == 0U) || (requested_hz == 0UL))
+  if (AppAcqParseSink(sink_text, &sink) == 0U)
   {
-    const char *msg = "ERR invalid acq_start args\r\n";
+    const char *msg = "ERR invalid sink (use usb or sd)\r\n";
     UsbCdcService_Write((const uint8_t *)msg, strlen(msg));
     return;
   }
 
-  if (AppAcqStart(sink, (uint32_t)requested_hz, (uint32_t)duration_ms) == 0U)
+  if (AppAcqStart(sink, (uint32_t)duration_ms) == 0U)
   {
     const char *msg = "ERR acq_start failed\r\n";
     UsbCdcService_Write((const uint8_t *)msg, strlen(msg));
@@ -963,11 +923,8 @@ static void UsbCmd_AcqStart(const char *cmd)
   }
 
   len = snprintf(line, sizeof(line),
-                 "OK acq_start sink=%s req_hz=%lu eff_period_ms=%lu eff_hz=%lu duration_ms=%lu\r\n",
+                 "OK acq_start sink=%s duration_ms=%lu\r\n",
                  AppAcqSinkToString(sink),
-                 requested_hz,
-                 (unsigned long)AppAcqResolvePeriodMs((uint32_t)requested_hz),
-                 (unsigned long)AppAcqResolveEffectiveHz(AppAcqResolvePeriodMs((uint32_t)requested_hz)),
                  duration_ms);
   if ((len > 0) && ((uint32_t)len < sizeof(line)))
   {
@@ -1431,7 +1388,7 @@ static void UsbCmd_Ping(void)
 
 static void UsbCmd_Help(void)
 {
-  const char *msg = "Commands: ping, help, status, snapshot, flowstat, dmastat, stat, acq_start, acq_stop, acq_status, s <lsm|h3|qma> <odr|range|en> <val>, msc\r\n";
+  const char *msg = "Commands: ping, help, status, acq_start, acq_stop, s <lsm|h3|qma> <odr|range|en> <val>, msc\r\n";
   UsbCdcService_Write((const uint8_t *)msg, strlen(msg));
 }
 
@@ -1623,12 +1580,9 @@ static void UsbCmd_Status(void)
   USB_STATUS_LINE("mode usb=%u sd=%s\r\n",
                   (unsigned int)stats.usb_streaming_active,
                   (stats.sd_logging_active != 0U) ? "active" : "paused");
-  USB_STATUS_LINE("acq state=%s sink=%s req_hz=%lu eff_period_ms=%lu eff_hz=%lu duration_ms=%lu elapsed_ms=%lu remaining_ms=%lu\r\n",
+  USB_STATUS_LINE("acq state=%s sink=%s duration_ms=%lu elapsed_ms=%lu remaining_ms=%lu\r\n",
                   (acq.running != 0U) ? "running" : "stopped",
                   AppAcqSinkToString(acq.sink),
-                  (unsigned long)acq.requested_hz,
-                  (unsigned long)acq.period_ms,
-                  (unsigned long)acq.effective_hz,
                   (unsigned long)acq.duration_ms,
                   (unsigned long)elapsed_ms,
                   (unsigned long)remaining_ms);
@@ -1749,12 +1703,9 @@ static void UsbCmd_FlowStat(void)
   USB_FLOW_LINE("FLOW mode usb=%u sd=%s\r\n",
                 (unsigned int)stats.usb_streaming_active,
                 (stats.sd_logging_active != 0U) ? "active" : "paused");
-  USB_FLOW_LINE("FLOW acq state=%s sink=%s req_hz=%lu eff_period_ms=%lu eff_hz=%lu duration_ms=%lu elapsed_ms=%lu remaining_ms=%lu\r\n",
+  USB_FLOW_LINE("FLOW acq state=%s sink=%s duration_ms=%lu elapsed_ms=%lu remaining_ms=%lu\r\n",
                 (acq.running != 0U) ? "running" : "stopped",
                 AppAcqSinkToString(acq.sink),
-                (unsigned long)acq.requested_hz,
-                (unsigned long)acq.period_ms,
-                (unsigned long)acq.effective_hz,
                 (unsigned long)acq.duration_ms,
                 (unsigned long)elapsed_ms,
                 (unsigned long)remaining_ms);

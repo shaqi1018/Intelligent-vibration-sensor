@@ -31,8 +31,8 @@
 #define DEV_CFG_PATH           "0:/DEVCFG.JSN"
 #define DEV_CFG_SNAPSHOT_DIR   "0:/LOG"
 #define DEV_CFG_SNAPSHOT_MAX   32U       /* 快照路径最大长度 */
-#define DEV_CFG_READ_BUF_SZ    1024U     /* 配置文件读取缓冲区字节数 */
-#define DEV_CFG_OBJ_BUF_SZ     384U      /* 子对象提取缓冲区字节数   */
+#define DEV_CFG_READ_BUF_SZ    2048U     /* 配置文件读取缓冲区字节数 */
+#define DEV_CFG_OBJ_BUF_SZ     512U      /* 子对象提取缓冲区字节数   */
 
 /* 上电写入的默认模板（与解析器所支持的字段保持一致）
  * _doc / _options_* 等以 _ 开头的键仅作文档用途，解析器会自动忽略。 */
