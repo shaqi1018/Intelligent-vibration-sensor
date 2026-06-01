@@ -251,8 +251,6 @@ HAL_StatusTypeDef LSM6DSOX_FIFO_Config(uint16_t wtm_samples,
   /* Step 5: enter continuous mode */
   if (LSM6DSOX_WriteReg(LSM6DSOX_REG_FIFO_CTRL4, LSM6DSOX_FIFO_MODE_CONTINUOUS) != HAL_OK) return HAL_ERROR;
 
-  printf("[LSM6DSOX] FIFO configured: wtm=%u BDR_XL=0x%X BDR_GY=0x%X mode=Continuous INT1=FIFO_TH\r\n",
-         (unsigned)wtm_samples, (unsigned)bdr_xl_code, (unsigned)bdr_gy_code);
   return HAL_OK;
 }
 

@@ -135,6 +135,7 @@ typedef struct
 static AppFlowStats_t g_flow_stats;
 static AppAcqControl_t g_acq_ctrl;
 static AppFrameBuffer_t g_frame_buffer;
+static AppSensorFrame_t g_composite_frame;  /* shared composite for USB upload */
 
 /* Static data backing for the SPSC ring buffers (.bss, no heap pressure). */
 static uint8_t s_lsm_imu_ringbuf[APP_RING_LSM_IMU_SIZE];
@@ -228,6 +229,8 @@ static void AppFramePopulateLsm6dsox(AppSensorFrame_t *frame, const LSM6DSOX_All
 static void AppFramePopulateH3lis100dl(AppSensorFrame_t *frame, const H3LIS100DL_Data_t *data, uint32_t tick_ms);
 static void AppFramePopulateQma6100p(AppSensorFrame_t *frame, const QMA6100P_Data_t *data, uint32_t tick_ms);
 static QMA6100P_Bandwidth_t AppQmaBwToEnum(uint32_t odr_hz);
+static float AppLsmXlSensitivity(uint16_t range_g);
+static float AppLsmGyrSensitivity(uint16_t range_dps);
 static const char *AppAcqSinkToString(uint8_t sink);
 static uint8_t AppAcqParseSink(const char *text, uint8_t *sink_out);
 static void AppAcqGetCopy(AppAcqControl_t *ctrl);
@@ -454,6 +457,7 @@ static void AppSnapshotReset(void)
   {
     osMutexAcquire(frame_buffer_mutex, osWaitForever);
     memset(&g_frame_buffer, 0, sizeof(g_frame_buffer));
+    memset(&g_composite_frame, 0, sizeof(g_composite_frame));
     osMutexRelease(frame_buffer_mutex);
   }
 }
@@ -482,6 +486,28 @@ static uint32_t AppQmaBwToOdrHz(QMA6100P_Bandwidth_t bw)
     case QMA6100P_BW_50:   return 50U;
     case QMA6100P_BW_25:   return 25U;
     default:               return 12U;
+  }
+}
+
+static float AppLsmXlSensitivity(uint16_t range_g)
+{
+  switch (range_g)
+  {
+    case 2:  return LSM6DSOX_XL_SENSITIVITY_2G;
+    case 8:  return LSM6DSOX_XL_SENSITIVITY_8G;
+    case 16: return LSM6DSOX_XL_SENSITIVITY_16G;
+    default: return LSM6DSOX_XL_SENSITIVITY_4G;
+  }
+}
+
+static float AppLsmGyrSensitivity(uint16_t range_dps)
+{
+  switch (range_dps)
+  {
+    case 250:  return LSM6DSOX_G_SENSITIVITY_250;
+    case 500:  return LSM6DSOX_G_SENSITIVITY_500;
+    case 1000: return LSM6DSOX_G_SENSITIVITY_1000;
+    default:   return LSM6DSOX_G_SENSITIVITY_2000;
   }
 }
 
@@ -708,9 +734,6 @@ static void AppApplySensorConfig(void)
     uint8_t bdr = AppLsmBdrToEnum(cfg.lsm6dsox.odr_hz);
     s_lsm_odr_interval_us = AppLsmBdrToIntervalUs(bdr);
     (void)LSM6DSOX_FIFO_Config(256U, bdr, bdr);
-    printf("[LSM6DSOX] reconfig: %u Hz BDR=0x%02X (interval=%lu us)\r\n",
-           (unsigned)cfg.lsm6dsox.odr_hz, (unsigned)bdr,
-           (unsigned long)s_lsm_odr_interval_us);
   }
   else
   {
@@ -729,8 +752,6 @@ static void AppApplySensorConfig(void)
     {
       uint32_t actual_odr = AppQmaBwToOdrHz(bw);
       s_qma_odr_interval_us = 1000000U / actual_odr;
-      printf("[QMA6100P] reconfig: %lu Hz (interval=%lu us)\r\n",
-             (unsigned long)actual_odr, (unsigned long)s_qma_odr_interval_us);
     }
     (void)QMA6100P_FIFO_Config(16U);
   }
@@ -744,8 +765,6 @@ static void AppApplySensorConfig(void)
   {
     uint32_t h3_odr = (cfg.h3lis100dl.odr_hz > 0U) ? (uint32_t)cfg.h3lis100dl.odr_hz : 400U;
     s_h3_odr_interval_us = 1000000U / h3_odr;
-    printf("[H3LIS100DL] reconfig: %lu Hz (interval=%lu us)\r\n",
-           (unsigned long)h3_odr, (unsigned long)s_h3_odr_interval_us);
   }
   else
   {
@@ -974,6 +993,17 @@ static inline uint32_t AppI32ToDec(char *out, int32_t v)
 {
   if (v < 0) { out[0] = '-'; return 1U + AppU32ToDec(out + 1, (uint32_t)(-v)); }
   return AppU32ToDec(out, (uint32_t)v);
+}
+
+/* Write float as "dd.d" (one decimal place) into out. Returns bytes written. */
+static inline uint32_t AppF1ToDec(char *out, float v)
+{
+  int32_t scaled = (int32_t)(v >= 0.0f ? v * 10.0f + 0.5f : v * 10.0f - 0.5f);
+  uint32_t n = AppI32ToDec(out, scaled / 10);
+  out[n++] = '.';
+  uint32_t frac = (uint32_t)(scaled < 0 ? -(scaled % 10) : scaled % 10);
+  out[n++] = (char)('0' + frac);
+  return n;
 }
 
 static void RingBuf_Init(AppRingBuffer_t *rb, uint8_t *data, uint32_t size)
@@ -1888,6 +1918,8 @@ void StartLsm6dsoxTask(void *argument)
     /* Drain FIFO completely — keep reading 256-word chunks until below wtm.
      * Each chunk is parsed into CSV rows and written to the LSM_IMU ring
      * buffer for the logger to flush to SD. */
+    int16_t last_acc[3] = {0}, last_gyr[3] = {0};
+    uint8_t last_has_pair = 0;
     uint16_t fifo_level = 0;
     while (1)
     {
@@ -1945,28 +1977,34 @@ void StartLsm6dsoxTask(void *argument)
           uint32_t tick_ms_i = lsm_ts_us / 1000U;
           uint32_t fid = ++g_lsm_frame_id_counter;
 
-          /* Hand-rolled int -> decimal: snprintf at 13328 calls/sec breaks
-           * newlib's static reentrancy state across threads (FreeRTOS doesn't
-           * provide __malloc_lock by default). Inline format avoids that. */
+          AcqConfig_t lcfg;
+          AcqConfig_GetCopy(&lcfg);
+          float xl_s = AppLsmXlSensitivity(lcfg.lsm6dsox.range);
+          float g_s  = AppLsmGyrSensitivity(lcfg.lsm6dsox.range2);
+
           uint32_t off = 0;
           off += AppU32ToDec(&rowbuf[off], fid);
           rowbuf[off++] = ',';
           off += AppU32ToDec(&rowbuf[off], tick_ms_i);
           rowbuf[off++] = ',';
-          off += AppI32ToDec(&rowbuf[off], (int32_t)cur_acc[0]);
+          off += AppF1ToDec(&rowbuf[off], (float)cur_acc[0] * xl_s);
           rowbuf[off++] = ',';
-          off += AppI32ToDec(&rowbuf[off], (int32_t)cur_acc[1]);
+          off += AppF1ToDec(&rowbuf[off], (float)cur_acc[1] * xl_s);
           rowbuf[off++] = ',';
-          off += AppI32ToDec(&rowbuf[off], (int32_t)cur_acc[2]);
+          off += AppF1ToDec(&rowbuf[off], (float)cur_acc[2] * xl_s);
           rowbuf[off++] = ',';
-          off += AppI32ToDec(&rowbuf[off], (int32_t)cur_gyr[0]);
+          off += AppF1ToDec(&rowbuf[off], (float)cur_gyr[0] * g_s);
           rowbuf[off++] = ',';
-          off += AppI32ToDec(&rowbuf[off], (int32_t)cur_gyr[1]);
+          off += AppF1ToDec(&rowbuf[off], (float)cur_gyr[1] * g_s);
           rowbuf[off++] = ',';
-          off += AppI32ToDec(&rowbuf[off], (int32_t)cur_gyr[2]);
+          off += AppF1ToDec(&rowbuf[off], (float)cur_gyr[2] * g_s);
           rowbuf[off++] = '\r';
           rowbuf[off++] = '\n';
           RingBuf_Write(&g_ring_lsm_imu, (const uint8_t *)rowbuf, off);
+
+          last_acc[0] = cur_acc[0]; last_acc[1] = cur_acc[1]; last_acc[2] = cur_acc[2];
+          last_gyr[0] = cur_gyr[0]; last_gyr[1] = cur_gyr[1]; last_gyr[2] = cur_gyr[2];
+          last_has_pair = 1;
 
           cur_has_acc = 0;
           cur_has_gyr = 0;
@@ -1978,33 +2016,43 @@ void StartLsm6dsoxTask(void *argument)
       if (to_read < 256U) break;
     }
 
-    /* Once per FIFO drain, sample LSM temperature only. H3 and QMA are now
-     * driven by their own EXTI / ringbuf paths and no longer poll here. */
+    /* Once per FIFO drain, update composite frame with LSM ACC+GYR+TEMP
+     * and push a copy to the frame buffer for USB upload. */
     {
-      AppSensorFrame_t frame;
+      AppSensorFrame_t tmp;
       uint32_t now_ms = osKernelGetTickCount();
 
-      memset(&frame, 0, sizeof(frame));
-      frame.tick_ms = now_ms;
-      frame.enabled_mask = APP_SENSOR_MASK_ALL;
-
-      if (snapshot_mutex != NULL)
+      LSM6DSOX_AllData_t lsm_data;
+      memset(&lsm_data, 0, sizeof(lsm_data));
+      if (last_has_pair)
       {
-        osMutexAcquire(snapshot_mutex, osWaitForever);
-        frame.frame_id = ++g_flow_stats.frame_id;
-        osMutexRelease(snapshot_mutex);
+        AcqConfig_t lcfg;
+        AcqConfig_GetCopy(&lcfg);
+        float xl_s = AppLsmXlSensitivity(lcfg.lsm6dsox.range);
+        float g_s  = AppLsmGyrSensitivity(lcfg.lsm6dsox.range2);
+        lsm_data.acc.x  = (float)last_acc[0] * xl_s;
+        lsm_data.acc.y  = (float)last_acc[1] * xl_s;
+        lsm_data.acc.z  = (float)last_acc[2] * xl_s;
+        lsm_data.gyro.x = (float)last_gyr[0] * g_s;
+        lsm_data.gyro.y = (float)last_gyr[1] * g_s;
+        lsm_data.gyro.z = (float)last_gyr[2] * g_s;
       }
+      (void)LSM6DSOX_ReadTemp(&lsm_data.temp_C);
 
-      LSM6DSOX_AllData_t lsm_tmp_data;
-      memset(&lsm_tmp_data, 0, sizeof(lsm_tmp_data));
-      if (LSM6DSOX_ReadTemp(&lsm_tmp_data.temp_C) == HAL_OK)
-      {
-        AppFramePopulateLsm6dsox(&frame, &lsm_tmp_data, now_ms);
-      }
+      memset(&tmp, 0, sizeof(tmp));
+      AppFramePopulateLsm6dsox(&tmp, &lsm_data, now_ms);
 
-      if (frame.present_mask != 0U)
       {
-        (void)AppFrameBufferPush(&frame);
+        AppSensorFrame_t push_frame;
+        osMutexAcquire(frame_buffer_mutex, osWaitForever);
+        g_composite_frame.lsm6dsox = tmp.lsm6dsox;
+        g_composite_frame.present_mask |= APP_SENSOR_MASK_LSM6DSOX;
+        g_composite_frame.enabled_mask = APP_SENSOR_MASK_ALL;
+        g_composite_frame.tick_ms = now_ms;
+        g_composite_frame.frame_id = ++g_flow_stats.frame_id;
+        push_frame = g_composite_frame;
+        osMutexRelease(frame_buffer_mutex);
+        (void)AppFrameBufferPush(&push_frame);
       }
     }
   }
@@ -2091,20 +2139,39 @@ void StartH3lis100dlTask(void *argument)
 
       uint32_t fid = ++g_h3_frame_id_counter;
       uint32_t tick_ms_i = h3_ts_us / 1000U;
-      char rowbuf[24];
+      char rowbuf[48];
       uint32_t off = 0;
       off += AppU32ToDec(&rowbuf[off], fid);
       rowbuf[off++] = ',';
       off += AppU32ToDec(&rowbuf[off], tick_ms_i);
       rowbuf[off++] = ',';
-      off += AppI32ToDec(&rowbuf[off], (int32_t)data.raw[0]);
+      off += AppF1ToDec(&rowbuf[off], data.acc_mg[0]);
       rowbuf[off++] = ',';
-      off += AppI32ToDec(&rowbuf[off], (int32_t)data.raw[1]);
+      off += AppF1ToDec(&rowbuf[off], data.acc_mg[1]);
       rowbuf[off++] = ',';
-      off += AppI32ToDec(&rowbuf[off], (int32_t)data.raw[2]);
+      off += AppF1ToDec(&rowbuf[off], data.acc_mg[2]);
       rowbuf[off++] = '\r';
       rowbuf[off++] = '\n';
       RingBuf_Write(&g_ring_h3_acc, (const uint8_t *)rowbuf, off);
+
+      if (AppAcqIsUsbSinkActive() != 0U)
+      {
+        AppSensorFrame_t tmp;
+        uint32_t now_ms = osKernelGetTickCount();
+        memset(&tmp, 0, sizeof(tmp));
+        AppFramePopulateH3lis100dl(&tmp, &data, now_ms);
+
+        AppSensorFrame_t push_frame;
+        osMutexAcquire(frame_buffer_mutex, osWaitForever);
+        g_composite_frame.h3lis100dl = tmp.h3lis100dl;
+        g_composite_frame.present_mask |= APP_SENSOR_MASK_H3LIS100DL;
+        g_composite_frame.enabled_mask = APP_SENSOR_MASK_ALL;
+        g_composite_frame.tick_ms = now_ms;
+        g_composite_frame.frame_id = ++g_flow_stats.frame_id;
+        push_frame = g_composite_frame;
+        osMutexRelease(frame_buffer_mutex);
+        (void)AppFrameBufferPush(&push_frame);
+      }
     }
 
     /* Pace the loop at the configured ODR. osDelayUntil bounds cumulative drift
@@ -2236,6 +2303,19 @@ void StartQma6100pTask(void *argument)
       qma_ts_init = 1U;
     }
 
+    AcqConfig_t qcfg;
+    AcqConfig_GetCopy(&qcfg);
+    uint32_t qma_lsb1g;
+    switch (qcfg.qma6100p.range)
+    {
+      case 4:  qma_lsb1g = 2048U; break;
+      case 8:  qma_lsb1g = 1024U; break;
+      case 16: qma_lsb1g = 512U;  break;
+      case 32: qma_lsb1g = 256U;  break;
+      default: qma_lsb1g = 4096U; break;
+    }
+    float qma_scale = 1000.0f / (float)qma_lsb1g;
+
     char rowbuf[56];
     for (uint8_t i = 0; i < fifo_level; i++)
     {
@@ -2253,14 +2333,59 @@ void StartQma6100pTask(void *argument)
       rowbuf[off++] = ',';
       off += AppU32ToDec(&rowbuf[off], tick_ms_i);
       rowbuf[off++] = ',';
-      off += AppI32ToDec(&rowbuf[off], (int32_t)rx);
+      off += AppF1ToDec(&rowbuf[off], (float)rx * qma_scale);
       rowbuf[off++] = ',';
-      off += AppI32ToDec(&rowbuf[off], (int32_t)ry);
+      off += AppF1ToDec(&rowbuf[off], (float)ry * qma_scale);
       rowbuf[off++] = ',';
-      off += AppI32ToDec(&rowbuf[off], (int32_t)rz);
+      off += AppF1ToDec(&rowbuf[off], (float)rz * qma_scale);
       rowbuf[off++] = '\r';
       rowbuf[off++] = '\n';
       RingBuf_Write(&g_ring_qma_acc, (const uint8_t *)rowbuf, off);
+    }
+
+    if (AppAcqIsUsbSinkActive() != 0U && fifo_level > 0U)
+    {
+      uint8_t *last = &fifo_buf[(fifo_level - 1U) * 6U];
+      int16_t lrx = (int16_t)(((int16_t)((uint16_t)last[1] << 8 | last[0])) >> 2);
+      int16_t lry = (int16_t)(((int16_t)((uint16_t)last[3] << 8 | last[2])) >> 2);
+      int16_t lrz = (int16_t)(((int16_t)((uint16_t)last[5] << 8 | last[4])) >> 2);
+
+      AcqConfig_t qcfg;
+      AcqConfig_GetCopy(&qcfg);
+      uint32_t qma_lsb1g;
+      switch (qcfg.qma6100p.range)
+      {
+        case 4:  qma_lsb1g = 2048U; break;
+        case 8:  qma_lsb1g = 1024U; break;
+        case 16: qma_lsb1g = 512U;  break;
+        case 32: qma_lsb1g = 256U;  break;
+        default: qma_lsb1g = 4096U; break;
+      }
+      float qma_scale = 1000.0f / (float)qma_lsb1g;
+
+      QMA6100P_Data_t qdata;
+      qdata.raw[0] = lrx; qdata.raw[1] = lry; qdata.raw[2] = lrz;
+      qdata.acc_mg[0] = (float)lrx * qma_scale;
+      qdata.acc_mg[1] = (float)lry * qma_scale;
+      qdata.acc_mg[2] = (float)lrz * qma_scale;
+
+      AppSensorFrame_t tmp;
+      uint32_t now_ms = osKernelGetTickCount();
+      memset(&tmp, 0, sizeof(tmp));
+      AppFramePopulateQma6100p(&tmp, &qdata, now_ms);
+
+      {
+        AppSensorFrame_t push_frame;
+        osMutexAcquire(frame_buffer_mutex, osWaitForever);
+        g_composite_frame.qma6100p = tmp.qma6100p;
+        g_composite_frame.present_mask |= APP_SENSOR_MASK_QMA6100P;
+        g_composite_frame.enabled_mask = APP_SENSOR_MASK_ALL;
+        g_composite_frame.tick_ms = now_ms;
+        g_composite_frame.frame_id = ++g_flow_stats.frame_id;
+        push_frame = g_composite_frame;
+        osMutexRelease(frame_buffer_mutex);
+        (void)AppFrameBufferPush(&push_frame);
+      }
     }
   }
 #endif

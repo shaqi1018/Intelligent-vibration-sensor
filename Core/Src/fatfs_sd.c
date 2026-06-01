@@ -192,12 +192,12 @@ FRESULT FatFs_SD_LoggerStart(void)
 {
   FRESULT result;
 
-  /* CSV headers — LSM_IMU merges accel + gyro raw int16 (PC scales by sens). */
+  /* CSV headers — scaled physical values (mg / mdps) */
   static const char kHdrLsmImu[] =
-      "frame_id,tick_ms,acc_x,acc_y,acc_z,gyr_x,gyr_y,gyr_z\r\n";
+      "frame_id,tick_ms,acc_x_mg,acc_y_mg,acc_z_mg,gyr_x_mdps,gyr_y_mdps,gyr_z_mdps\r\n";
   static const char kHdrLsmTmp[] = "frame_id,tick_ms,temp_C\r\n";
-  static const char kHdrH3Acc[]  = "frame_id,tick_ms,raw_x,raw_y,raw_z\r\n";
-  static const char kHdrQmaAcc[] = "frame_id,tick_ms,raw_x,raw_y,raw_z\r\n";
+  static const char kHdrH3Acc[]  = "frame_id,tick_ms,acc_x_mg,acc_y_mg,acc_z_mg\r\n";
+  static const char kHdrQmaAcc[] = "frame_id,tick_ms,acc_x_mg,acc_y_mg,acc_z_mg\r\n";
 
   static const char *headers[FATFS_SD_NUM_FILES] = {
     kHdrLsmImu, kHdrLsmTmp, kHdrH3Acc, kHdrQmaAcc

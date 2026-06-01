@@ -19,6 +19,7 @@
 
 /* USER CODE BEGIN 0 */
 #include <stdio.h>
+#include "usb_cdc_service.h"
 /* USER CODE END 0 */
 
 UART_HandleTypeDef huart1;
@@ -129,6 +130,8 @@ void HAL_UART_MspDeInit(UART_HandleTypeDef* huart)
 int fputc(int ch, FILE *f)
 {
   HAL_UART_Transmit(&huart1, (uint8_t *)&ch, 1, HAL_MAX_DELAY);
+  uint8_t c = (uint8_t)ch;
+  (void)UsbCdcService_Write(&c, 1U);
   return ch;
 }
 
