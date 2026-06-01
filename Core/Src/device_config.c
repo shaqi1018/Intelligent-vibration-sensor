@@ -29,8 +29,6 @@
  * ========================================================================= */
 
 #define DEV_CFG_PATH           "0:/DEVCFG.JSN"
-#define DEV_CFG_SNAPSHOT_DIR   "0:/LOG"
-#define DEV_CFG_SNAPSHOT_MAX   32U       /* 快照路径最大长度 */
 #define DEV_CFG_READ_BUF_SZ    2048U     /* 配置文件读取缓冲区字节数 */
 #define DEV_CFG_OBJ_BUF_SZ     512U      /* 子对象提取缓冲区字节数   */
 
@@ -424,199 +422,6 @@ FRESULT DeviceCfg_LoadFromSD(void)
 
 /* -------------------------------------------------------------------------- */
 
-FRESULT DeviceCfg_WriteSnapshotToSD(const AcqConfig_t *cfg, uint32_t session_id)
-{
-    FRESULT     r;
-    FIL         file;
-    FILINFO     info;
-    AcqConfig_t local_cfg;
-    char        path[DEV_CFG_SNAPSHOT_MAX];
-    const char *sink_name;
-    const char *storage_str;
-    const char *trigger_str;
-    int         path_len;
-    static char s_line[1024]; /* static 避免栈压力 */
-    int         line_len;
-
-    /* 若未提供配置指针则读取当前运行时配置 */
-    if (cfg == NULL)
-    {
-        AcqConfig_GetCopy(&local_cfg);
-        cfg = &local_cfg;
-    }
-
-    /* 挂载 SD（已挂载时立即返回 FR_OK） */
-    r = FatFs_SD_Mount();
-    if (r != FR_OK)
-    {
-        printf("[DevCfg] 快照: SD挂载失败 %s (%d)\r\n",
-               FatFs_SD_ResultToString(r), (int)r);
-        return r;
-    }
-
-    /* 确保 LOG 目录存在 */
-    r = f_stat(DEV_CFG_SNAPSHOT_DIR, &info);
-    if (r == FR_NO_FILE)
-    {
-        r = f_mkdir(DEV_CFG_SNAPSHOT_DIR);
-        if (r != FR_OK)
-        {
-            printf("[DevCfg] 创建LOG目录失败: %s (%d)\r\n",
-                   FatFs_SD_ResultToString(r), (int)r);
-            return r;
-        }
-    }
-    else if (r != FR_OK)
-    {
-        printf("[DevCfg] 访问LOG目录失败: %s (%d)\r\n",
-               FatFs_SD_ResultToString(r), (int)r);
-        return r;
-    }
-
-    /* 确定快照文件路径 */
-    if (session_id == 0U)
-    {
-        /* 自动查找下一个空闲序号 */
-        unsigned int idx;
-        for (idx = 1U; idx <= 9999U; idx++)
-        {
-            path_len = snprintf(path, sizeof(path),
-                                DEV_CFG_SNAPSHOT_DIR "/CFG_%04u.JSON", idx);
-            if ((path_len < 0) || ((size_t)path_len >= sizeof(path)))
-                return FR_INVALID_NAME;
-            if (f_stat(path, &info) == FR_NO_FILE)
-                break;
-        }
-        if (idx > 9999U)
-        {
-            printf("[DevCfg] 快照文件序号已用尽\r\n");
-            return FR_DENIED;
-        }
-    }
-    else
-    {
-        path_len = snprintf(path, sizeof(path),
-                            DEV_CFG_SNAPSHOT_DIR "/CFG_%04lu.JSON",
-                            (unsigned long)session_id);
-        if ((path_len < 0) || ((size_t)path_len >= sizeof(path)))
-            return FR_INVALID_NAME;
-    }
-
-    /* 生成 sink / storage_mode / trigger_mode 字符串，
-     * 必须与解析器 json_parse_string 所比较的大写值一致 */
-    switch (cfg->sink_mask)
-    {
-        case ACQ_SINK_SD:   sink_name = "SD";   break;
-        case ACQ_SINK_BOTH: sink_name = "BOTH"; break;
-        default:            sink_name = "USB";  break;
-    }
-
-    switch (cfg->storage_mode)
-    {
-        case ACQ_STORAGE_RING: storage_str = "RING"; break;
-        default:               storage_str = "LINEAR"; break;
-    }
-
-    switch (cfg->trigger_mode)
-    {
-        case ACQ_TRIGGER_EXTERNAL: trigger_str = "EXTERNAL"; break;
-        case ACQ_TRIGGER_TIMER:    trigger_str = "TIMER";    break;
-        default:                   trigger_str = "NONE";     break;
-    }
-
-    /* 序列化为 JSON（_doc / _options_* 为文档字段，解析器自动忽略） */
-    line_len = snprintf(
-        s_line, sizeof(s_line),
-        "{\r\n"
-        "  \"_doc\": \"Sensor Box device config. On power-up the MCU reads this file and applies range/ODR to sensors.\",\r\n"
-        "  \"_doc_units\": \"range_g = +/- g | range_dps = +/- deg/s | odr_hz = output data rate (Hz)\",\r\n"
-        "  \"_doc_unknown_keys\": \"Any key starting with _ is documentation only and silently ignored by the parser.\",\r\n"
-        "\r\n"
-        "  \"sample_rate_hz\": %lu,\r\n"
-        "  \"sink\": \"%s\",\r\n"
-        "  \"storage_mode\": \"%s\",\r\n"
-        "  \"trigger_mode\": \"%s\",\r\n"
-        "  \"trigger_delay_ms\": %lu,\r\n"
-        "  \"duration_ms\": %lu,\r\n"
-        "  \"sd_ring_max_bytes\": %lu,\r\n"
-        "\r\n"
-        "  \"lsm6dsox\": {\r\n"
-        "    \"_doc\": \"ST 6-axis IMU (ACC + GYR + TEMP) on SPI1 (dedicated bus)\",\r\n"
-        "    \"enabled\": %u,\r\n"
-        "    \"range_g\": %u,\r\n"
-        "    \"_options_range_g\": [2, 4, 8, 16],\r\n"
-        "    \"range_dps\": %u,\r\n"
-        "    \"_options_range_dps\": [250, 500, 1000, 2000],\r\n"
-        "    \"odr_hz\": %u,\r\n"
-        "    \"_options_odr_hz\": [12, 26, 52, 104, 208, 416, 833, 1666, 3332, 6664]\r\n"
-        "  },\r\n"
-        "\r\n"
-        "  \"h3lis100dl\": {\r\n"
-        "    \"_doc\": \"ST high-g accelerometer (+/-100 g fixed) on SPI2 (shared bus)\",\r\n"
-        "    \"enabled\": %u,\r\n"
-        "    \"range_g\": %u,\r\n"
-        "    \"_options_range_g\": [100],\r\n"
-        "    \"odr_hz\": %u,\r\n"
-        "    \"_options_odr_hz_normal\": [50, 100, 400],\r\n"
-        "    \"_options_odr_hz_lowpower\": [1, 2, 5, 10]\r\n"
-        "  },\r\n"
-        "\r\n"
-        "  \"qma6100p\": {\r\n"
-        "    \"_doc\": \"QST 3-axis accelerometer (up to 1600 Hz, +/-32 g) on SPI2 (shared bus)\",\r\n"
-        "    \"enabled\": %u,\r\n"
-        "    \"range_g\": %u,\r\n"
-        "    \"_options_range_g\": [2, 4, 8, 16, 32],\r\n"
-        "    \"odr_hz\": %u,\r\n"
-        "    \"_options_odr_hz\": [100, 200, 400, 800, 1600],\r\n"
-        "    \"_options_odr_hz_lowpower\": [12, 25, 50]\r\n"
-        "  }\r\n"
-        "}\r\n",
-        (unsigned long)cfg->sample_rate_hz,
-        sink_name,
-        storage_str,
-        trigger_str,
-        (unsigned long)cfg->trigger_delay_ms,
-        (unsigned long)cfg->duration_ms,
-        (unsigned long)cfg->sd_ring_max_bytes,
-        (unsigned int)cfg->lsm6dsox.enabled,
-        (unsigned int)cfg->lsm6dsox.range,
-        (unsigned int)cfg->lsm6dsox.range2,
-        (unsigned int)cfg->lsm6dsox.odr_hz,
-        (unsigned int)cfg->h3lis100dl.enabled,
-        (unsigned int)cfg->h3lis100dl.range,
-        (unsigned int)cfg->h3lis100dl.odr_hz,
-        (unsigned int)cfg->qma6100p.enabled,
-        (unsigned int)cfg->qma6100p.range,
-        (unsigned int)cfg->qma6100p.odr_hz);
-
-    if ((line_len < 0) || ((size_t)line_len >= sizeof(s_line)))
-        return FR_INT_ERR;
-
-    r = f_open(&file, path, FA_CREATE_ALWAYS | FA_WRITE);
-    if (r != FR_OK)
-    {
-        printf("[DevCfg] 创建快照文件失败: %s (%d)\r\n",
-               FatFs_SD_ResultToString(r), (int)r);
-        return r;
-    }
-
-    r = write_exact(&file, s_line, (UINT)line_len);
-    if (r == FR_OK) r = f_sync(&file);
-    (void)f_close(&file);
-
-    if (r == FR_OK)
-        printf("[DevCfg] 配置快照已写入: %s\r\n", path);
-    else
-        printf("[DevCfg] 快照写入失败: %s (%d)\r\n",
-               FatFs_SD_ResultToString(r), (int)r);
-
-    /* 注意：此处不调用 FatFs_SD_Unmount()，
-     * 供后续 FatFs_SD_LoggerStart() 复用已挂载的文件系统 */
-    return r;
-}
-
-/* -------------------------------------------------------------------------- */
-
 FRESULT DeviceCfg_WriteCurrentToSD(void)
 {
     FRESULT     r;
@@ -765,11 +570,6 @@ FRESULT DeviceCfg_WriteConfigToDir(const char *dir)
     line_len = snprintf(
         s_line, sizeof(s_line),
         "{\r\n"
-        "  \"sample_rate_hz\": %lu,\r\n"
-        "  \"sink\": \"%s\",\r\n"
-        "  \"storage_mode\": \"%s\",\r\n"
-        "  \"trigger_mode\": \"%s\",\r\n"
-        "  \"duration_ms\": %lu,\r\n"
         "  \"lsm6dsox\": {\r\n"
         "    \"enabled\": %u,\r\n"
         "    \"range_g\": %u,\r\n"
@@ -787,13 +587,6 @@ FRESULT DeviceCfg_WriteConfigToDir(const char *dir)
         "    \"odr_hz\": %u\r\n"
         "  }\r\n"
         "}\r\n",
-        (unsigned long)cfg.sample_rate_hz,
-        (cfg.sink_mask == ACQ_SINK_SD) ? "SD" :
-            ((cfg.sink_mask == ACQ_SINK_BOTH) ? "BOTH" : "USB"),
-        (cfg.storage_mode == ACQ_STORAGE_RING) ? "RING" : "LINEAR",
-        (cfg.trigger_mode == ACQ_TRIGGER_EXTERNAL) ? "EXTERNAL" :
-            ((cfg.trigger_mode == ACQ_TRIGGER_TIMER) ? "TIMER" : "NONE"),
-        (unsigned long)cfg.duration_ms,
         (unsigned int)cfg.lsm6dsox.enabled,
         (unsigned int)cfg.lsm6dsox.range,
         (unsigned int)cfg.lsm6dsox.range2,

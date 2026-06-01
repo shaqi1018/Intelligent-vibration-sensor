@@ -183,15 +183,6 @@ void FatFs_SD_Unmount(void)
   }
 }
 
-void FatFs_SD_ForceReinit(void)
-{
-  /* Unmount first (close files, unbind volume) */
-  FatFs_SD_Unmount();
-
-  /* Clear the FATFS structure so FatFs re-reads boot sector / FAT from disk */
-  memset(&g_sd_fatfs, 0, sizeof(g_sd_fatfs));
-}
-
 const char *FatFs_SD_GetSessionDir(void)
 {
   return g_session_dir;
@@ -315,28 +306,6 @@ FRESULT FatFs_SD_LoggerAppendFrame(const AppSensorFrame_t *frame)
 
   g_logger_rows_written++;
   return FR_OK;
-}
-
-/* Append a whole batch of LSM samples in three bulk writes (one per file).
- * The batch contains up to APP_LSM_BATCH_MAX_PAIRS sample pairs sharing a
- * BDR — per-sample tick_ms is reconstructed from base_tick_ms / period_us.
- * Frame IDs run from base_frame_id - n_pairs + 1 ... base_frame_id. */
-/* Fast unsigned-to-decimal — avoids snprintf overhead. Returns chars written. */
-static inline uint32_t u32_to_dec(char *out, uint32_t v)
-{
-  char tmp[10];
-  uint32_t n = 0;
-  if (v == 0) { out[0] = '0'; return 1; }
-  while (v > 0) { tmp[n++] = (char)('0' + v % 10); v /= 10; }
-  for (uint32_t i = 0; i < n; i++) out[i] = tmp[n - 1 - i];
-  return n;
-}
-
-/* Fast signed-to-decimal */
-static inline uint32_t i32_to_dec(char *out, int32_t v)
-{
-  if (v < 0) { out[0] = '-'; return 1U + u32_to_dec(out + 1, (uint32_t)(-v)); }
-  return u32_to_dec(out, (uint32_t)v);
 }
 
 /* Generic single-file log write — used by the ring buffer flush path

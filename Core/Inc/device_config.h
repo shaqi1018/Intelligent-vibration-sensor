@@ -40,18 +40,6 @@ extern "C" {
 FRESULT DeviceCfg_LoadFromSD(void);
 
 /**
- * @brief 将当前采集配置快照写入 0:/LOG/CFG_xxxx.JSON。
- *
- * @param cfg        要写入的配置，传 NULL 则自动调用 AcqConfig_GetCopy()
- * @param session_id 文件名序号 1-9999；传 0 = 自动查找下一个空闲序号
- *
- * @note  本函数挂载 SD 后 **不会卸载**，供后续 FatFs_SD_LoggerStart()
- *        直接复用已挂载的文件系统，减少重复初始化开销。
- *        若 SD 已挂载（g_sd_mounted）则 FatFs_SD_Mount() 立即返回 FR_OK。
- */
-FRESULT DeviceCfg_WriteSnapshotToSD(const AcqConfig_t *cfg, uint32_t session_id);
-
-/**
  * @brief 将当前运行时采集配置写回 SD 卡根目录的 DEVCFG.JSN。
  *
  *        每次 SD 采集会话结束时自动调用，确保下次上电能读取到最新配置。

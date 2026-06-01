@@ -73,15 +73,11 @@ typedef enum {
   QMA6100P_BW_12_5  = 0x07
 } QMA6100P_Bandwidth_t;
 
-#define QMA6100P_DRDY_BIT           0x10U
-
 /* ======================== FIFO registers =================================== */
-#define QMA6100P_REG_INT_ST         0x0BU  /* bit7=FIFO_OR, bit6=FIFO_WM_INT, bit5=FIFO_FULL */
 #define QMA6100P_REG_FIFO_CNT       0x0EU  /* FIFO_FRAME_COUNTER[7:0] */
 #define QMA6100P_REG_INT_EN1        0x17U  /* bit6=INT_FWM_EN, bit5=INT_FFULL_EN */
-#define QMA6100P_REG_INT_MAP1       0x1AU  /* bit6=INT1_FWM, bit5=INT1_FFULL */
+#define QMA6100P_REG_INT_MAP1       0x19U  /* bit6=INT1_FWM, bit5=INT1_FFULL */
 #define QMA6100P_REG_INT_MAP2       0x1CU  /* bit6=INT2_FWM, bit5=INT2_FFULL */
-#define QMA6100P_REG_INT_PIN_CFG    0x20U
 #define QMA6100P_REG_INT_CFG        0x21U  /* bit0=LATCH_INT */
 #define QMA6100P_REG_FIFO_WM        0x31U  /* watermark level [7:0] */
 #define QMA6100P_REG_FIFO_CFG       0x3EU  /* bit[7:6]=FIFO_MODE, bit[2:0]=FIFO_CH */
@@ -117,16 +113,11 @@ HAL_StatusTypeDef QMA6100P_Init(void);
 HAL_StatusTypeDef QMA6100P_Configure(const QMA6100P_Config_t *cfg);
 HAL_StatusTypeDef QMA6100P_ReadRawXYZ(QMA6100P_Data_t *data);
 HAL_StatusTypeDef QMA6100P_ReadAccXYZ(QMA6100P_Data_t *data);
-HAL_StatusTypeDef QMA6100P_ReadChipID(uint8_t *id);
-HAL_StatusTypeDef QMA6100P_ReadStatus(uint8_t *status);
-void QMA6100P_DumpRegs(void);
 
 /* ======================== FIFO API ========================================= */
 HAL_StatusTypeDef QMA6100P_FIFO_Config(uint8_t wtm_samples);
-HAL_StatusTypeDef QMA6100P_FIFO_Rearm(void);
 HAL_StatusTypeDef QMA6100P_FIFO_GetLevel(uint8_t *level);
 HAL_StatusTypeDef QMA6100P_FIFO_ReadBlock(uint8_t *buf, uint8_t n_frames);
-uint16_t QMA6100P_GetLsbPer1g(void);
 
 #ifdef __cplusplus
 }

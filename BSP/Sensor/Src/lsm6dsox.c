@@ -11,12 +11,6 @@
 #include <stdio.h>
 #include "cmsis_os2.h"
 
-#if LSM6DSOX_DMA_DEBUG_LOG
-#define LSM6DSOX_DMA_DEBUG_PRINTF(...) printf(__VA_ARGS__)
-#else
-#define LSM6DSOX_DMA_DEBUG_PRINTF(...) ((void)0)
-#endif
-
 #define LSM6DSOX_SPI_READ_FLAG   0x80
 
 static float xl_sensitivity = LSM6DSOX_XL_SENSITIVITY_4G;
@@ -181,46 +175,6 @@ HAL_StatusTypeDef LSM6DSOX_Init(void)
 
 
 
-HAL_StatusTypeDef LSM6DSOX_ReadAccel(LSM6DSOX_Data_t *data)
-{
-  uint8_t buf[6];
-  int16_t raw_x, raw_y, raw_z;
-  HAL_StatusTypeDef status;
-
-  status = LSM6DSOX_ReadRegs(LSM6DSOX_REG_OUTX_L_A, buf, 6);
-  if (status != HAL_OK) return status;
-
-  raw_x = (int16_t)((uint16_t)buf[1] << 8 | buf[0]);
-  raw_y = (int16_t)((uint16_t)buf[3] << 8 | buf[2]);
-  raw_z = (int16_t)((uint16_t)buf[5] << 8 | buf[4]);
-
-  data->x = (float)raw_x * xl_sensitivity;
-  data->y = (float)raw_y * xl_sensitivity;
-  data->z = (float)raw_z * xl_sensitivity;
-
-  return HAL_OK;
-}
-
-HAL_StatusTypeDef LSM6DSOX_ReadGyro(LSM6DSOX_Data_t *data)
-{
-  uint8_t buf[6];
-  int16_t raw_x, raw_y, raw_z;
-  HAL_StatusTypeDef status;
-
-  status = LSM6DSOX_ReadRegs(LSM6DSOX_REG_OUTX_L_G, buf, 6);
-  if (status != HAL_OK) return status;
-
-  raw_x = (int16_t)((uint16_t)buf[1] << 8 | buf[0]);
-  raw_y = (int16_t)((uint16_t)buf[3] << 8 | buf[2]);
-  raw_z = (int16_t)((uint16_t)buf[5] << 8 | buf[4]);
-
-  data->x = (float)raw_x * g_sensitivity;
-  data->y = (float)raw_y * g_sensitivity;
-  data->z = (float)raw_z * g_sensitivity;
-
-  return HAL_OK;
-}
-
 HAL_StatusTypeDef LSM6DSOX_ReadTemp(float *temp_C)
 {
   uint8_t buf[2];
@@ -276,9 +230,6 @@ uint32_t LSM6DSOX_GetDmaCallCount(void)
 
 /* ======================== FIFO public API ================================== */
 
-float LSM6DSOX_GetAccSensitivity(void)  { return xl_sensitivity; }
-float LSM6DSOX_GetGyroSensitivity(void) { return g_sensitivity; }
-
 HAL_StatusTypeDef LSM6DSOX_FIFO_Config(uint16_t wtm_samples,
                                        uint8_t bdr_xl_code,
                                        uint8_t bdr_gy_code)
@@ -303,13 +254,6 @@ HAL_StatusTypeDef LSM6DSOX_FIFO_Config(uint16_t wtm_samples,
   printf("[LSM6DSOX] FIFO configured: wtm=%u BDR_XL=0x%X BDR_GY=0x%X mode=Continuous INT1=FIFO_TH\r\n",
          (unsigned)wtm_samples, (unsigned)bdr_xl_code, (unsigned)bdr_gy_code);
   return HAL_OK;
-}
-
-HAL_StatusTypeDef LSM6DSOX_FIFO_Reset(void)
-{
-  if (LSM6DSOX_WriteReg(LSM6DSOX_REG_FIFO_CTRL4, LSM6DSOX_FIFO_MODE_BYPASS) != HAL_OK) return HAL_ERROR;
-  HAL_Delay(1);
-  return LSM6DSOX_WriteReg(LSM6DSOX_REG_FIFO_CTRL4, LSM6DSOX_FIFO_MODE_CONTINUOUS);
 }
 
 HAL_StatusTypeDef LSM6DSOX_FIFO_GetLevel(uint16_t *level)

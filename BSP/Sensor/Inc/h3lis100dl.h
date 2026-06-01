@@ -38,32 +38,12 @@ extern "C" {
 #define H3LIS100DL_REG_CTRL_REG2       0x21U
 #define H3LIS100DL_REG_CTRL_REG3       0x22U
 #define H3LIS100DL_REG_CTRL_REG4       0x23U
-#define H3LIS100DL_REG_CTRL_REG5       0x24U
-#define H3LIS100DL_REG_HP_FILTER_RESET 0x25U
-#define H3LIS100DL_REG_REFERENCE       0x26U
 #define H3LIS100DL_REG_STATUS          0x27U
 #define H3LIS100DL_REG_OUT_X           0x29U
 #define H3LIS100DL_REG_OUT_Y           0x2BU
 #define H3LIS100DL_REG_OUT_Z           0x2DU
 
-#define H3LIS100DL_REG_INT1_CFG        0x30U
-#define H3LIS100DL_REG_INT1_SRC        0x31U
-#define H3LIS100DL_REG_INT1_THS        0x32U
-#define H3LIS100DL_REG_INT1_DURATION   0x33U
-
-#define H3LIS100DL_REG_INT2_CFG        0x34U
-#define H3LIS100DL_REG_INT2_SRC        0x35U
-#define H3LIS100DL_REG_INT2_THS        0x36U
-#define H3LIS100DL_REG_INT2_DURATION   0x37U
-
-/* STATUS_REG λ���� */
-#define H3LIS100DL_STATUS_ZYXDA        0x08U
-#define H3LIS100DL_STATUS_ZYXOR        0x80U
-
-/* CTRL_REG1 ����ʹ��λ */
-#define H3LIS100DL_CR1_XEN             0x01U
-#define H3LIS100DL_CR1_YEN             0x02U
-#define H3LIS100DL_CR1_ZEN             0x04U
+/* CTRL_REG1 axis enable */
 #define H3LIS100DL_CR1_XYZ_EN          0x07U
 
 /* �̶���100g�����µ������ȣ�8λ�з�������� */
@@ -114,9 +94,6 @@ typedef struct {
 int H3LIS100DL_Init(void);
 int H3LIS100DL_Configure(const H3LIS100DL_Config_t *config);
 int H3LIS100DL_ReadAccXYZ(H3LIS100DL_Data_t *data);
-int H3LIS100DL_ReadStatus(void);
-int H3LIS100DL_ReadWhoAmI(void);
-void H3LIS100DL_DumpRegs(void);
 
 #ifdef __cplusplus
 }

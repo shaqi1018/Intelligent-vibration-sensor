@@ -377,53 +377,6 @@ HAL_StatusTypeDef QMA6100P_ReadAccXYZ(QMA6100P_Data_t *data)
   return HAL_OK;
 }
 
-HAL_StatusTypeDef QMA6100P_ReadChipID(uint8_t *id)
-{
-  if (id == NULL)
-  {
-    return HAL_ERROR;
-  }
-
-  return QMA6100P_ReadReg(QMA6100P_REG_CHIP_ID, id, 1U);
-}
-
-HAL_StatusTypeDef QMA6100P_ReadStatus(uint8_t *status)
-{
-  if (status == NULL)
-  {
-    return HAL_ERROR;
-  }
-
-  return QMA6100P_ReadReg(QMA6100P_REG_INT_STATUS_2, status, 1U);
-}
-
-void QMA6100P_DumpRegs(void)
-{
-  uint8_t reg_val = 0U;
-  uint8_t i;
-  const uint8_t reg_map[] = {
-    0x00U, 0x0FU, 0x10U, 0x11U, 0x17U, 0x18U, 0x1AU, 0x1CU,
-    0x20U, 0x43U, 0x45U, 0x4AU, 0x50U, 0x56U, 0x57U
-  };
-
-  printf("[QMA6100P] Register dump:\r\n");
-  for (i = 0U; i < (uint8_t)(sizeof(reg_map) / sizeof(reg_map[0])); i++)
-  {
-    if (QMA6100P_ReadReg(reg_map[i], &reg_val, 1U) == HAL_OK)
-    {
-      printf("  reg[0x%02X] = 0x%02X\r\n", reg_map[i], reg_val);
-    }
-    else
-    {
-      printf("  reg[0x%02X] = <read fail>\r\n", reg_map[i]);
-    }
-  }
-  printf("\r\n");
-}
-/* ======================== FIFO public API ================================== */
-
-uint16_t QMA6100P_GetLsbPer1g(void) { return g_qma.lsb_1g; }
-
 HAL_StatusTypeDef QMA6100P_FIFO_Config(uint8_t wtm_samples)
 {
   /* STREAM mode: FIFO is a circular buffer. When it wraps from 63→0 the fill
@@ -445,13 +398,6 @@ HAL_StatusTypeDef QMA6100P_FIFO_Config(uint8_t wtm_samples)
          (unsigned)wtm_samples,
          (QMA6100P_INT_MAP_REG == QMA6100P_REG_INT_MAP1) ? '1' : '2',
          (unsigned)__builtin_ctz(QMA6100P_INT_PIN));
-  return HAL_OK;
-}
-
-HAL_StatusTypeDef QMA6100P_FIFO_Rearm(void)
-{
-  if (QMA6100P_WriteReg(QMA6100P_REG_FIFO_CFG, QMA6100P_FIFO_MODE_BYPASS | QMA6100P_FIFO_CH_XYZ) != HAL_OK) return HAL_ERROR;
-  if (QMA6100P_WriteReg(QMA6100P_REG_FIFO_CFG, QMA6100P_FIFO_MODE_FIFO   | QMA6100P_FIFO_CH_XYZ) != HAL_OK) return HAL_ERROR;
   return HAL_OK;
 }
 

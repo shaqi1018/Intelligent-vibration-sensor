@@ -112,7 +112,6 @@ void       AcqConfig_SetState(AcqState_t st);
 
 /* 帧序号：由 sensorAcqTask 递增；start 时归零 */
 uint32_t AcqConfig_NextFrameId(void);   /* 递增后返回（每帧调用一次）   */
-uint32_t AcqConfig_GetFrameId(void);    /* 只读当前帧序号（用于诊断打印）*/
 void     AcqConfig_ResetFrameId(void);
 
 /**
@@ -126,12 +125,6 @@ int AcqConfig_Start(void);
  * @brief 停止采集。立即把状态切到 STOPPING（任务读到后清理收尾，回到 IDLE）。
  */
 int AcqConfig_Stop(void);
-
-/* 工具函数：把 AcqStorageMode_t / AcqTriggerMode_t / sink_mask 转成可读字符串 */
-const char *AcqConfig_StorageModeName(AcqStorageMode_t mode);
-const char *AcqConfig_TriggerModeName(AcqTriggerMode_t mode);
-const char *AcqConfig_StateName(AcqState_t st);
-void        AcqConfig_FormatSink(uint8_t mask, char *buf, uint32_t buflen);
 
 #ifdef __cplusplus
 }

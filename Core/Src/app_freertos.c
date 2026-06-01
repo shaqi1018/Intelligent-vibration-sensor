@@ -34,7 +34,6 @@
 #include "h3lis100dl.h"
 #include "qma6100p.h"
 #include "usb_cdc_service.h"
-#include "dma_sampling.h"
 #include "acq_config.h"
 #include "device_config.h"
 #include "boot_mode.h"
@@ -110,16 +109,6 @@ typedef struct
 
 typedef struct
 {
-  AppLsmBatch_t batches[APP_LSM_BATCH_BUFFER_DEPTH];
-  uint32_t head;
-  uint32_t tail;
-  uint32_t count;
-  uint32_t dropped;
-  uint32_t high_watermark;
-} AppLsmBatchBuffer_t;
-
-typedef struct
-{
   uint32_t lsm_updates;
   uint32_t h3_updates;
   uint32_t qma_updates;
@@ -146,7 +135,6 @@ typedef struct
 static AppFlowStats_t g_flow_stats;
 static AppAcqControl_t g_acq_ctrl;
 static AppFrameBuffer_t g_frame_buffer;
-static AppLsmBatchBuffer_t g_lsm_batch_buffer;
 
 /* Static data backing for the SPSC ring buffers (.bss, no heap pressure). */
 static uint8_t s_lsm_imu_ringbuf[APP_RING_LSM_IMU_SIZE];
@@ -185,7 +173,7 @@ osThreadId_t lsm6dsoxTaskHandle;
 const osThreadAttr_t lsm6dsoxTask_attributes = {
   .name = "lsm6dsoxTask",
   .priority = (osPriority_t)osPriorityAboveNormal,
-  .stack_size = 2048 * 4  /* 8KB — holds AppLsmBatch_t (~1.5KB) + fifo_buf (1.8KB) */
+  .stack_size = 2048 * 4  /* 8KB — holds fifo_buf (1.8KB) + locals */
 };
 
 osThreadId_t qma6100pTaskHandle;
@@ -228,8 +216,6 @@ const osThreadAttr_t usbUploadTask_attributes = {
 
 static uint32_t AppFrameBufferPush(const AppSensorFrame_t *frame);
 static uint32_t AppFrameBufferPop(AppSensorFrame_t *frame);
-static uint32_t AppLsmBatchPush(const AppLsmBatch_t *batch);
-static uint32_t AppLsmBatchPop(AppLsmBatch_t *batch);
 static void     RingBuf_Init(AppRingBuffer_t *rb, uint8_t *data, uint32_t size);
 static void     RingBuf_Reset(AppRingBuffer_t *rb);
 static uint32_t RingBuf_Available(const AppRingBuffer_t *rb);
@@ -248,7 +234,6 @@ static void AppAcqGetCopy(AppAcqControl_t *ctrl);
 static uint32_t AppAcqIsRunning(void);
 static uint32_t AppAcqCurrentPeriodMs(void);
 static uint8_t AppAcqIsUsbSinkActive(void);
-static uint8_t AppAcqIsSdSinkActive(void);
 static uint8_t AppAcqIsSdSessionActive(void);
 static uint8_t AppUsbRawStreamingActive(void);
 static void AppFlowStatsSetMode(uint8_t usb_active, uint8_t sd_active);
@@ -453,33 +438,6 @@ static void AppFramePopulateQma6100p(AppSensorFrame_t *frame, const QMA6100P_Dat
   osMutexRelease(snapshot_mutex);
 }
 
-static void AppSnapshotPublishLsm6dsox(const LSM6DSOX_AllData_t *data)
-{
-  (void)data;
-}
-
-static void AppSnapshotPublishH3lis100dl(const H3LIS100DL_Data_t *data)
-{
-  (void)data;
-}
-
-static void AppSnapshotPublishQma6100p(const QMA6100P_Data_t *data)
-{
-  (void)data;
-}
-
-static void AppSnapshotCopy(AppSensorSnapshot_t *snapshot)
-{
-  if ((snapshot_mutex == NULL) || (snapshot == NULL))
-  {
-    return;
-  }
-
-  osMutexAcquire(snapshot_mutex, osWaitForever);
-  *snapshot = g_sensor_snapshot;
-  osMutexRelease(snapshot_mutex);
-}
-
 static void AppSnapshotReset(void)
 {
   if (snapshot_mutex == NULL)
@@ -510,6 +468,21 @@ static QMA6100P_Bandwidth_t AppQmaBwToEnum(uint32_t odr_hz)
   if (odr_hz >= 50U)   return QMA6100P_BW_50;
   if (odr_hz >= 25U)   return QMA6100P_BW_25;
   return QMA6100P_BW_12_5;
+}
+
+static uint32_t AppQmaBwToOdrHz(QMA6100P_Bandwidth_t bw)
+{
+  switch (bw)
+  {
+    case QMA6100P_BW_1600: return 1600U;
+    case QMA6100P_BW_800:  return 800U;
+    case QMA6100P_BW_400:  return 400U;
+    case QMA6100P_BW_200:  return 200U;
+    case QMA6100P_BW_100:  return 100U;
+    case QMA6100P_BW_50:   return 50U;
+    case QMA6100P_BW_25:   return 25U;
+    default:               return 12U;
+  }
 }
 
 /* DWT cycle counter → microseconds (160MHz, wraps at ~26.8s) */
@@ -643,14 +616,6 @@ static uint8_t AppAcqIsUsbSinkActive(void)
                    (AppUsbRawStreamingActive() != 0U));
 }
 
-static uint8_t AppAcqIsSdSinkActive(void)
-{
-  AppAcqControl_t ctrl;
-
-  AppAcqGetCopy(&ctrl);
-  return (uint8_t)((ctrl.running != 0U) && (ctrl.sink == APP_ACQ_SINK_SD));
-}
-
 static uint8_t AppAcqIsSdSessionActive(void)
 {
   AppAcqControl_t ctrl;
@@ -762,18 +727,7 @@ static void AppApplySensorConfig(void)
     QMA6100P_Config_t qcfg = { .range = QMA6100P_RANGE_4G, .bw = bw };
     if (QMA6100P_Configure(&qcfg) == HAL_OK)
     {
-      uint32_t actual_odr;
-      switch (bw)
-      {
-        case QMA6100P_BW_1600: actual_odr = 1600U; break;
-        case QMA6100P_BW_800:  actual_odr = 800U;  break;
-        case QMA6100P_BW_400:  actual_odr = 400U;  break;
-        case QMA6100P_BW_200:  actual_odr = 200U;  break;
-        case QMA6100P_BW_100:  actual_odr = 100U;  break;
-        case QMA6100P_BW_50:   actual_odr = 50U;   break;
-        case QMA6100P_BW_25:   actual_odr = 25U;   break;
-        default:               actual_odr = 12U;   break;
-      }
+      uint32_t actual_odr = AppQmaBwToOdrHz(bw);
       s_qma_odr_interval_us = 1000000U / actual_odr;
       printf("[QMA6100P] reconfig: %lu Hz (interval=%lu us)\r\n",
              (unsigned long)actual_odr, (unsigned long)s_qma_odr_interval_us);
@@ -1002,49 +956,6 @@ static uint32_t AppFrameBufferPop(AppSensorFrame_t *frame)
   return 1U;
 }
 
-static uint32_t AppLsmBatchPush(const AppLsmBatch_t *batch)
-{
-  if ((frame_buffer_mutex == NULL) || (batch == NULL)) return 0U;
-
-  osMutexAcquire(frame_buffer_mutex, osWaitForever);
-
-  if (g_lsm_batch_buffer.count >= APP_LSM_BATCH_BUFFER_DEPTH)
-  {
-    g_lsm_batch_buffer.dropped++;
-    osMutexRelease(frame_buffer_mutex);
-    return 0U;
-  }
-
-  g_lsm_batch_buffer.batches[g_lsm_batch_buffer.head] = *batch;
-  g_lsm_batch_buffer.head = (g_lsm_batch_buffer.head + 1U) % APP_LSM_BATCH_BUFFER_DEPTH;
-  g_lsm_batch_buffer.count++;
-  if (g_lsm_batch_buffer.count > g_lsm_batch_buffer.high_watermark)
-  {
-    g_lsm_batch_buffer.high_watermark = g_lsm_batch_buffer.count;
-  }
-  osMutexRelease(frame_buffer_mutex);
-  return 1U;
-}
-
-static uint32_t AppLsmBatchPop(AppLsmBatch_t *batch)
-{
-  if ((frame_buffer_mutex == NULL) || (batch == NULL)) return 0U;
-
-  osMutexAcquire(frame_buffer_mutex, osWaitForever);
-
-  if (g_lsm_batch_buffer.count == 0U)
-  {
-    osMutexRelease(frame_buffer_mutex);
-    return 0U;
-  }
-
-  *batch = g_lsm_batch_buffer.batches[g_lsm_batch_buffer.tail];
-  g_lsm_batch_buffer.tail = (g_lsm_batch_buffer.tail + 1U) % APP_LSM_BATCH_BUFFER_DEPTH;
-  g_lsm_batch_buffer.count--;
-  osMutexRelease(frame_buffer_mutex);
-  return 1U;
-}
-
 /* === Lock-free SPSC ring buffer ============================================ */
 static inline uint32_t AppU32ToDec(char *out, uint32_t v)
 {
@@ -1149,59 +1060,6 @@ static void RingBuf_Consume(AppRingBuffer_t *rb, uint32_t len)
   rb->rd_idx = (rb->rd_idx + len) % rb->size;
 }
 
-static uint32_t AppSnapshotComputeAgeMs(uint32_t tick_ms, uint32_t last_update_ms)
-{
-  return tick_ms - last_update_ms;
-}
-
-static uint32_t AppSnapshotComputeFreshMask(const AppSensorSnapshot_t *snapshot, uint32_t tick_ms)
-{
-  uint32_t mask = 0U;
-
-  if ((snapshot->lsm6dsox.valid != 0U) &&
-      (AppSnapshotComputeAgeMs(tick_ms, snapshot->lsm6dsox.last_update_ms) <= APP_SENSOR_STALE_TIMEOUT_MS))
-  {
-    mask |= (1U << 0);
-  }
-
-  if ((snapshot->h3lis100dl.valid != 0U) &&
-      (AppSnapshotComputeAgeMs(tick_ms, snapshot->h3lis100dl.last_update_ms) <= APP_SENSOR_STALE_TIMEOUT_MS))
-  {
-    mask |= (1U << 1);
-  }
-
-  if ((snapshot->qma6100p.valid != 0U) &&
-      (AppSnapshotComputeAgeMs(tick_ms, snapshot->qma6100p.last_update_ms) <= APP_SENSOR_STALE_TIMEOUT_MS))
-  {
-    mask |= (1U << 2);
-  }
-
-  return mask;
-}
-
-static uint32_t AppSnapshotComputeChangedMask(const AppSensorSnapshot_t *snapshot,
-                                              const AppSensorSnapshot_t *prev_snapshot)
-{
-  uint32_t mask = 0U;
-
-  if (snapshot->lsm6dsox.sample_seq != prev_snapshot->lsm6dsox.sample_seq)
-  {
-    mask |= (1U << 0);
-  }
-
-  if (snapshot->h3lis100dl.sample_seq != prev_snapshot->h3lis100dl.sample_seq)
-  {
-    mask |= (1U << 1);
-  }
-
-  if (snapshot->qma6100p.sample_seq != prev_snapshot->qma6100p.sample_seq)
-  {
-    mask |= (1U << 2);
-  }
-
-  return mask;
-}
-
 static uint32_t AppSnapshotComputeMaxDeltaMs(const AppSensorSnapshot_t *snapshot)
 {
   uint32_t min_ts = 0U;
@@ -1263,53 +1121,6 @@ static uint32_t AppSnapshotComputeMaxDeltaMs(const AppSensorSnapshot_t *snapshot
   }
 
   return max_ts - min_ts;
-}
-
-static uint32_t AppSnapshotComputeCoherent(const AppSensorSnapshot_t *snapshot, uint32_t fresh_mask)
-{
-  if (fresh_mask != 0x07U)
-  {
-    return 0U;
-  }
-
-  return (AppSnapshotComputeMaxDeltaMs(snapshot) <= APP_SENSOR_COHERENT_WINDOW_MS) ? 1U : 0U;
-}
-
-static void AppFlowStatsRecord(uint32_t tick_ms,
-                               uint32_t row_seq,
-                               uint32_t fresh_mask,
-                               uint32_t changed_mask,
-                               uint32_t coherent)
-{
-  if (snapshot_mutex == NULL)
-  {
-    return;
-  }
-
-  osMutexAcquire(snapshot_mutex, osWaitForever);
-  g_flow_stats.logger_rows = row_seq;
-  g_flow_stats.last_log_tick_ms = tick_ms;
-  g_flow_stats.last_log_seq = row_seq;
-  g_flow_stats.last_changed_mask = changed_mask;
-  g_flow_stats.last_fresh_mask = fresh_mask;
-  g_flow_stats.last_max_delta_ms = AppSnapshotComputeMaxDeltaMs(&g_sensor_snapshot);
-
-  if (fresh_mask != 0x07U)
-  {
-    g_flow_stats.stale_rows++;
-  }
-
-  if (changed_mask != 0x07U)
-  {
-    g_flow_stats.mixed_rows++;
-  }
-
-  if (coherent != 0U)
-  {
-    g_flow_stats.coherent_rows++;
-  }
-
-  osMutexRelease(snapshot_mutex);
 }
 
 static uint8_t AppUsbRawStreamingActive(void)
@@ -1591,180 +1402,6 @@ static void UsbCmd_Status(void)
 #undef USB_STATUS_LINE
 }
 
-static void UsbCmd_Snapshot(void)
-{
-  AppSensorSnapshot_t snap;
-  char line[160];
-  int len;
-  uint32_t tick_ms = osKernelGetTickCount();
-  uint32_t fresh_mask;
-  uint32_t max_delta_ms;
-
-  AppSnapshotCopy(&snap);
-  fresh_mask = AppSnapshotComputeFreshMask(&snap, tick_ms);
-  max_delta_ms = AppSnapshotComputeMaxDeltaMs(&snap);
-
-#define USB_SNAPSHOT_LINE(fmt, ...) \
-  do { \
-    len = snprintf(line, sizeof(line), fmt, ##__VA_ARGS__); \
-    if (len > 0 && (uint32_t)len < sizeof(line)) { \
-      UsbCdcService_Write((const uint8_t *)line, (uint32_t)len); \
-    } \
-  } while (0)
-
-  USB_SNAPSHOT_LINE("SNAP fresh=0x%lX max_delta=%lums\r\n",
-                    (unsigned long)fresh_mask,
-                    (unsigned long)max_delta_ms);
-  USB_SNAPSHOT_LINE("LSM v=%u seq=%lu age=%lums acc=[%.1f %.1f %.1f]\r\n",
-                    (unsigned int)snap.lsm6dsox.valid,
-                    (unsigned long)snap.lsm6dsox.sample_seq,
-                    (unsigned long)AppSnapshotComputeAgeMs(tick_ms, snap.lsm6dsox.last_update_ms),
-                    snap.lsm6dsox.data.acc.x,
-                    snap.lsm6dsox.data.acc.y,
-                    snap.lsm6dsox.data.acc.z);
-  USB_SNAPSHOT_LINE("H3  v=%u seq=%lu age=%lums acc=[%.1f %.1f %.1f]\r\n",
-                    (unsigned int)snap.h3lis100dl.valid,
-                    (unsigned long)snap.h3lis100dl.sample_seq,
-                    (unsigned long)AppSnapshotComputeAgeMs(tick_ms, snap.h3lis100dl.last_update_ms),
-                    snap.h3lis100dl.data.acc_mg[0],
-                    snap.h3lis100dl.data.acc_mg[1],
-                    snap.h3lis100dl.data.acc_mg[2]);
-  USB_SNAPSHOT_LINE("QMA v=%u seq=%lu age=%lums acc=[%.1f %.1f %.1f]\r\n",
-                    (unsigned int)snap.qma6100p.valid,
-                    (unsigned long)snap.qma6100p.sample_seq,
-                    (unsigned long)AppSnapshotComputeAgeMs(tick_ms, snap.qma6100p.last_update_ms),
-                    snap.qma6100p.data.acc_mg[0],
-                    snap.qma6100p.data.acc_mg[1],
-                    snap.qma6100p.data.acc_mg[2]);
-
-#undef USB_SNAPSHOT_LINE
-}
-
-static void UsbCmd_FlowStat(void)
-{
-  char line[128];
-  int len;
-  AppFlowStats_t stats;
-  AppAcqControl_t acq;
-  uint32_t now_ms = osKernelGetTickCount();
-  uint32_t elapsed_ms = 0U;
-  uint32_t remaining_ms = 0U;
-
-  AppAcqCheckAutoStop();
-
-  if (snapshot_mutex != NULL)
-  {
-    osMutexAcquire(snapshot_mutex, osWaitForever);
-    stats = g_flow_stats;
-    osMutexRelease(snapshot_mutex);
-  }
-  else
-  {
-    memset(&stats, 0, sizeof(stats));
-  }
-
-  AppAcqGetCopy(&acq);
-  if (acq.start_tick_ms != 0U)
-  {
-    uint32_t end_tick = (acq.running != 0U) ? now_ms : acq.last_stop_tick_ms;
-    elapsed_ms = end_tick - acq.start_tick_ms;
-  }
-  if ((acq.running != 0U) && (acq.duration_ms > elapsed_ms))
-  {
-    remaining_ms = acq.duration_ms - elapsed_ms;
-  }
-
-#define USB_FLOW_LINE(fmt, ...) \
-  do { \
-    len = snprintf(line, sizeof(line), fmt, ##__VA_ARGS__); \
-    if (len > 0 && (uint32_t)len < sizeof(line)) { \
-      UsbCdcService_Write((const uint8_t *)line, (uint32_t)len); \
-    } \
-  } while (0)
-
-  USB_FLOW_LINE("FLOW frames=%lu write_fail=%lu stale=%lu mixed=%lu coherent=%lu\r\n",
-                (unsigned long)stats.logger_rows,
-                (unsigned long)stats.logger_write_failures,
-                (unsigned long)stats.stale_rows,
-                (unsigned long)stats.mixed_rows,
-                (unsigned long)stats.coherent_rows);
-  USB_FLOW_LINE("FLOW sensor_updates lsm=%lu h3=%lu qma=%lu\r\n",
-                (unsigned long)stats.lsm_updates,
-                (unsigned long)stats.h3_updates,
-                (unsigned long)stats.qma_updates);
-  USB_FLOW_LINE("FLOW frame_io sd_written=%lu usb_sent=%lu last_frame=%lu\r\n",
-                (unsigned long)stats.sd_frames_written,
-                (unsigned long)stats.usb_frames_sent,
-                (unsigned long)stats.frame_id);
-  USB_FLOW_LINE("FLOW frame_queue depth=%lu dropped=%lu high=%lu\r\n",
-                (unsigned long)stats.frame_buffer_depth,
-                (unsigned long)stats.frame_dropped,
-                (unsigned long)stats.frame_high_watermark);
-  USB_FLOW_LINE("FLOW mode usb=%u sd=%s\r\n",
-                (unsigned int)stats.usb_streaming_active,
-                (stats.sd_logging_active != 0U) ? "active" : "paused");
-  USB_FLOW_LINE("FLOW acq state=%s sink=%s duration_ms=%lu elapsed_ms=%lu remaining_ms=%lu\r\n",
-                (acq.running != 0U) ? "running" : "stopped",
-                AppAcqSinkToString(acq.sink),
-                (unsigned long)acq.duration_ms,
-                (unsigned long)elapsed_ms,
-                (unsigned long)remaining_ms);
-  USB_FLOW_LINE("FLOW cfg lsm=+-4g/833Hz gyro=+-2000dps/833Hz h3=+-100g/400Hz qma=+-4g/1600Hz\r\n");
-
-#undef USB_FLOW_LINE
-}
-
-static void UsbCmd_DmaStat(void)
-{
-  char line[128];
-  int len;
-  uint32_t lsm_calls = LSM6DSOX_GetDmaCallCount();
-  uint32_t spi1_ok = DmaSampling_GetTransferCount();
-  uint32_t spi1_err = DmaSampling_GetErrorCount();
-  uint32_t spi1_start_fail = DmaSampling_GetStartFailCount();
-  uint32_t spi1_timeout = DmaSampling_GetTimeoutCount();
-  uint32_t spi1_rx_ok = DmaSampling_GetDmaRxCpltCount();
-  uint32_t spi1_tx_ok = DmaSampling_GetDmaTxCpltCount();
-  uint32_t spi1_spi_err = DmaSampling_GetSpiErrorCode();
-  uint32_t spi2_ok = DmaSampling_GetSpi2TransferCount();
-  uint32_t spi2_err = DmaSampling_GetSpi2ErrorCount();
-  uint32_t spi2_start_fail = DmaSampling_GetSpi2StartFailCount();
-  uint32_t spi2_timeout = DmaSampling_GetSpi2TimeoutCount();
-  uint32_t spi2_rx_ok = DmaSampling_GetSpi2DmaRxCpltCount();
-  uint32_t spi2_tx_ok = DmaSampling_GetSpi2DmaTxCpltCount();
-  uint32_t spi2_spi_err = DmaSampling_GetSpi2ErrorCode();
-  uint32_t ch0_csr = 0U, ch1_csr = 0U, ch2_csr = 0U, ch3_csr = 0U;
-
-  DmaSampling_GetChannelStatus(&ch0_csr, &ch1_csr);
-  DmaSampling_GetSpi2ChannelStatus(&ch2_csr, &ch3_csr);
-
-#define USB_WRITE_LINE(fmt, ...) \
-  do { \
-    len = snprintf(line, sizeof(line), fmt, ##__VA_ARGS__); \
-    if (len > 0 && (uint32_t)len < sizeof(line)) { \
-      UsbCdcService_Write((const uint8_t *)line, (uint32_t)len); \
-    } \
-  } while (0)
-
-  USB_WRITE_LINE("[DS] LSM calls=%lu\r\n", (unsigned long)lsm_calls);
-  USB_WRITE_LINE("[DS] SPI1 ok=%lu err=%lu fail=%lu to=%lu rx=%lu tx=%lu serr=0x%lX\r\n",
-                 (unsigned long)spi1_ok, (unsigned long)spi1_err,
-                 (unsigned long)spi1_start_fail, (unsigned long)spi1_timeout,
-                 (unsigned long)spi1_rx_ok, (unsigned long)spi1_tx_ok,
-                 (unsigned long)spi1_spi_err);
-  USB_WRITE_LINE("[DS] SPI1 ch0=0x%lX ch1=0x%lX\r\n",
-                 (unsigned long)ch0_csr, (unsigned long)ch1_csr);
-  USB_WRITE_LINE("[DS] SPI2 ok=%lu err=%lu fail=%lu to=%lu rx=%lu tx=%lu serr=0x%lX\r\n",
-                 (unsigned long)spi2_ok, (unsigned long)spi2_err,
-                 (unsigned long)spi2_start_fail, (unsigned long)spi2_timeout,
-                 (unsigned long)spi2_rx_ok, (unsigned long)spi2_tx_ok,
-                 (unsigned long)spi2_spi_err);
-  USB_WRITE_LINE("[DS] SPI2 ch2=0x%lX ch3=0x%lX\r\n",
-                 (unsigned long)ch2_csr, (unsigned long)ch3_csr);
-
-#undef USB_WRITE_LINE
-}
-
 static void UsbCmd_Process(const char *cmd)
 {
   if (strcmp(cmd, "ping") == 0)
@@ -1778,22 +1415,6 @@ static void UsbCmd_Process(const char *cmd)
   else if (strcmp(cmd, "status") == 0)
   {
     UsbCmd_Status();
-  }
-  else if (strcmp(cmd, "snapshot") == 0)
-  {
-    UsbCmd_Snapshot();
-  }
-  else if (strcmp(cmd, "flowstat") == 0)
-  {
-    UsbCmd_FlowStat();
-  }
-  else if (strcmp(cmd, "dmastat") == 0)
-  {
-    UsbCmd_DmaStat();
-  }
-  else if (strcmp(cmd, "stat") == 0)
-  {
-    UsbCmd_DmaStat();
   }
   else if (strncmp(cmd, "acq_start ", 10U) == 0)
   {
@@ -1966,7 +1587,7 @@ void StartUsbUploadTask(void *argument)
     }
     else
     {
-      AppFlowStatsSetMode(0U, AppAcqIsSdSinkActive());
+      AppFlowStatsSetMode(0U, AppAcqIsSdSessionActive());
       if (header_sent != 0U)
       {
         header_sent = 0U;
@@ -2265,8 +1886,8 @@ void StartLsm6dsoxTask(void *argument)
     }
 
     /* Drain FIFO completely — keep reading 256-word chunks until below wtm.
-     * Each chunk is parsed into a single AppLsmBatch_t (up to 128 sample
-     * pairs) and pushed to the batch ring buffer for the logger to consume. */
+     * Each chunk is parsed into CSV rows and written to the LSM_IMU ring
+     * buffer for the logger to flush to SD. */
     uint16_t fifo_level = 0;
     while (1)
     {
@@ -2517,20 +2138,7 @@ void StartQma6100pTask(void *argument)
     QMA6100P_Config_t qcfg = { .range = QMA6100P_RANGE_4G, .bw = bw };
     if (QMA6100P_Configure(&qcfg) == HAL_OK)
     {
-      /* Compute actual interval for back-extrapolation.
-       * BW enum is not sequential, so use a switch. */
-      uint32_t actual_odr;
-      switch (bw)
-      {
-        case QMA6100P_BW_1600: actual_odr = 1600U; break;
-        case QMA6100P_BW_800:  actual_odr = 800U;  break;
-        case QMA6100P_BW_400:  actual_odr = 400U;  break;
-        case QMA6100P_BW_200:  actual_odr = 200U;  break;
-        case QMA6100P_BW_100:  actual_odr = 100U;  break;
-        case QMA6100P_BW_50:   actual_odr = 50U;   break;
-        case QMA6100P_BW_25:   actual_odr = 25U;   break;
-        default:               actual_odr = 12U;   break;
-      }
+      uint32_t actual_odr = AppQmaBwToOdrHz(bw);
       s_qma_odr_interval_us = 1000000U / actual_odr;
       printf("[QMA6100P] ODR configured: %lu Hz (interval=%lu us)\r\n",
              (unsigned long)actual_odr, (unsigned long)s_qma_odr_interval_us);

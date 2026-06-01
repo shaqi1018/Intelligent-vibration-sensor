@@ -298,11 +298,6 @@ uint32_t AcqConfig_NextFrameId(void)
   return s_frame_id;
 }
 
-uint32_t AcqConfig_GetFrameId(void)
-{
-  return s_frame_id;
-}
-
 void AcqConfig_ResetFrameId(void)
 {
   s_frame_id = 0U;
@@ -334,65 +329,4 @@ int AcqConfig_Stop(void)
   s_state = ACQ_STATE_STOPPING;
   AcqCfgUnlock();
   return 0;
-}
-
-const char *AcqConfig_StorageModeName(AcqStorageMode_t mode)
-{
-  switch (mode)
-  {
-    case ACQ_STORAGE_LINEAR: return "linear";
-    case ACQ_STORAGE_RING:   return "ring";
-    default:                 return "?";
-  }
-}
-
-const char *AcqConfig_TriggerModeName(AcqTriggerMode_t mode)
-{
-  switch (mode)
-  {
-    case ACQ_TRIGGER_NONE:     return "none";
-    case ACQ_TRIGGER_EXTERNAL: return "external";
-    case ACQ_TRIGGER_TIMER:    return "timer";
-    default:                   return "?";
-  }
-}
-
-const char *AcqConfig_StateName(AcqState_t st)
-{
-  switch (st)
-  {
-    case ACQ_STATE_IDLE:     return "idle";
-    case ACQ_STATE_ARMED:    return "armed";
-    case ACQ_STATE_RUNNING:  return "running";
-    case ACQ_STATE_STOPPING: return "stopping";
-    default:                 return "?";
-  }
-}
-
-void AcqConfig_FormatSink(uint8_t mask, char *buf, uint32_t buflen)
-{
-  if ((buf == NULL) || (buflen == 0U))
-  {
-    return;
-  }
-  if (mask == ACQ_SINK_NONE)
-  {
-    (void)snprintf(buf, buflen, "none");
-  }
-  else if ((mask & ACQ_SINK_BOTH) == ACQ_SINK_BOTH)
-  {
-    (void)snprintf(buf, buflen, "usb+sd");
-  }
-  else if ((mask & ACQ_SINK_USB) != 0U)
-  {
-    (void)snprintf(buf, buflen, "usb");
-  }
-  else if ((mask & ACQ_SINK_SD) != 0U)
-  {
-    (void)snprintf(buf, buflen, "sd");
-  }
-  else
-  {
-    (void)snprintf(buf, buflen, "?");
-  }
 }
