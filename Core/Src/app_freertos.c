@@ -20,6 +20,7 @@
 /* Includes ------------------------------------------------------------------*/
 #include "FreeRTOS.h"
 #include "task.h"
+#include "semphr.h"
 #include "main.h"
 #include "cmsis_os2.h"
 
@@ -37,6 +38,8 @@
 #include "acq_config.h"
 #include "device_config.h"
 #include "boot_mode.h"
+#include "sd_diskio.h"
+#include "sdmmc.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -78,6 +81,7 @@ static osMutexId_t spi2_mutex;
 static osMutexId_t snapshot_mutex;
 static osMutexId_t frame_buffer_mutex;
 static osMutexId_t acq_ctrl_mutex;
+SemaphoreHandle_t s_sdmmc_dma_sem;  /* signaled by HAL SD DMA completion ISR */
 static osSemaphoreId_t s_lsm_fifo_sem;  /* released by EXTI1 ISR on PB1 rising edge */
 static osSemaphoreId_t s_qma_fifo_sem;  /* released by EXTI15 ISR on PB15 rising edge */
 static osSemaphoreId_t s_h3_drdy_sem;   /* released by EXTI4 ISR on PB4 rising edge */
@@ -308,6 +312,7 @@ void MX_FREERTOS_Init(void)
   s_lsm_fifo_sem = osSemaphoreNew(1, 0, NULL);  /* binary semaphore, init=0 */
   s_qma_fifo_sem = osSemaphoreNew(1, 0, NULL);
   s_h3_drdy_sem  = osSemaphoreNew(1, 0, NULL);
+  s_sdmmc_dma_sem = xSemaphoreCreateBinary();
   /* USER CODE END RTOS_SEMAPHORES */
 
   /* Load device config from SD card (DEVCFG.JSN) before tasks start,
@@ -2402,6 +2407,17 @@ void StartLoggerTask(void *argument)
 
   AppFlowStatsSetMode(0U, 0U);
   printf("[Logger] task started, SD card mode\r\n");
+
+  /* Switch SDMMC to DMA mode now that the kernel is running and the
+   * completion semaphore is operational.  Pre-kernel SD operations
+   * (DeviceCfg_LoadFromSD) used polling mode via g_sd_use_dma == 0. */
+  hsd1.Context = SD_CONTEXT_NONE;
+  hsd1.Instance->IDMACTRL = 0U;
+  __HAL_SD_CLEAR_FLAG(&hsd1, SDMMC_STATIC_FLAGS);
+  SD_SetDmaMode(1U);
+  HAL_NVIC_SetPriority(SDMMC1_IRQn, 6, 0);
+  HAL_NVIC_EnableIRQ(SDMMC1_IRQn);
+  printf("[Logger] SDMMC DMA mode enabled\r\n");
 
   for (;;)
   {

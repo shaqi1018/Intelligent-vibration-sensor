@@ -1,8 +1,26 @@
 #include "sd_diskio.h"
 
 #include "sdmmc.h"
+#include "FreeRTOS.h"
+#include "semphr.h"
+
+extern SemaphoreHandle_t s_sdmmc_dma_sem;
 
 static DSTATUS g_sd_status = STA_NOINIT;
+static volatile uint8_t g_sd_use_dma = 0U;  /* 0=polling (default), 1=DMA */
+
+void SD_SetDmaMode(unsigned char enable)
+{
+  g_sd_use_dma = enable;
+}
+
+/* 清理轮询操作后的残留状态，防止 IDMA/Context/Flags 污染后续 DMA 操作。 */
+static void SD_CleanupAfterOp(void)
+{
+  hsd1.Context = SD_CONTEXT_NONE;
+  hsd1.Instance->IDMACTRL = 0U;  /* SDMMC_DISABLE_IDMA */
+  __HAL_SD_CLEAR_FLAG(&hsd1, SDMMC_STATIC_FLAGS);
+}
 
 static DSTATUS SD_GetDriveStatus(BYTE pdrv)
 {
@@ -58,23 +76,52 @@ DRESULT SD_disk_read(BYTE pdrv, BYTE *buff, DWORD sector, UINT count)
 
   for (retries = 0U; retries < 3U; retries++)
   {
-    /* Disable interrupts during SDMMC polling to prevent SysTick/PendSV
-     * from firing inside HAL_SD_ReadBlocks and corrupting the SDMMC
-     * state machine. This matches the bare-metal conditions where SDMMC
-     * operations are proven reliable (smoke test). */
-    __disable_irq();
-    if (HAL_SD_ReadBlocks(&hsd1, buff, (uint32_t)sector, (uint32_t)count, HAL_MAX_DELAY) == HAL_OK)
+    if (g_sd_use_dma != 0U)
     {
-      while (HAL_SD_GetCardState(&hsd1) != HAL_SD_CARD_TRANSFER)
+      /* DMA mode: clean stale state, initiate transfer, wait for semaphore. */
+      SD_CleanupAfterOp();
+      __HAL_SD_CLEAR_FLAG(&hsd1, SDMMC_STATIC_FLAGS);
+      if (HAL_SD_ReadBlocks_DMA(&hsd1, buff, (uint32_t)sector, (uint32_t)count) != HAL_OK)
       {
+        HAL_SD_DeInit(&hsd1);
+        MX_SDMMC1_SD_Init();
+        HAL_NVIC_EnableIRQ(SDMMC1_IRQn);
+        continue;
+      }
+      if (xSemaphoreTake(s_sdmmc_dma_sem, pdMS_TO_TICKS(5000)) == pdTRUE)
+      {
+        /* Wait for card to exit PROGRAMMING/RECEIVING state. The SDMMC
+         * transfer is done but the card may still be writing to flash. */
+        uint32_t t0 = xTaskGetTickCount();
+        HAL_SD_CardStateTypeDef cs;
+        do {
+          cs = HAL_SD_GetCardState(&hsd1);
+          if (cs == HAL_SD_CARD_TRANSFER) { return RES_OK; }
+          if ((xTaskGetTickCount() - t0) > pdMS_TO_TICKS(500)) { break; }
+        } while (cs == HAL_SD_CARD_PROGRAMMING || cs == HAL_SD_CARD_RECEIVING);
+      }
+      /* Timeout or bad card state — abort and re-init. */
+      HAL_SD_Abort(&hsd1);
+      SD_CleanupAfterOp();
+    }
+    else
+    {
+      /* Polling mode (pre-kernel startup). */
+      __disable_irq();
+      if (HAL_SD_ReadBlocks(&hsd1, buff, (uint32_t)sector, (uint32_t)count, HAL_MAX_DELAY) == HAL_OK)
+      {
+        while (HAL_SD_GetCardState(&hsd1) != HAL_SD_CARD_TRANSFER) {}
+        __enable_irq();
+        SD_CleanupAfterOp();
+        return RES_OK;
       }
       __enable_irq();
-      return RES_OK;
+      SD_CleanupAfterOp();
     }
-    __enable_irq();
-    /* Re-init card before retry */
     HAL_SD_DeInit(&hsd1);
     MX_SDMMC1_SD_Init();
+    /* HAL_SD_DeInit → MspDeInit disables NVIC; re-enable for next DMA op. */
+    HAL_NVIC_EnableIRQ(SDMMC1_IRQn);
   }
 
   return RES_ERROR;
@@ -82,6 +129,8 @@ DRESULT SD_disk_read(BYTE pdrv, BYTE *buff, DWORD sector, UINT count)
 
 DRESULT SD_disk_write(BYTE pdrv, const BYTE *buff, DWORD sector, UINT count)
 {
+  uint8_t retries;
+
   if ((pdrv != SDDISKIO_DRIVE_NUM) || (buff == NULL) || (count == 0U))
   {
     return RES_PARERR;
@@ -92,20 +141,57 @@ DRESULT SD_disk_write(BYTE pdrv, const BYTE *buff, DWORD sector, UINT count)
     return RES_NOTRDY;
   }
 
-  /* Disable interrupts during SDMMC polling — same reason as read path. */
-  __disable_irq();
-  if (HAL_SD_WriteBlocks(&hsd1, buff, (uint32_t)sector, (uint32_t)count, HAL_MAX_DELAY) != HAL_OK)
+  for (retries = 0U; retries < 3U; retries++)
   {
-    __enable_irq();
-    return RES_ERROR;
+    if (g_sd_use_dma != 0U)
+    {
+      SD_CleanupAfterOp();
+      __HAL_SD_CLEAR_FLAG(&hsd1, SDMMC_STATIC_FLAGS);
+      if (HAL_SD_WriteBlocks_DMA(&hsd1, buff, (uint32_t)sector, (uint32_t)count) != HAL_OK)
+      {
+        HAL_SD_DeInit(&hsd1);
+        MX_SDMMC1_SD_Init();
+        HAL_NVIC_EnableIRQ(SDMMC1_IRQn);
+        continue;
+      }
+      if (xSemaphoreTake(s_sdmmc_dma_sem, pdMS_TO_TICKS(5000)) == pdTRUE)
+      {
+        /* Wait for card to exit PROGRAMMING state. The SDMMC transfer is
+         * done (DATAEND fired) but the card may still be writing to flash. */
+        uint32_t t0 = xTaskGetTickCount();
+        HAL_SD_CardStateTypeDef cs;
+        do {
+          cs = HAL_SD_GetCardState(&hsd1);
+          if (cs == HAL_SD_CARD_TRANSFER) { return RES_OK; }
+          if ((xTaskGetTickCount() - t0) > pdMS_TO_TICKS(500)) { break; }
+        } while (cs == HAL_SD_CARD_PROGRAMMING);
+      }
+      HAL_SD_Abort(&hsd1);
+      SD_CleanupAfterOp();
+    }
+    else
+    {
+      __disable_irq();
+      if (HAL_SD_WriteBlocks(&hsd1, buff, (uint32_t)sector, (uint32_t)count, HAL_MAX_DELAY) != HAL_OK)
+      {
+        __enable_irq();
+        SD_CleanupAfterOp();
+        HAL_SD_DeInit(&hsd1);
+        MX_SDMMC1_SD_Init();
+        HAL_NVIC_EnableIRQ(SDMMC1_IRQn);
+        continue;
+      }
+      while (HAL_SD_GetCardState(&hsd1) != HAL_SD_CARD_TRANSFER) {}
+      __enable_irq();
+      SD_CleanupAfterOp();
+      return RES_OK;
+    }
+    HAL_SD_DeInit(&hsd1);
+    MX_SDMMC1_SD_Init();
+    HAL_NVIC_EnableIRQ(SDMMC1_IRQn);
   }
 
-  while (HAL_SD_GetCardState(&hsd1) != HAL_SD_CARD_TRANSFER)
-  {
-  }
-  __enable_irq();
-
-  return RES_OK;
+  return RES_ERROR;
 }
 
 DRESULT SD_disk_ioctl(BYTE pdrv, BYTE cmd, void *buff)
@@ -159,5 +245,36 @@ DRESULT SD_disk_ioctl(BYTE pdrv, BYTE cmd, void *buff)
 
     default:
       return RES_PARERR;
+  }
+}
+
+/* HAL DMA completion callbacks — called from SDMMC1 ISR. */
+void HAL_SD_TxCpltCallback(SD_HandleTypeDef *hsd)
+{
+  if (s_sdmmc_dma_sem != NULL)
+  {
+    BaseType_t xHigherPriorityTaskWoken = pdFALSE;
+    xSemaphoreGiveFromISR(s_sdmmc_dma_sem, &xHigherPriorityTaskWoken);
+    portYIELD_FROM_ISR(xHigherPriorityTaskWoken);
+  }
+}
+
+void HAL_SD_RxCpltCallback(SD_HandleTypeDef *hsd)
+{
+  if (s_sdmmc_dma_sem != NULL)
+  {
+    BaseType_t xHigherPriorityTaskWoken = pdFALSE;
+    xSemaphoreGiveFromISR(s_sdmmc_dma_sem, &xHigherPriorityTaskWoken);
+    portYIELD_FROM_ISR(xHigherPriorityTaskWoken);
+  }
+}
+
+void HAL_SD_ErrorCallback(SD_HandleTypeDef *hsd)
+{
+  if (s_sdmmc_dma_sem != NULL)
+  {
+    BaseType_t xHigherPriorityTaskWoken = pdFALSE;
+    xSemaphoreGiveFromISR(s_sdmmc_dma_sem, &xHigherPriorityTaskWoken);
+    portYIELD_FROM_ISR(xHigherPriorityTaskWoken);
   }
 }

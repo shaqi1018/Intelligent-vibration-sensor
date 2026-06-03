@@ -100,10 +100,12 @@ void HAL_SD_MspInit(SD_HandleTypeDef *sdHandle)
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   HAL_GPIO_Init(GPIOD, &GPIO_InitStruct);
 
-  /* SDMMC1 IRQ disabled — polling mode only (HAL_SD_ReadBlocks/WriteBlocks
-   * with HAL_MAX_DELAY). Keeping the IRQ enabled caused spurious
-   * HAL_SD_IRQHandler invocations that corrupted hsd1.State between
-   * consecutive FatFs operations in the RTOS context. */
+  /* SDMMC1 IRQ priority set here; IRQ itself enabled later by Logger task
+   * after kernel starts. Priority 6 > configLIBRARY_MAX_SYSCALL_INTERRUPT
+   * PRIORITY (5), so xSemaphoreGiveFromISR() is safe from ISR context.
+   * Pre-kernel SD ops (DeviceCfg_LoadFromSD) use polling mode with
+   * NVIC disabled. */
+  HAL_NVIC_SetPriority(SDMMC1_IRQn, 6, 0);
 }
 
 void HAL_SD_MspDeInit(SD_HandleTypeDef *sdHandle)
