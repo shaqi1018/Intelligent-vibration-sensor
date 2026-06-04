@@ -116,10 +116,13 @@ int main(void)
 
   /* Boot mode is decided by a TAMP backup register written by the previous session.
    * MSC mode = bare-metal U-disk (SD as block device), exits via USB unplug.
-   * LOG mode = normal RTOS path (sensors + FatFs + USBX-CDC).
-   * Read first, then clear so a bare reset always falls back to LOG. */
+   * WCID mode = RTOS path with WCID Bulk USB.
+   * Read first, then clear MSC flag so a bare reset always falls back to WCID. */
   g_boot_mode = BootMode_Read();
-  BootMode_Write(BOOT_MODE_DATA_LOG);
+  if (g_boot_mode == BOOT_MODE_USB_MSC)
+  {
+    BootMode_Write(BOOT_MODE_DATA_LOG);
+  }
 
   if (g_boot_mode == BOOT_MODE_USB_MSC)
   {
@@ -162,8 +165,7 @@ int main(void)
   printf("[初始化] SD DET(PC13)=%u, inserted_level=%u\r\n",
          (unsigned int)HAL_GPIO_ReadPin(SDMMC1_DET_GPIO_Port, SDMMC1_DET_Pin),
          (unsigned int)SDMMC1_DET_INSERTED_LEVEL);
-  printf("[BOOT] LOG mode (sensors + FatFs + USBX-CDC)\r\n");
-  BootMode_Write(BOOT_MODE_DATA_LOG);  /* clear MSC flag so next reset boots LOG */
+  printf("[BOOT] mode=%d (0=WCID, 1=MSC)\r\n", (int)g_boot_mode);
 
   if (SDMMC1_IsCardDetected() != 0U)
   {

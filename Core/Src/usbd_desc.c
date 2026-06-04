@@ -8,11 +8,11 @@
 #include "usbd_conf.h"
 
 #define USBD_VID                      0x0483U
-#define USBD_PID                      0x5720U  /* generic STM32 MSC */
+#define USBD_PID                      0x5721U  /* WCID Bulk sensor streaming */
 #define USBD_LANGID_STRING            0x0409U  /* English (US) */
 #define USBD_MANUFACTURER_STRING      "STMicroelectronics"
-#define USBD_PRODUCT_STRING           "Sensor Logger Drive"
-#define USBD_CONFIGURATION_STRING     "MSC Config"
+#define USBD_PRODUCT_STRING           "Sensor WCID Bulk"
+#define USBD_CONFIGURATION_STRING     "WCID Config"
 #define USBD_INTERFACE_STRING         "MSC Interface"
 
 static uint8_t *MSC_DeviceDescriptor(USBD_SpeedTypeDef speed, uint16_t *length);

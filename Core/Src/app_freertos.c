@@ -34,12 +34,17 @@
 #include "lsm6dsox.h"
 #include "h3lis100dl.h"
 #include "qma6100p.h"
-#include "usb_cdc_service.h"
 #include "acq_config.h"
 #include "device_config.h"
 #include "boot_mode.h"
 #include "sd_diskio.h"
 #include "sdmmc.h"
+#include "usbd_wcid_app.h"
+#include "usbd_wcid_streaming.h"
+#include "usbd_core.h"
+#include "usbd_conf.h"
+#include "usbd_desc.h"
+#include "usb_otg.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -52,11 +57,10 @@
 #define SAMPLE_PERIOD_MS         APP_SENSOR_SAMPLE_PERIOD_MS
 #define LOGGER_RETRY_DELAY_MS    1000U
 #define LOGGER_SYNC_EVERY_ROWS   32U
-#define USB_CDC_POLL_DELAY_MS    10U
-#define USB_CDC_ALIVE_PERIOD_MS  1000U
-#define USB_CDC_TX_BUFFER_SIZE   96U
-#define USB_CDC_RX_BUFFER_SIZE   128U
-#define USB_CDC_CMD_BUFFER_SIZE  64U
+
+/* CDC removed — redirect UsbCdcService calls to printf (UART1) */
+#define UsbCdcService_Write(buf, len)  printf("%.*s", (int)(len), (const char *)(buf))
+#define UsbCdcService_IsReady()        (1U)
 #define USB_UPLOAD_PERIOD_MS     5U
 #define APP_ACQ_IDLE_DELAY_MS    10U
 #define APP_ACQ_SINK_USB         1U
@@ -691,6 +695,12 @@ static void AppAcqStopInternal(uint32_t now_ms)
     g_acq_ctrl.stop_pending = 1U;
   }
   osMutexRelease(acq_ctrl_mutex);
+
+  /* WCID Bulk: stop USB streaming. */
+  if (g_boot_mode == BOOT_MODE_WCID_BULK)
+  {
+    UsbWcidApp_StopStreaming();
+  }
 }
 
 static uint32_t AppAcqDrainPendingStop(void)
@@ -811,6 +821,13 @@ static uint32_t AppAcqStart(uint8_t sink, uint32_t duration_ms)
 
   AppFlowStatsSetMode((uint8_t)((sink == APP_ACQ_SINK_USB) ? 1U : 0U),
                       (uint8_t)((sink == APP_ACQ_SINK_SD) ? 1U : 0U));
+
+  /* WCID Bulk: start USB streaming when sink is USB. */
+  if (g_boot_mode == BOOT_MODE_WCID_BULK && sink == APP_ACQ_SINK_USB)
+  {
+    UsbWcidApp_StartStreaming();
+  }
+
   return 1U;
 }
 
@@ -1234,7 +1251,7 @@ static void UsbCmd_Ping(void)
 
 static void UsbCmd_Help(void)
 {
-  const char *msg = "Commands: ping, help, status, acq_start, acq_stop, s <lsm|h3|qma> <odr|range|en> <val>, msc\r\n";
+  const char *msg = "Commands: ping, help, status, acq_start, acq_stop, s <lsm|h3|qma> <odr|range|en> <val>, boot_msc\r\n";
   UsbCdcService_Write((const uint8_t *)msg, strlen(msg));
 }
 
@@ -1467,171 +1484,97 @@ static void UsbCmd_Process(const char *cmd)
   {
     UsbCmd_SetSensor(cmd);
   }
-  else if (strcmp(cmd, "msc") == 0)
+  else if (strcmp(cmd, "boot_msc") == 0)
   {
-    const char *msg = "Switching to USB MSC mode...\r\n";
-    UsbCdcService_Write((const uint8_t *)msg, strlen(msg));
+    printf("Switching to USB MSC mode...\r\n");
     UsbCmd_AcqStop();
     osDelay(500U);
     (void)DeviceCfg_WriteCurrentToSD();
     BootMode_Write(BOOT_MODE_USB_MSC);
-    /* Verify write before reset */
     boot_mode_t verify = BootMode_Read();
-    char buf[64];
-    snprintf(buf, sizeof(buf), "BootMode flag written, readback=%d, resetting...\r\n", (int)verify);
-    UsbCdcService_Write((const uint8_t *)buf, strlen(buf));
+    printf("BootMode flag written, readback=%d, resetting...\r\n", (int)verify);
     osDelay(200U);
     NVIC_SystemReset();
   }
   else
   {
-    const char *msg = "Unknown cmd\r\n";
-    UsbCdcService_Write((const uint8_t *)msg, strlen(msg));
+    printf("Unknown cmd\r\n");
   }
 }
 
 
+/* Command callback for WCID Bulk mode — called from USB class driver Receive. */
+static void WcidCmdCallback(const char *cmd, uint32_t len)
+{
+  /* Commands arrive as raw bytes from the OUT endpoint.
+   * Strip trailing \r\n and process. */
+  char buf[64];
+  uint32_t n = (len < sizeof(buf) - 1U) ? len : sizeof(buf) - 1U;
+  memcpy(buf, cmd, n);
+  buf[n] = '\0';
+  /* Trim trailing whitespace */
+  while (n > 0U && (buf[n - 1U] == '\r' || buf[n - 1U] == '\n' || buf[n - 1U] == ' '))
+  {
+    buf[--n] = '\0';
+  }
+  if (n > 0U)
+  {
+    printf("[WCID] cmd: %s\r\n", buf);
+    UsbCmd_Process(buf);
+  }
+}
+
+extern USBD_HandleTypeDef hUSB_Device;
+
 void StartUsbCdcTask(void *argument)
 {
-  uint8_t usb_init_ok;
-  char tx_buffer[USB_CDC_TX_BUFFER_SIZE];
-  uint8_t rx_buffer[USB_CDC_RX_BUFFER_SIZE];
-  char cmd_buffer[USB_CDC_CMD_BUFFER_SIZE];
-  uint32_t cmd_len = 0U;
-
   (void)argument;
 
-  memset(tx_buffer, 0, sizeof(tx_buffer));
-  memset(rx_buffer, 0, sizeof(rx_buffer));
-  memset(cmd_buffer, 0, sizeof(cmd_buffer));
+  printf("[WCID] task entered, boot_mode=%d\r\n", (int)g_boot_mode);
 
-  usb_init_ok = UsbCdcService_Init();
-  printf("[CDC] init %s\r\n", usb_init_ok ? "ok" : "FAIL");
-
-  for (;;)
+  if (g_boot_mode == BOOT_MODE_WCID_BULK)
   {
-    UsbCdcService_Poll();
-
-    if (usb_init_ok != 0U && UsbCdcService_IsReady() != 0U)
+    /* WCID Bulk mode: PCD already init'd in main, just start Classic USBD core. */
+    printf("[WCID] calling USBD_Init...\r\n");
+    USBD_StatusTypeDef st = USBD_Init(&hUSB_Device, &MSC_Desc, 0U);
+    printf("[WCID] USBD_Init returned %d\r\n", (int)st);
+    if (st == USBD_OK)
     {
-      /* 读取接收数据 */
-      uint32_t rx_len = UsbCdcService_Read(rx_buffer, sizeof(rx_buffer));
-
-      for (uint32_t i = 0U; i < rx_len; i++)
+      printf("[WCID] calling USBD_RegisterClass...\r\n");
+      st = USBD_RegisterClass(&hUSB_Device, USBD_WCID_STREAMING_CLASS);
+      printf("[WCID] USBD_RegisterClass returned %d\r\n", (int)st);
+      if (st == USBD_OK)
       {
-        char ch = (char)rx_buffer[i];
-
-        if (ch == '\r' || ch == '\n')
+        printf("[WCID] calling UsbWcidApp_Init...\r\n");
+        UsbWcidApp_Init(&hUSB_Device);
+        printf("[WCID] calling UsbWcidApp_SetCmdHandler...\r\n");
+        UsbWcidApp_SetCmdHandler(WcidCmdCallback);
+        printf("[WCID] calling USBD_Start...\r\n");
+        st = USBD_Start(&hUSB_Device);
+        printf("[WCID] USBD_Start returned %d\r\n", (int)st);
+        if (st == USBD_OK)
         {
-          if (cmd_len > 0U)
-          {
-            cmd_buffer[cmd_len] = '\0';
-            printf("[CDC] cmd: %s\r\n", cmd_buffer);
-            UsbCmd_Process(cmd_buffer);
-            cmd_len = 0U;
-          }
+          printf("[WCID] init ok — 3 IN endpoints (LSM/H3/QMA) + 1 OUT (cmd)\r\n");
         }
-        else if (cmd_len < (USB_CDC_CMD_BUFFER_SIZE - 1U))
-        {
-          cmd_buffer[cmd_len++] = ch;
-        }
+        else { printf("[WCID] USBD_Start FAIL\r\n"); }
       }
+      else { printf("[WCID] RegisterClass FAIL\r\n"); }
     }
+    else { printf("[WCID] USBD_Init FAIL\r\n"); }
 
-    osDelay(USB_CDC_POLL_DELAY_MS);
+    /* WCID mode: commands arrive via Receive callback, no polling needed.
+     * Sensor tasks write directly via UsbWcidApp_SendCsv.
+     * Just idle here. */
+    for (;;) { osDelay(1000U); }
   }
 }
 
 void StartUsbUploadTask(void *argument)
 {
-  AppSensorFrame_t frame;
-  uint8_t header_sent = 0U;
-
+  /* CDC removed — in WCID mode sensors write directly via UsbWcidApp_SendCsv.
+   * This task is no longer needed. Idle forever. */
   (void)argument;
-
-  printf("[UsbUpload] task started\r\n");
-
-  for (;;)
-  {
-    uint8_t usb_sink_active;
-
-    AppAcqCheckAutoStop();
-    usb_sink_active = AppAcqIsUsbSinkActive();
-
-    if (usb_sink_active != 0U)
-    {
-      AppFlowStatsSetMode(1U, 0U);
-
-      if (header_sent == 0U)
-      {
-        const char *header =
-            "frame_id,tick_ms,enabled_mask,present_mask,"
-            "lsm_sample_seq,lsm_valid,lsm_acc_x_mg,lsm_acc_y_mg,lsm_acc_z_mg,lsm_gyro_x_mdps,lsm_gyro_y_mdps,lsm_gyro_z_mdps,lsm_temp_c,"
-            "h3_sample_seq,h3_valid,h3_raw_x,h3_raw_y,h3_raw_z,h3_acc_x_mg,h3_acc_y_mg,h3_acc_z_mg,"
-            "qma_sample_seq,qma_valid,qma_raw_x,qma_raw_y,qma_raw_z,qma_acc_x_mg,qma_acc_y_mg,qma_acc_z_mg\r\n";
-        UsbCdcService_Write((const uint8_t *)header, strlen(header));
-        header_sent = 1U;
-        printf("[UsbUpload] frame CSV header sent\r\n");
-      }
-
-      while ((AppAcqIsUsbSinkActive() != 0U) && (AppFrameBufferPop(&frame) != 0U))
-      {
-        char csv_line[512];
-        int len = snprintf(
-            csv_line,
-            sizeof(csv_line),
-            "%lu,%lu,0x%02lX,0x%02lX,"
-            "%lu,%u,%.1f,%.1f,%.1f,%.1f,%.1f,%.1f,%.1f,"
-            "%lu,%u,%d,%d,%d,%.1f,%.1f,%.1f,"
-            "%lu,%u,%d,%d,%d,%.1f,%.1f,%.1f\r\n",
-            (unsigned long)frame.frame_id,
-            (unsigned long)frame.tick_ms,
-            (unsigned long)frame.enabled_mask,
-            (unsigned long)frame.present_mask,
-            (unsigned long)frame.lsm6dsox.sample_seq,
-            (unsigned int)frame.lsm6dsox.valid,
-            frame.lsm6dsox.data.acc.x,
-            frame.lsm6dsox.data.acc.y,
-            frame.lsm6dsox.data.acc.z,
-            frame.lsm6dsox.data.gyro.x,
-            frame.lsm6dsox.data.gyro.y,
-            frame.lsm6dsox.data.gyro.z,
-            frame.lsm6dsox.data.temp_C,
-            (unsigned long)frame.h3lis100dl.sample_seq,
-            (unsigned int)frame.h3lis100dl.valid,
-            (int)frame.h3lis100dl.data.raw[0],
-            (int)frame.h3lis100dl.data.raw[1],
-            (int)frame.h3lis100dl.data.raw[2],
-            frame.h3lis100dl.data.acc_mg[0],
-            frame.h3lis100dl.data.acc_mg[1],
-            frame.h3lis100dl.data.acc_mg[2],
-            (unsigned long)frame.qma6100p.sample_seq,
-            (unsigned int)frame.qma6100p.valid,
-            (int)frame.qma6100p.data.raw[0],
-            (int)frame.qma6100p.data.raw[1],
-            (int)frame.qma6100p.data.raw[2],
-            frame.qma6100p.data.acc_mg[0],
-            frame.qma6100p.data.acc_mg[1],
-            frame.qma6100p.data.acc_mg[2]);
-        if ((len > 0) && ((uint32_t)len < sizeof(csv_line)))
-        {
-          UsbCdcService_Write((const uint8_t *)csv_line, (uint32_t)len);
-          AppFlowStatsRecordUsbSent(frame.frame_id);
-        }
-      }
-    }
-    else
-    {
-      AppFlowStatsSetMode(0U, AppAcqIsSdSessionActive());
-      if (header_sent != 0U)
-      {
-        header_sent = 0U;
-        printf("[UsbUpload] USB frame stream idle, will resend header next session\r\n");
-      }
-    }
-
-    osDelay(USB_UPLOAD_PERIOD_MS);
-  }
+  for (;;) { osDelay(1000U); }
 }
 
 #if APP_SENSOR_TEST_TARGET == APP_SENSOR_TEST_LSM6DSOX
@@ -2007,6 +1950,12 @@ void StartLsm6dsoxTask(void *argument)
           rowbuf[off++] = '\n';
           RingBuf_Write(&g_ring_lsm_imu, (const uint8_t *)rowbuf, off);
 
+          /* WCID Bulk: write CSV directly to USB endpoint double-buffer. */
+          if (g_boot_mode == BOOT_MODE_WCID_BULK && AppAcqIsUsbSinkActive() != 0U)
+          {
+            UsbWcidApp_SendCsv(WCID_CH_LSM_IMU, rowbuf, off);
+          }
+
           last_acc[0] = cur_acc[0]; last_acc[1] = cur_acc[1]; last_acc[2] = cur_acc[2];
           last_gyr[0] = cur_gyr[0]; last_gyr[1] = cur_gyr[1]; last_gyr[2] = cur_gyr[2];
           last_has_pair = 1;
@@ -2158,6 +2107,12 @@ void StartH3lis100dlTask(void *argument)
       rowbuf[off++] = '\r';
       rowbuf[off++] = '\n';
       RingBuf_Write(&g_ring_h3_acc, (const uint8_t *)rowbuf, off);
+
+      /* WCID Bulk: write CSV directly to USB endpoint double-buffer. */
+      if (g_boot_mode == BOOT_MODE_WCID_BULK && AppAcqIsUsbSinkActive() != 0U)
+      {
+        UsbWcidApp_SendCsv(WCID_CH_H3_ACCEL, rowbuf, off);
+      }
 
       if (AppAcqIsUsbSinkActive() != 0U)
       {
@@ -2346,6 +2301,12 @@ void StartQma6100pTask(void *argument)
       rowbuf[off++] = '\r';
       rowbuf[off++] = '\n';
       RingBuf_Write(&g_ring_qma_acc, (const uint8_t *)rowbuf, off);
+
+      /* WCID Bulk: write CSV directly to USB endpoint double-buffer. */
+      if (g_boot_mode == BOOT_MODE_WCID_BULK && AppAcqIsUsbSinkActive() != 0U)
+      {
+        UsbWcidApp_SendCsv(WCID_CH_QMA_ACCEL, rowbuf, off);
+      }
     }
 
     if (AppAcqIsUsbSinkActive() != 0U && fifo_level > 0U)

@@ -35,7 +35,6 @@ virtualFolder:
                 - path: ../Core/Inc/usb_cdc_service.h
                 - path: ../Core/Inc/dma_sampling.h
                 - path: ../Core/Src/acq_config.c
-                - path: ../Core/Src/acq_timer.c
                 - path: ../Core/Src/sensor_bin.c
                 - path: ../Core/Src/frame_ring.c
               folders: []
@@ -74,6 +73,8 @@ virtualFolder:
                 - path: ../Core/Inc/usbd_conf.h
                 - path: ../Core/Src/usbd_desc.c
                 - path: ../Core/Inc/usbd_desc.h
+                - path: ../Core/Src/usbd_wcid_app.c
+                - path: ../Core/Inc/usbd_wcid_app.h
                 - path: ../Core/Src/usbd_storage_if.c
                 - path: ../Core/Inc/usbd_storage_if.h
               folders: []
@@ -99,6 +100,8 @@ virtualFolder:
                 - path: ../Middlewares/ST/STM32_USB_Device_Library/Class/MSC/Src/usbd_msc_bot.c
                 - path: ../Middlewares/ST/STM32_USB_Device_Library/Class/MSC/Src/usbd_msc_data.c
                 - path: ../Middlewares/ST/STM32_USB_Device_Library/Class/MSC/Src/usbd_msc_scsi.c
+                - path: ../Middlewares/ST/STM32_USB_Device_Library/Class/SensorStreaming_WCID/Src/usbd_wcid_streaming.c
+                - path: ../Middlewares/ST/STM32_USB_Device_Library/Class/SensorStreaming_WCID/Inc/usbd_wcid_streaming.h
               folders: []
         - name: USBX
           files: []
@@ -468,6 +471,7 @@ targets:
         - ../Middlewares/ST/usbx/ports/generic/inc
         - ../Middlewares/ST/STM32_USB_Device_Library/Core/Inc
         - ../Middlewares/ST/STM32_USB_Device_Library/Class/MSC/Inc
+        - ../Middlewares/ST/STM32_USB_Device_Library/Class/SensorStreaming_WCID/Inc
         - ../USBX/App
         - ../USBX/Target
         - ../HQYJ-BSP/Inc

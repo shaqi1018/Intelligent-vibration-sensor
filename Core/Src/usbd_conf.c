@@ -12,8 +12,13 @@
 #include "usbd_conf.h"
 #include "usbd_msc.h"
 #include "usb_otg.h"
+#include "boot_mode.h"
 
 extern PCD_HandleTypeDef hpcd_USB_OTG_FS;
+extern boot_mode_t g_boot_mode;
+
+/* Global USB device handle — used by both MSC and WCID Bulk modes. */
+USBD_HandleTypeDef hUSB_Device;
 
 USBD_StatusTypeDef USBD_LL_Init(USBD_HandleTypeDef *pdev)
 {
@@ -23,11 +28,27 @@ USBD_StatusTypeDef USBD_LL_Init(USBD_HandleTypeDef *pdev)
   hpcd_USB_OTG_FS.pData = pdev;
   pdev->pData = &hpcd_USB_OTG_FS;
 
-  /* FIFO layout for FS, 1.25 KB total (320 words * 4 bytes).
-   * RX shared, TX0 = EP0, TX1 = MSC-IN. */
-  HAL_PCDEx_SetRxFiFo(&hpcd_USB_OTG_FS, 0x80U);   /* 128 words = 512 bytes */
-  HAL_PCDEx_SetTxFiFo(&hpcd_USB_OTG_FS, 0U, 0x40U);  /* 64 words = 256 bytes */
-  HAL_PCDEx_SetTxFiFo(&hpcd_USB_OTG_FS, 1U, 0x80U);  /* 128 words = 512 bytes */
+  /* FIFO layout — varies by boot mode.
+   * Total USB OTG FS FIFO = 320 words (1280 bytes). */
+  if (g_boot_mode == BOOT_MODE_WCID_BULK)
+  {
+    /* WCID Bulk: 3 IN + 1 OUT endpoints.
+     * RX = 64 words (256B) — matches DATALOG1; 32 words starves EP0 control.
+     * TX0 = EP0, TX1-3 = EP1-3 IN (224B each = 56 words).
+     * Total = 64+64+56*3 = 296 <= 320 words available. */
+    HAL_PCDEx_SetRxFiFo(&hpcd_USB_OTG_FS, 0x40U);    /* 64 words = 256 bytes */
+    HAL_PCDEx_SetTxFiFo(&hpcd_USB_OTG_FS, 0U, 0x40U); /* 64 words = 256 bytes EP0 */
+    HAL_PCDEx_SetTxFiFo(&hpcd_USB_OTG_FS, 1U, 0x38U); /* 56 words = 224 bytes EP1 IN */
+    HAL_PCDEx_SetTxFiFo(&hpcd_USB_OTG_FS, 2U, 0x38U); /* 56 words = 224 bytes EP2 IN */
+    HAL_PCDEx_SetTxFiFo(&hpcd_USB_OTG_FS, 3U, 0x38U); /* 56 words = 224 bytes EP3 IN */
+  }
+  else
+  {
+    /* MSC or CDC: RX shared, TX0 = EP0, TX1 = bulk IN. */
+    HAL_PCDEx_SetRxFiFo(&hpcd_USB_OTG_FS, 0x80U);    /* 128 words = 512 bytes */
+    HAL_PCDEx_SetTxFiFo(&hpcd_USB_OTG_FS, 0U, 0x40U); /* 64 words = 256 bytes EP0 */
+    HAL_PCDEx_SetTxFiFo(&hpcd_USB_OTG_FS, 1U, 0x80U); /* 128 words = 512 bytes EP1 */
+  }
   return USBD_OK;
 }
 
