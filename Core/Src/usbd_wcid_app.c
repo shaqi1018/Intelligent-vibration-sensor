@@ -77,3 +77,14 @@ void UsbWcidApp_SetCmdHandler(UsbWcidApp_CmdHandler handler)
 {
   s_cmd_handler = handler;
 }
+
+static uint8_t  s_resp_buf[1024];
+static uint32_t s_resp_len;
+void UsbWcidApp_RespReset(void)  { s_resp_len = 0U; }
+void UsbWcidApp_RespAppend(const uint8_t *buf, uint32_t len)
+{
+  uint32_t space = sizeof(s_resp_buf) - s_resp_len;
+  if (len > space) { len = space; }
+  if (len != 0U) { memcpy(&s_resp_buf[s_resp_len], buf, len); s_resp_len += len; }
+}
+uint8_t UsbWcidApp_RespSend(void) { return 1U; }

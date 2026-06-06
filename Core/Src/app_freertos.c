@@ -342,10 +342,11 @@ void MX_FREERTOS_Init(void)
 #elif APP_SENSOR_TEST_TARGET == APP_SENSOR_TEST_QMA6100P
   qma6100pTaskHandle = osThreadNew(StartQma6100pTask, NULL, &qma6100pTask_attributes);
 #else
-  lsm6dsoxTaskHandle = osThreadNew(StartLsm6dsoxTask, NULL, &lsm6dsoxTask_attributes);
-  h3lis100dlTaskHandle = osThreadNew(StartH3lis100dlTask, NULL, &h3lis100dlTask_attributes);
-  qma6100pTaskHandle = osThreadNew(StartQma6100pTask, NULL, &qma6100pTask_attributes);
-  loggerTaskHandle = osThreadNew(StartLoggerTask, NULL, &loggerTask_attributes);
+  /* Sensor tasks disabled: CS pins differ on new board, SPI hangs block WCID init */
+  // lsm6dsoxTaskHandle = osThreadNew(StartLsm6dsoxTask, NULL, &lsm6dsoxTask_attributes);
+  // h3lis100dlTaskHandle = osThreadNew(StartH3lis100dlTask, NULL, &h3lis100dlTask_attributes);
+  // qma6100pTaskHandle = osThreadNew(StartQma6100pTask, NULL, &qma6100pTask_attributes);
+  // loggerTaskHandle = osThreadNew(StartLoggerTask, NULL, &loggerTask_attributes);
   usbCdcTaskHandle = osThreadNew(StartUsbCdcTask, NULL, &usbCdcTask_attributes);
   usbUploadTaskHandle = osThreadNew(StartUsbUploadTask, NULL, &usbUploadTask_attributes);
   printf("[RTOS] usbCdcTask created: %s\r\n", (usbCdcTaskHandle != NULL) ? "ok" : "FAILED");
@@ -1549,6 +1550,7 @@ void StartUsbCdcTask(void *argument)
         UsbWcidApp_Init(&hUSB_Device);
         printf("[WCID] calling UsbWcidApp_SetCmdHandler...\r\n");
         UsbWcidApp_SetCmdHandler(WcidCmdCallback);
+        HAL_NVIC_EnableIRQ(OTG_FS_IRQn); /* stack ready, re-enable USB ISR */
         printf("[WCID] calling USBD_Start...\r\n");
         st = USBD_Start(&hUSB_Device);
         printf("[WCID] USBD_Start returned %d\r\n", (int)st);

@@ -181,6 +181,7 @@ int main(void)
   /* 暂时跳过KEY_ADC初始化（硬件问题待排查） */
 
   MX_USB_OTG_FS_PCD_Init();
+  HAL_NVIC_DisableIRQ(OTG_FS_IRQn); /* ISR off until USBD stack is fully initialised */
   printf("[初始化] USB OTG FS PCD 初始化完成\r\n");
 
   /* SPI1(PA5/PA6/PA7 + PC4(CS)) -> LSM6DSOX */

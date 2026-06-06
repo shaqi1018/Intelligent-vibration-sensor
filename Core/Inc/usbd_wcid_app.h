@@ -25,4 +25,8 @@ uint8_t UsbWcidApp_SendCsv(uint8_t channel, const char *csv, uint32_t len);
 typedef void (*UsbWcidApp_CmdHandler)(const char *cmd, uint32_t len);
 void UsbWcidApp_SetCmdHandler(UsbWcidApp_CmdHandler handler);
 
+void    UsbWcidApp_RespReset(void);
+void    UsbWcidApp_RespAppend(const uint8_t *buf, uint32_t len);
+uint8_t UsbWcidApp_RespSend(void);
+
 #endif
