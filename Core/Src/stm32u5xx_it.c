@@ -213,27 +213,27 @@ void SDMMC1_IRQHandler(void)
 }
 
 /**
-  * @brief This function handles EXTI line 1 interrupt (PB1 = LSM6DSOX INT1).
+  * @brief This function handles EXTI line 0 interrupt (PB0 = LSM6DSOX INT1).
   */
-void EXTI1_IRQHandler(void)
+void EXTI0_IRQHandler(void)   /* LSM6DSOX INT1 → PB0 */
+{
+  HAL_GPIO_EXTI_IRQHandler(GPIO_PIN_0);
+}
+
+/**
+  * @brief This function handles EXTI line 1 interrupt (PA1 = H3LIS100DL DRDY).
+  */
+void EXTI1_IRQHandler(void)   /* H3LIS100DL DRDY → PA1 */
 {
   HAL_GPIO_EXTI_IRQHandler(GPIO_PIN_1);
 }
 
 /**
-  * @brief This function handles EXTI line 4 interrupt (PB4 = H3LIS100DL INT1 DRDY).
+  * @brief This function handles EXTI line 4 interrupt (PC4 = QMA6100P INT1).
   */
-void EXTI4_IRQHandler(void)
+void EXTI4_IRQHandler(void)   /* QMA6100P INT1 → PC4 */
 {
   HAL_GPIO_EXTI_IRQHandler(GPIO_PIN_4);
-}
-
-/**
-  * @brief This function handles EXTI line 15 interrupt (PB15 = QMA6100P INT2).
-  */
-void EXTI15_IRQHandler(void)
-{
-  HAL_GPIO_EXTI_IRQHandler(GPIO_PIN_15);
 }
 
 /* USER CODE BEGIN 1 */

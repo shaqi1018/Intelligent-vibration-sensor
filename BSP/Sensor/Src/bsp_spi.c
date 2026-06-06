@@ -4,11 +4,11 @@
   * @brief   SPI bus initialization for sensor drivers.
   *
  *   SPI1 (LSM6DSOX dedicated):
- *     PA5=SCK(AF5), PA6=MISO(AF5), PA7=MOSI(AF5), PC4=CS
+ *     PA5=SCK(AF5), PA6=MISO(AF5), PA7=MOSI(AF5), PB1=CS  [HW-v2: was PC4]
   *
  *   SPI2 (H3LIS100DL + QMA6100P shared bus):
  *     PB10=SCK(AF5), PC2=MISO(AF5), PC1=MOSI(AF5)
- *     PC5=H3 CS, PA4=QMA CS
+ *     PA4=H3 CS  [HW-v2: was PC5],  PC5=QMA CS  [HW-v2: was PA4]
   *
   *   Both buses: Mode3 (CPOL=1, CPHA=1), 8-bit, MSB first
   ******************************************************************************
@@ -86,7 +86,7 @@ void MX_SPI1_Init(void)
   GPIO_InitTypeDef GPIO_InitStruct = {0};
 
   __HAL_RCC_GPIOA_CLK_ENABLE();
-  __HAL_RCC_GPIOC_CLK_ENABLE();
+  __HAL_RCC_GPIOB_CLK_ENABLE();   /* PB1 = LSM CS on HW-v2 */
   __HAL_RCC_SPI1_CLK_ENABLE();
 
   GPIO_InitStruct.Pin = LSM_SPI_CS_PIN;

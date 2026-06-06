@@ -50,13 +50,13 @@ extern "C" {
 #define H3LIS100DL_SENSITIVITY_MG      780.0f
 
 /* ======================== INT pin wiring (PCB-specific) ====================
- * Schematic: H3LIS100DL_INT1 -> PB4, INT2 -> PB5. CTRL_REG3 (0x22) routes
- * data-ready to INT1 when bits[1:0]=01 (= 0x01). The pin is active-high
- * push-pull by default. Switching to INT2 / a different GPIO only requires
+ * HW-v2: H3LIS100DL DRDY -> PA1 (EXTI1). CTRL_REG3 (0x22) routes
+ * data-ready to INT1 when bits[1:0]=10 (= 0x02). The pin is active-high
+ * push-pull by default. Switching to a different GPIO only requires
  * editing this block. */
-#define H3LIS100DL_INT_PIN          GPIO_PIN_4
-#define H3LIS100DL_INT_GPIO_PORT    GPIOB
-#define H3LIS100DL_INT_EXTI_IRQn    EXTI4_IRQn
+#define H3LIS100DL_INT_PIN          GPIO_PIN_1      /* HW-v2: PA1 */
+#define H3LIS100DL_INT_GPIO_PORT    GPIOA
+#define H3LIS100DL_INT_EXTI_IRQn    EXTI1_IRQn
 #define H3LIS100DL_CTRL_REG3_DRDY_INT1   0x02U  /* I1_CFG[1:0]=10 → DRDY on INT1 (datasheet Table 27) */
 
 /* SPI command byte helper (standard ST format: RW[7] | MS[6] | ADDR[5:0]) */

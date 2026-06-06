@@ -91,13 +91,12 @@ typedef enum {
 #define QMA6100P_INT_WM_BIT         0x40U
 
 /* ======================== INT pin wiring (PCB-specific) =================== */
-/* Current board: INT2 → PB15 works; INT1 → PB12 is non-functional. To swap
- * back to INT1 on a fixed board, change QMA6100P_INT_MAP_REG to INT_MAP1
- * and update QMA6100P_INT_PIN/IRQn to match the new GPIO. */
-#define QMA6100P_INT_PIN            GPIO_PIN_15
-#define QMA6100P_INT_GPIO_PORT      GPIOB
-#define QMA6100P_INT_EXTI_IRQn      EXTI15_IRQn
-#define QMA6100P_INT_MAP_REG        QMA6100P_REG_INT_MAP2
+/* HW-v2: QMA6100P INT1 → PC4 (EXTI4). INT is open-drain, pull-up required.
+ * Use INT_MAP1 to route watermark/full interrupt to INT1 pin. */
+#define QMA6100P_INT_PIN            GPIO_PIN_4      /* HW-v2: PC4 */
+#define QMA6100P_INT_GPIO_PORT      GPIOC
+#define QMA6100P_INT_EXTI_IRQn      EXTI4_IRQn
+#define QMA6100P_INT_MAP_REG        QMA6100P_REG_INT_MAP1
 
 typedef struct {
   QMA6100P_Range_t range;

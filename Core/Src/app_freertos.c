@@ -342,13 +342,17 @@ void MX_FREERTOS_Init(void)
 #elif APP_SENSOR_TEST_TARGET == APP_SENSOR_TEST_QMA6100P
   qma6100pTaskHandle = osThreadNew(StartQma6100pTask, NULL, &qma6100pTask_attributes);
 #else
-  /* Sensor tasks disabled: CS pins differ on new board, SPI hangs block WCID init */
-  // lsm6dsoxTaskHandle = osThreadNew(StartLsm6dsoxTask, NULL, &lsm6dsoxTask_attributes);
-  // h3lis100dlTaskHandle = osThreadNew(StartH3lis100dlTask, NULL, &h3lis100dlTask_attributes);
-  // qma6100pTaskHandle = osThreadNew(StartQma6100pTask, NULL, &qma6100pTask_attributes);
-  // loggerTaskHandle = osThreadNew(StartLoggerTask, NULL, &loggerTask_attributes);
+  /* HW-v2: CS/INT pins remapped — sensor tasks re-enabled */
+  lsm6dsoxTaskHandle  = osThreadNew(StartLsm6dsoxTask,  NULL, &lsm6dsoxTask_attributes);
+  h3lis100dlTaskHandle = osThreadNew(StartH3lis100dlTask, NULL, &h3lis100dlTask_attributes);
+  qma6100pTaskHandle  = osThreadNew(StartQma6100pTask,  NULL, &qma6100pTask_attributes);
+  loggerTaskHandle    = osThreadNew(StartLoggerTask,    NULL, &loggerTask_attributes);
   usbCdcTaskHandle = osThreadNew(StartUsbCdcTask, NULL, &usbCdcTask_attributes);
   usbUploadTaskHandle = osThreadNew(StartUsbUploadTask, NULL, &usbUploadTask_attributes);
+  printf("[RTOS] lsm6dsoxTask created: %s\r\n", (lsm6dsoxTaskHandle != NULL) ? "ok" : "FAILED");
+  printf("[RTOS] h3lis100dlTask created: %s\r\n", (h3lis100dlTaskHandle != NULL) ? "ok" : "FAILED");
+  printf("[RTOS] qma6100pTask created: %s\r\n", (qma6100pTaskHandle != NULL) ? "ok" : "FAILED");
+  printf("[RTOS] loggerTask created: %s\r\n", (loggerTaskHandle != NULL) ? "ok" : "FAILED");
   printf("[RTOS] usbCdcTask created: %s\r\n", (usbCdcTaskHandle != NULL) ? "ok" : "FAILED");
   printf("[RTOS] usbUploadTask created: %s\r\n", (usbUploadTaskHandle != NULL) ? "ok" : "FAILED");
 #endif
@@ -361,30 +365,23 @@ void MX_FREERTOS_Init(void)
 /* Private application code --------------------------------------------------*/
 /* USER CODE BEGIN Application */
 
-/* EXTI rising-edge callback. PB1 = LSM6DSOX INT1 (FIFO watermark);
- * PB4 = H3LIS100DL INT1 (DRDY); PB15 = QMA6100P INT2 (FIFO watermark). */
+/* EXTI rising-edge callback. HW-v2:
+ * PB0 = LSM6DSOX INT1 (FIFO watermark);
+ * PA1 = H3LIS100DL DRDY;
+ * PC4 = QMA6100P INT1 (FIFO watermark). */
 void HAL_GPIO_EXTI_Rising_Callback(uint16_t GPIO_Pin)
 {
-  if (GPIO_Pin == GPIO_PIN_1)
+  if (GPIO_Pin == GPIO_PIN_0)       /* LSM6DSOX INT1 → PB0 */
   {
-    if (s_lsm_fifo_sem != NULL)
-    {
-      osSemaphoreRelease(s_lsm_fifo_sem);
-    }
+    if (s_lsm_fifo_sem != NULL) { osSemaphoreRelease(s_lsm_fifo_sem); }
   }
-  else if (GPIO_Pin == GPIO_PIN_4)
+  else if (GPIO_Pin == GPIO_PIN_1)  /* H3LIS100DL DRDY → PA1 */
   {
-    if (s_h3_drdy_sem != NULL)
-    {
-      osSemaphoreRelease(s_h3_drdy_sem);
-    }
+    if (s_h3_drdy_sem != NULL)  { osSemaphoreRelease(s_h3_drdy_sem);  }
   }
-  else if (GPIO_Pin == GPIO_PIN_15)
+  else if (GPIO_Pin == GPIO_PIN_4)  /* QMA6100P INT1 → PC4 */
   {
-    if (s_qma_fifo_sem != NULL)
-    {
-      osSemaphoreRelease(s_qma_fifo_sem);
-    }
+    if (s_qma_fifo_sem != NULL) { osSemaphoreRelease(s_qma_fifo_sem); }
   }
 }
 
