@@ -162,20 +162,20 @@ int main(void)
   }
 
   printf("[初始化] GPIO/ICACHE/UART1 初始化完成\r\n");
-  printf("[初始化] SD DET(PC13)=%u, inserted_level=%u\r\n",
-         (unsigned int)HAL_GPIO_ReadPin(SDMMC1_DET_GPIO_Port, SDMMC1_DET_Pin),
-         (unsigned int)SDMMC1_DET_INSERTED_LEVEL);
   printf("[BOOT] mode=%d (0=WCID, 1=MSC)\r\n", (int)g_boot_mode);
 
-  if (SDMMC1_IsCardDetected() != 0U)
+  /* Push-type slot: no hardware card detect. Always try init; result tells us if card is present. */
   {
-    MX_SDMMC1_SD_Init();
-    printf("[初始化] SDMMC1 初始化完成 (检测到SD卡)\r\n");
-    FatFs_SD_RunPhaseBSmokeTest();
-  }
-  else
-  {
-    printf("[初始化] 未检测到SD卡，已跳过 SDMMC1 卡初始化\r\n");
+    HAL_StatusTypeDef sd_st = MX_SDMMC1_SD_Init();
+    if (sd_st == HAL_OK)
+    {
+      printf("[初始化] SDMMC1 初始化完成 (SD卡已就绪)\r\n");
+      FatFs_SD_RunPhaseBSmokeTest();
+    }
+    else
+    {
+      printf("[初始化] 未检测到SD卡 (init err=0x%02X)\r\n", (unsigned)sd_st);
+    }
   }
 
   /* 暂时跳过KEY_ADC初始化（硬件问题待排查） */

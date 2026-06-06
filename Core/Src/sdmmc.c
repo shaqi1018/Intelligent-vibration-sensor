@@ -44,7 +44,7 @@ uint8_t SDMMC1_InitCard(void)
   return (HAL_SD_GetCardState(&hsd1) == HAL_SD_CARD_TRANSFER) ? 1U : 0U;
 }
 
-void MX_SDMMC1_SD_Init(void)
+HAL_StatusTypeDef MX_SDMMC1_SD_Init(void)
 {
   hsd1.Instance = SDMMC1;
   hsd1.Init.ClockEdge = SDMMC_CLOCK_EDGE_RISING;
@@ -53,9 +53,10 @@ void MX_SDMMC1_SD_Init(void)
   hsd1.Init.HardwareFlowControl = SDMMC_HARDWARE_FLOW_CONTROL_DISABLE;
   hsd1.Init.ClockDiv = 24U;  /* 48 MHz / (24+2) ≈ 1.85 MHz — faster identification */
 
-  if (HAL_SD_Init(&hsd1) != HAL_OK)
+  HAL_StatusTypeDef st = HAL_SD_Init(&hsd1);
+  if (st != HAL_OK)
   {
-    Error_Handler();
+    return st;  /* returns HAL_OK if card present, error code otherwise */
   }
 
   if (HAL_SD_ConfigWideBusOperation(&hsd1, SDMMC_BUS_WIDE_4B) == HAL_OK)
@@ -65,6 +66,8 @@ void MX_SDMMC1_SD_Init(void)
   /* Boost data transfer clock: 48 MHz / (1+2) = 16 MHz.
    * Only touches CLKCR, no card re-init needed. */
   MODIFY_REG(hsd1.Instance->CLKCR, SDMMC_CLKCR_CLKDIV, 1U << SDMMC_CLKCR_CLKDIV_Pos);
+
+  return HAL_OK;
 }
 
 void HAL_SD_MspInit(SD_HandleTypeDef *sdHandle)

@@ -17,7 +17,7 @@ extern "C" {
 
 extern SD_HandleTypeDef hsd1;
 
-void MX_SDMMC1_SD_Init(void);
+HAL_StatusTypeDef MX_SDMMC1_SD_Init(void);
 uint8_t SDMMC1_IsCardDetected(void);
 uint8_t SDMMC1_InitCard(void);
 
