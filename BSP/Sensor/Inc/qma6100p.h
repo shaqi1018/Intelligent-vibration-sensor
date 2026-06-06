@@ -20,7 +20,7 @@
 extern "C" {
 #endif
 
-#include "main.h"      /* for IRQn enum (EXTI15_IRQn etc.) */
+#include "main.h"      /* for IRQn enum (EXTI4_IRQn etc.) */
 #include "bsp_spi.h"
 #include <stdint.h>
 #include <stdio.h>

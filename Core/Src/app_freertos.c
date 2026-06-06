@@ -86,9 +86,9 @@ static osMutexId_t snapshot_mutex;
 static osMutexId_t frame_buffer_mutex;
 static osMutexId_t acq_ctrl_mutex;
 SemaphoreHandle_t s_sdmmc_dma_sem;  /* signaled by HAL SD DMA completion ISR */
-static osSemaphoreId_t s_lsm_fifo_sem;  /* released by EXTI1 ISR on PB1 rising edge */
-static osSemaphoreId_t s_qma_fifo_sem;  /* released by EXTI15 ISR on PB15 rising edge */
-static osSemaphoreId_t s_h3_drdy_sem;   /* released by EXTI4 ISR on PB4 rising edge */
+static osSemaphoreId_t s_lsm_fifo_sem;  /* released by EXTI0 ISR on PB0 rising edge (HW-v2) */
+static osSemaphoreId_t s_qma_fifo_sem;  /* released by EXTI4 ISR on PC4 rising edge (HW-v2) */
+static osSemaphoreId_t s_h3_drdy_sem;   /* released by EXTI1 ISR on PA1 rising edge (HW-v2) */
 static AppSensorSnapshot_t g_sensor_snapshot;
 
 typedef struct
@@ -2055,7 +2055,7 @@ void StartH3lis100dlTask(void *argument)
     }
   }
 
-  /* Polling mode. EXTI-driven mode (DRDY routed to PB4) was unreliable on
+  /* Polling mode. EXTI-driven mode (DRDY routed to PA1 on HW-v2) was unreliable on
    * this board. Polling at the configured ODR period delivers the same
    * throughput without depending on the INT pin behaviour. */
   {
