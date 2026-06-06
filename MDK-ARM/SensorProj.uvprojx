@@ -594,6 +594,16 @@
               <FilePath>../Core/Src/boot_mode.c</FilePath>
             </File>
             <File>
+              <FileName>board_io.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>../Core/Src/board_io.c</FilePath>
+            </File>
+            <File>
+              <FileName>user_ctrl.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>../Core/Src/user_ctrl.c</FilePath>
+            </File>
+            <File>
               <FileName>boot_mode.h</FileName>
               <FileType>5</FileType>
               <FilePath>../Core/Inc/boot_mode.h</FilePath>

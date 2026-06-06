@@ -36,6 +36,7 @@
 #include "boot_mode.h"
 #include "usb_pcd_dispatch.h"
 #include "usb_msc_app.h"
+#include "board_io.h"
 
 /* USER CODE END Includes */
 
@@ -113,6 +114,7 @@ int main(void)
   MX_GPIO_Init();
   MX_ICACHE_Init();
   MX_USART1_UART_Init();
+  BoardIO_Init();  /* HW-v2: latch POWER_CTL HIGH + init LED/buttons */
 
   /* Boot mode is decided by a TAMP backup register written by the previous session.
    * MSC mode = bare-metal U-disk (SD as block device), exits via USB unplug.

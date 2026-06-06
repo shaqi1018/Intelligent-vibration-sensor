@@ -45,6 +45,9 @@
 #include "usbd_conf.h"
 #include "usbd_desc.h"
 #include "usb_otg.h"
+#include "app_acq.h"
+#include "user_ctrl.h"
+#include "board_io.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -63,8 +66,6 @@
 #define UsbCdcService_IsReady()        (1U)
 #define USB_UPLOAD_PERIOD_MS     5U
 #define APP_ACQ_IDLE_DELAY_MS    10U
-#define APP_ACQ_SINK_USB         1U
-#define APP_ACQ_SINK_SD          2U
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -242,7 +243,7 @@ static float AppLsmGyrSensitivity(uint16_t range_dps);
 static const char *AppAcqSinkToString(uint8_t sink);
 static uint8_t AppAcqParseSink(const char *text, uint8_t *sink_out);
 static void AppAcqGetCopy(AppAcqControl_t *ctrl);
-static uint32_t AppAcqIsRunning(void);
+uint32_t AppAcqIsRunning(void);
 static uint32_t AppAcqCurrentPeriodMs(void);
 static uint8_t AppAcqIsUsbSinkActive(void);
 static uint8_t AppAcqIsSdSessionActive(void);
@@ -251,8 +252,8 @@ static void AppFlowStatsSetMode(uint8_t usb_active, uint8_t sd_active);
 static void AppLoggerStopSdSession(uint8_t *sd_file_open, uint32_t *rows_since_sync);
 static void AppAcqStopInternal(uint32_t now_ms);
 static void AppAcqCheckAutoStop(void);
-static uint32_t AppAcqStart(uint8_t sink, uint32_t duration_ms);
-static uint32_t AppAcqStop(void);
+uint32_t AppAcqStart(uint8_t sink, uint32_t duration_ms);
+uint32_t AppAcqStop(void);
 static uint32_t AppAcqDrainPendingStop(void);
 static void UsbCmd_AcqStatus(void);
 static void UsbCmd_AcqStart(const char *cmd);
@@ -356,6 +357,13 @@ void MX_FREERTOS_Init(void)
   printf("[RTOS] usbCdcTask created: %s\r\n", (usbCdcTaskHandle != NULL) ? "ok" : "FAILED");
   printf("[RTOS] usbUploadTask created: %s\r\n", (usbUploadTaskHandle != NULL) ? "ok" : "FAILED");
 #endif
+  /* UserCtrl task: button polling + LED + power-off */
+  static const osThreadAttr_t userCtrlTask_attributes = {
+    .name       = "userCtrlTask",
+    .priority   = (osPriority_t)osPriorityBelowNormal,
+    .stack_size = 512 * 4
+  };
+  osThreadNew(StartUserCtrlTask, NULL, &userCtrlTask_attributes);
   /* USER CODE END RTOS_THREADS */
 
   /* USER CODE BEGIN RTOS_EVENTS */
@@ -606,7 +614,7 @@ static void AppAcqGetCopy(AppAcqControl_t *ctrl)
   osMutexRelease(acq_ctrl_mutex);
 }
 
-static uint32_t AppAcqIsRunning(void)
+uint32_t AppAcqIsRunning(void)
 {
   uint32_t running = 0U;
 
@@ -787,7 +795,7 @@ static void AppApplySensorConfig(void)
   osMutexRelease(spi2_mutex);
 }
 
-static uint32_t AppAcqStart(uint8_t sink, uint32_t duration_ms)
+uint32_t AppAcqStart(uint8_t sink, uint32_t duration_ms)
 {
   uint32_t now_ms = osKernelGetTickCount();
 
@@ -829,7 +837,7 @@ static uint32_t AppAcqStart(uint8_t sink, uint32_t duration_ms)
   return 1U;
 }
 
-static uint32_t AppAcqStop(void)
+uint32_t AppAcqStop(void)
 {
   AppAcqControl_t ctrl;
 
