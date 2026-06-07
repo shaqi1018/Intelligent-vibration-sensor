@@ -18,7 +18,10 @@ void MX_I2C2_Init(void)
   HAL_GPIO_Init(GPIOB, &g);
 
   hi2c2.Instance              = I2C2;
-  hi2c2.Init.Timing           = 0x00C01F67U; /* 400kHz @ 160MHz PCLK1 */
+  /* Standard Mode 100kHz，PCLK1=160MHz：
+   * PRESC=3 → I2CCLK=40MHz(25ns)，SCLDEL=10(275ns)，SDADEL=2，
+   * SCLH=0xA0(4025ns ≥ 4000ns)，SCLL=0xFF(6400ns ≥ 4700ns)，fSCL≈96kHz */
+  hi2c2.Init.Timing           = 0x30A2A0FFU;
   hi2c2.Init.OwnAddress1      = 0U;
   hi2c2.Init.AddressingMode   = I2C_ADDRESSINGMODE_7BIT;
   hi2c2.Init.DualAddressMode  = I2C_DUALADDRESS_DISABLE;
