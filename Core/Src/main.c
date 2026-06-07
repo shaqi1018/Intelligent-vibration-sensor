@@ -37,6 +37,7 @@
 #include "usb_pcd_dispatch.h"
 #include "usb_msc_app.h"
 #include "board_io.h"
+#include "i2c.h"
 
 /* USER CODE END Includes */
 
@@ -112,6 +113,7 @@ int main(void)
 
   /* Initialize all configured peripherals */
   MX_GPIO_Init();
+  MX_I2C2_Init();
   MX_ICACHE_Init();
   MX_USART1_UART_Init();
   BoardIO_Init();  /* HW-v2: latch POWER_CTL HIGH + init LED/buttons */
