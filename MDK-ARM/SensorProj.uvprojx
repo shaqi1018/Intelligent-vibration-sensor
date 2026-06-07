@@ -409,6 +409,21 @@
               <FilePath>../Core/Src/app_freertos.c</FilePath>
             </File>
             <File>
+              <FileName>app_time.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>../Core/Src/app_time.c</FilePath>
+            </File>
+            <File>
+              <FileName>i2c.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>../Core/Src/i2c.c</FilePath>
+            </File>
+            <File>
+              <FileName>rtc_pcf85063.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>../Core/Src/rtc_pcf85063.c</FilePath>
+            </File>
+            <File>
               <FileName>icache.c</FileName>
               <FileType>1</FileType>
               <FilePath>../Core/Src/icache.c</FilePath>
