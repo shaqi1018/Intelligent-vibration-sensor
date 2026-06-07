@@ -48,6 +48,7 @@
 #include "app_acq.h"
 #include "user_ctrl.h"
 #include "board_io.h"
+#include "app_time.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -234,6 +235,7 @@ static uint32_t RingBuf_PeekContiguous(AppRingBuffer_t *rb, const uint8_t **out_
 static void     RingBuf_Consume(AppRingBuffer_t *rb, uint32_t len);
 static inline uint32_t AppU32ToDec(char *out, uint32_t v);
 static inline uint32_t AppI32ToDec(char *out, int32_t v);
+static inline uint32_t AppU64ToDec(char *out, uint64_t v);
 static void AppFramePopulateLsm6dsox(AppSensorFrame_t *frame, const LSM6DSOX_AllData_t *data, uint32_t tick_ms);
 static void AppFramePopulateH3lis100dl(AppSensorFrame_t *frame, const H3LIS100DL_Data_t *data, uint32_t tick_ms);
 static void AppFramePopulateQma6100p(AppSensorFrame_t *frame, const QMA6100P_Data_t *data, uint32_t tick_ms);
@@ -797,6 +799,8 @@ static void AppApplySensorConfig(void)
 
 uint32_t AppAcqStart(uint8_t sink, uint32_t duration_ms)
 {
+  /* 每次采集启动时重新同步 RTC 锚点 */
+  AppTime_Sync();
   uint32_t now_ms = osKernelGetTickCount();
 
   if ((sink != APP_ACQ_SINK_USB) && (sink != APP_ACQ_SINK_SD))
@@ -1028,6 +1032,16 @@ static inline uint32_t AppI32ToDec(char *out, int32_t v)
 {
   if (v < 0) { out[0] = '-'; return 1U + AppU32ToDec(out + 1, (uint32_t)(-v)); }
   return AppU32ToDec(out, (uint32_t)v);
+}
+
+static inline uint32_t AppU64ToDec(char *out, uint64_t v)
+{
+  if (v == 0ULL) { out[0] = '0'; return 1U; }
+  char tmp[20];
+  uint32_t n = 0U;
+  while (v > 0ULL) { tmp[n++] = (char)('0' + (uint8_t)(v % 10ULL)); v /= 10ULL; }
+  for (uint32_t i = 0U; i < n; i++) { out[i] = tmp[n - 1U - i]; }
+  return n;
 }
 
 /* Write float as "dd.d" (one decimal place) into out. Returns bytes written. */
@@ -1947,7 +1961,7 @@ void StartLsm6dsoxTask(void *argument)
       float xl_s = AppLsmXlSensitivity(lcfg.lsm6dsox.range);
       float g_s  = AppLsmGyrSensitivity(lcfg.lsm6dsox.range2);
 
-      char rowbuf[96];
+      char rowbuf[160];
       for (uint16_t i = 0; i < to_read; i++)
       {
         uint8_t *w = &fifo_buf[i * 7U];
@@ -1962,13 +1976,13 @@ void StartLsm6dsoxTask(void *argument)
         if (cur_has_acc && cur_has_gyr)
         {
           lsm_ts_us += s_lsm_odr_interval_us;
-          uint32_t tick_ms_i = lsm_ts_us / 1000U;
+          uint64_t epoch_us_i = AppTime_GetEpochUs();
           uint32_t fid = ++g_lsm_frame_id_counter;
 
           uint32_t off = 0;
           off += AppU32ToDec(&rowbuf[off], fid);
           rowbuf[off++] = ',';
-          off += AppU32ToDec(&rowbuf[off], tick_ms_i);
+          off += AppU64ToDec(&rowbuf[off], epoch_us_i);
           rowbuf[off++] = ',';
           off += AppF1ToDec(&rowbuf[off], (float)cur_acc[0] * xl_s);
           rowbuf[off++] = ',';
@@ -2127,12 +2141,12 @@ void StartH3lis100dlTask(void *argument)
       h3_ts_us += s_h3_odr_interval_us;
 
       uint32_t fid = ++g_h3_frame_id_counter;
-      uint32_t tick_ms_i = h3_ts_us / 1000U;
-      char rowbuf[64];
+      uint64_t epoch_us_i = AppTime_GetEpochUs();
+      char rowbuf[96];
       uint32_t off = 0;
       off += AppU32ToDec(&rowbuf[off], fid);
       rowbuf[off++] = ',';
-      off += AppU32ToDec(&rowbuf[off], tick_ms_i);
+      off += AppU64ToDec(&rowbuf[off], epoch_us_i);
       rowbuf[off++] = ',';
       off += AppF1ToDec(&rowbuf[off], data.acc_mg[0]);
       rowbuf[off++] = ',';
@@ -2311,7 +2325,7 @@ void StartQma6100pTask(void *argument)
     }
     float qma_scale = 1000.0f / (float)qma_lsb1g;
 
-    char rowbuf[56];
+    char rowbuf[96];
     for (uint8_t i = 0; i < fifo_level; i++)
     {
       uint8_t *p = &fifo_buf[i * 6U];
@@ -2320,13 +2334,13 @@ void StartQma6100pTask(void *argument)
       int16_t rz = (int16_t)(((int16_t)((uint16_t)p[5] << 8 | p[4])) >> 2);
 
       qma_ts_us += s_qma_odr_interval_us;
-      uint32_t tick_ms_i = qma_ts_us / 1000U;
+      uint64_t epoch_us_i = AppTime_GetEpochUs();
       uint32_t fid = ++g_qma_frame_id_counter;
 
       uint32_t off = 0;
       off += AppU32ToDec(&rowbuf[off], fid);
       rowbuf[off++] = ',';
-      off += AppU32ToDec(&rowbuf[off], tick_ms_i);
+      off += AppU64ToDec(&rowbuf[off], epoch_us_i);
       rowbuf[off++] = ',';
       off += AppF1ToDec(&rowbuf[off], (float)rx * qma_scale);
       rowbuf[off++] = ',';
