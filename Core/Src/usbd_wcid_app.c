@@ -6,10 +6,13 @@
 static USBD_HandleTypeDef *s_pdev;
 static UsbWcidApp_CmdHandler s_cmd_handler;
 
-/* Static double-buffers: 3 channels × (WCID_TX_HALF_SIZE × 2) = 1536 bytes. */
-static uint8_t s_tx_buf_lsm[WCID_TX_HALF_SIZE * 2];
-static uint8_t s_tx_buf_h3[WCID_TX_HALF_SIZE * 2];
-static uint8_t s_tx_buf_qma[WCID_TX_HALF_SIZE * 2];
+/* 静态双缓冲：3 通道 × (WCID_TX_HALF_SIZE × 2 + 2)。
+ * 多出的 "+2" 用于 tag 通道（QMA = N_IN_ENDPOINTS-1）的每半通道标记字节：
+ * 中间件以 (size*2+2) 取模索引缓冲，若只声明 size*2 会越界 2 字节。
+ * 为安全起见 LSM/H3（非 tag 通道）也统一声明为 size*2+2。 */
+static uint8_t s_tx_buf_lsm[WCID_TX_HALF_SIZE * 2 + 2];
+static uint8_t s_tx_buf_h3[WCID_TX_HALF_SIZE * 2 + 2];
+static uint8_t s_tx_buf_qma[WCID_TX_HALF_SIZE * 2 + 2];
 static uint8_t s_rx_buf[64U]; /* OUT EP1 command receive buffer */
 
 /* WCID class interface callbacks — minimal stubs. */
@@ -55,8 +58,32 @@ void UsbWcidApp_Init(USBD_HandleTypeDef *pdev)
   printf("[WCID-APP] RegisterInterface done (buffers set in WcidApp_Init callback)\r\n");
 }
 
-void UsbWcidApp_StartStreaming(void)
+/* 各通道 CSV 行最大长度（含 CRLF，字节），用于按 ODR 计算半缓冲大小，略偏大以留余量。 */
+#define WCID_ROW_BYTES_LSM  64U  /* 8 字段：id,tick,3轴加速,3轴陀螺 */
+#define WCID_ROW_BYTES_H3   48U  /* 5 字段：id,tick,3轴加速 */
+#define WCID_ROW_BYTES_QMA  48U  /* 5 字段：id,tick,3轴加速 */
+
+/* 参考 DATALOG1 的大小计算：每半 ≈ 500ms 数据量，上限 WCID_TX_HALF_SIZE，
+ * 下限保证至少能放一行数据 + 余量。 */
+static uint16_t WcidComputeHalfSize(uint32_t odr_hz, uint16_t bytes_per_row)
 {
+  uint32_t sz = (odr_hz * (uint32_t)bytes_per_row) / 2U;
+  if (sz > WCID_TX_HALF_SIZE) { sz = WCID_TX_HALF_SIZE; }
+  if (sz < (uint32_t)(bytes_per_row + 8U)) { sz = (uint32_t)bytes_per_row + 8U; }
+  return (uint16_t)sz;
+}
+
+void UsbWcidApp_StartStreaming(uint32_t lsm_odr_hz, uint32_t h3_odr_hz, uint32_t qma_odr_hz)
+{
+  /* 启动前按当前 ODR 重新设置各通道半缓冲大小。
+   * 静态缓冲已按 WCID_TX_HALF_SIZE 上限分配，所有计算结果都在范围内。 */
+  USBD_WCID_STREAMING_SetTxDataBuffer(s_pdev, WCID_CH_LSM_IMU,   s_tx_buf_lsm,
+                                      WcidComputeHalfSize(lsm_odr_hz, WCID_ROW_BYTES_LSM));
+  USBD_WCID_STREAMING_SetTxDataBuffer(s_pdev, WCID_CH_H3_ACCEL,  s_tx_buf_h3,
+                                      WcidComputeHalfSize(h3_odr_hz, WCID_ROW_BYTES_H3));
+  USBD_WCID_STREAMING_SetTxDataBuffer(s_pdev, WCID_CH_QMA_ACCEL, s_tx_buf_qma,
+                                      WcidComputeHalfSize(qma_odr_hz, WCID_ROW_BYTES_QMA));
+
   USBD_WCID_STREAMING_CleanTxDataBuffer(s_pdev, WCID_CH_LSM_IMU);
   USBD_WCID_STREAMING_CleanTxDataBuffer(s_pdev, WCID_CH_H3_ACCEL);
   USBD_WCID_STREAMING_CleanTxDataBuffer(s_pdev, WCID_CH_QMA_ACCEL);

@@ -828,10 +828,17 @@ uint32_t AppAcqStart(uint8_t sink, uint32_t duration_ms)
   AppFlowStatsSetMode((uint8_t)((sink == APP_ACQ_SINK_USB) ? 1U : 0U),
                       (uint8_t)((sink == APP_ACQ_SINK_SD) ? 1U : 0U));
 
-  /* WCID Bulk: start USB streaming when sink is USB. */
+  /* WCID Bulk: start USB streaming when sink is USB.
+   * Pass per-channel ODR so each USB half-buffer is sized to its data rate
+   * (high-ODR LSM needs a big half to avoid overrun; low-ODR H3 needs a small
+   * half so it still fills/flushes within the capture). */
   if (g_boot_mode == BOOT_MODE_WCID_BULK && sink == APP_ACQ_SINK_USB)
   {
-    UsbWcidApp_StartStreaming();
+    AcqConfig_t scfg;
+    AcqConfig_GetCopy(&scfg);
+    uint32_t h3_odr = (scfg.h3lis100dl.odr_hz > 0U) ? (uint32_t)scfg.h3lis100dl.odr_hz : 400U;
+    UsbWcidApp_StartStreaming((uint32_t)scfg.lsm6dsox.odr_hz, h3_odr,
+                              (uint32_t)scfg.qma6100p.odr_hz);
   }
 
   return 1U;
@@ -1027,9 +1034,17 @@ static inline uint32_t AppI32ToDec(char *out, int32_t v)
 static inline uint32_t AppF1ToDec(char *out, float v)
 {
   int32_t scaled = (int32_t)(v >= 0.0f ? v * 10.0f + 0.5f : v * 10.0f - 0.5f);
-  uint32_t n = AppI32ToDec(out, scaled / 10);
-  out[n++] = '.';
+  int32_t int_part = scaled / 10;
   uint32_t frac = (uint32_t)(scaled < 0 ? -(scaled % 10) : scaled % 10);
+  uint32_t n;
+  if (int_part == 0 && scaled < 0) {
+    /* scaled in [-9,-1]: v in (-0.9,-0.1); integer division truncates to 0,
+     * losing the sign. Write "-0.X" directly. */
+    out[0] = '-'; out[1] = '0'; out[2] = '.'; out[3] = (char)('0' + frac);
+    return 4U;
+  }
+  n = AppI32ToDec(out, int_part);
+  out[n++] = '.';
   out[n++] = (char)('0' + frac);
   return n;
 }
@@ -1509,24 +1524,26 @@ static void UsbCmd_Process(const char *cmd)
 }
 
 
-/* Command callback for WCID Bulk mode — called from USB class driver Receive. */
+/* Deferred command state: ISR writes here, WCID task reads in task context. */
+static volatile uint8_t s_wcid_cmd_pending;
+static char             s_wcid_cmd_buf[64];
+
+/* Command callback for WCID Bulk mode — called from USB class driver Receive (ISR context).
+ * Must NOT call any RTOS blocking function. Only copy + flag; task loop processes it. */
 static void WcidCmdCallback(const char *cmd, uint32_t len)
 {
-  /* Commands arrive as raw bytes from the OUT endpoint.
-   * Strip trailing \r\n and process. */
-  char buf[64];
-  uint32_t n = (len < sizeof(buf) - 1U) ? len : sizeof(buf) - 1U;
-  memcpy(buf, cmd, n);
-  buf[n] = '\0';
-  /* Trim trailing whitespace */
-  while (n > 0U && (buf[n - 1U] == '\r' || buf[n - 1U] == '\n' || buf[n - 1U] == ' '))
+  uint32_t n = (len < sizeof(s_wcid_cmd_buf) - 1U) ? len : sizeof(s_wcid_cmd_buf) - 1U;
+  memcpy(s_wcid_cmd_buf, cmd, n);
+  s_wcid_cmd_buf[n] = '\0';
+  while (n > 0U && (s_wcid_cmd_buf[n - 1U] == '\r' ||
+                    s_wcid_cmd_buf[n - 1U] == '\n' ||
+                    s_wcid_cmd_buf[n - 1U] == ' '))
   {
-    buf[--n] = '\0';
+    s_wcid_cmd_buf[--n] = '\0';
   }
   if (n > 0U)
   {
-    printf("[WCID] cmd: %s\r\n", buf);
-    UsbCmd_Process(buf);
+    s_wcid_cmd_pending = 1U;
   }
 }
 
@@ -1569,10 +1586,20 @@ void StartUsbCdcTask(void *argument)
     }
     else { printf("[WCID] USBD_Init FAIL\r\n"); }
 
-    /* WCID mode: commands arrive via Receive callback, no polling needed.
-     * Sensor tasks write directly via UsbWcidApp_SendCsv.
-     * Just idle here. */
-    for (;;) { osDelay(1000U); }
+    /* WCID mode: WcidCmdCallback (ISR) sets s_wcid_cmd_pending.
+     * Process commands here in task context where RTOS mutexes are safe. */
+    for (;;)
+    {
+      osDelay(20U);
+      if (s_wcid_cmd_pending != 0U)
+      {
+        char local_cmd[64];
+        s_wcid_cmd_pending = 0U;
+        memcpy(local_cmd, s_wcid_cmd_buf, sizeof(local_cmd));
+        printf("[WCID] cmd: %s\r\n", local_cmd);
+        UsbCmd_Process(local_cmd);
+      }
+    }
   }
 }
 
@@ -1914,7 +1941,13 @@ void StartLsm6dsoxTask(void *argument)
       }
       cur_has_acc = cur_has_gyr = 0;
 
-      char rowbuf[80];
+      /* Fetch sensitivity once per FIFO batch — avoids 6000+/s mutex acquires. */
+      AcqConfig_t lcfg;
+      AcqConfig_GetCopy(&lcfg);
+      float xl_s = AppLsmXlSensitivity(lcfg.lsm6dsox.range);
+      float g_s  = AppLsmGyrSensitivity(lcfg.lsm6dsox.range2);
+
+      char rowbuf[96];
       for (uint16_t i = 0; i < to_read; i++)
       {
         uint8_t *w = &fifo_buf[i * 7U];
@@ -1931,11 +1964,6 @@ void StartLsm6dsoxTask(void *argument)
           lsm_ts_us += s_lsm_odr_interval_us;
           uint32_t tick_ms_i = lsm_ts_us / 1000U;
           uint32_t fid = ++g_lsm_frame_id_counter;
-
-          AcqConfig_t lcfg;
-          AcqConfig_GetCopy(&lcfg);
-          float xl_s = AppLsmXlSensitivity(lcfg.lsm6dsox.range);
-          float g_s  = AppLsmGyrSensitivity(lcfg.lsm6dsox.range2);
 
           uint32_t off = 0;
           off += AppU32ToDec(&rowbuf[off], fid);
@@ -2100,7 +2128,7 @@ void StartH3lis100dlTask(void *argument)
 
       uint32_t fid = ++g_h3_frame_id_counter;
       uint32_t tick_ms_i = h3_ts_us / 1000U;
-      char rowbuf[48];
+      char rowbuf[64];
       uint32_t off = 0;
       off += AppU32ToDec(&rowbuf[off], fid);
       rowbuf[off++] = ',';
@@ -2429,9 +2457,10 @@ void StartLoggerTask(void *argument)
       }
       else
       {
-        printf("[Logger] SD start failed: %s (%d)\r\n",
+        printf("[Logger] SD start failed: %s (%d)%s\r\n",
                FatFs_SD_ResultToString(result),
-               (int)result);
+               (int)result,
+               (result == FR_NOT_READY) ? " — SD card must be inserted before power-on" : "");
         AppFlowStatsSetMode(0U, 0U);
         osDelay(LOGGER_RETRY_DELAY_MS);
         continue;

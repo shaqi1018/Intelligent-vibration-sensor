@@ -596,6 +596,7 @@ static uint8_t  USBD_WCID_STREAMING_SOF(USBD_HandleTypeDef *pdev)
   uint8_t **TxBuffer = ((USBD_WCID_STREAMING_HandleTypeDef *)(pdev->pClassData))->TxBuffer;
   uint16_t *USB_DataSizePerEp = ((USBD_WCID_STREAMING_HandleTypeDef *)(pdev->pClassData))->USB_DataSizePerEp;
   __IO uint8_t *lastPacketSent = ((USBD_WCID_STREAMING_HandleTypeDef *)(pdev->pClassData))->lastPacketSent;
+  uint32_t *TxBuffIdx = ((USBD_WCID_STREAMING_HandleTypeDef *)(pdev->pClassData))->TxBuffIdx;
   uint8_t *status = &(((USBD_WCID_STREAMING_HandleTypeDef *)(pdev->pClassData))->streamingStatus);
 
   if (*status == STREAMING_STATUS_STARTED)
@@ -666,25 +667,72 @@ static uint8_t  USBD_WCID_STREAMING_SOF(USBD_HandleTypeDef *pdev)
   }
   else if (*status == STREAMING_STATUS_STOPPING)
   {
+    /* Flush the final partial half on stop.
+     *
+     * The original logic blindly re-transmitted the whole 2nd half buffer for
+     * every channel. By stop time lastPacketSent[] has been reset to 0 by the
+     * normal streaming path, so ALL channels re-sent their 2nd half — which
+     * usually still holds already-sent data, producing a duplicate block with
+     * rewound frame_ids at the end of every capture.
+     *
+     * Instead, send only the bytes the producer has written since the last
+     * half boundary, using the producer write index TxBuffIdx. Buffer is two
+     * halves [0,h) and [h,2h) (2h == H == USB_DataSizePerEp); a half completes
+     * when idx hits h (TxBuffStatus=1) or wraps to 0 (TxBuffStatus=2). The new
+     * (unsent) data is [0,idx) while filling the 1st half, or [h,idx) while
+     * filling the 2nd. A completed-but-not-yet-sent half (idx at boundary with
+     * status still set) is flushed whole. No duplicate, no full-half loss. */
     uint32_t sum = 0;
 
     for (i = 0; i < N_IN_ENDPOINTS; i++)
     {
       if (lastPacketSent[i] != 1U)
       {
-        lastPacketSent[i] = 1;
-        (void)USBD_WCID_STREAMING_SetTxBuffer(pdev, (uint8_t *) & (TxBuffer[i][(USB_DataSizePerEp[i] / 2U)]),
-                                              (USB_DataSizePerEp[i] / 2U));
-        if (USBD_WCID_STREAMING_TransmitPacket(pdev, (i + 1U) | 0x80U) == USBD_OK)
+        uint16_t H   = USB_DataSizePerEp[i];
+        uint16_t h   = H / 2U;
+        uint32_t idx = TxBuffIdx[i];
+        uint8_t  st  = TxBuffStatus[i];
+        uint16_t start = 0U;
+        uint16_t len   = 0U;
+
+        if ((idx > 0U) && (idx < h))
         {
-          TxBuffStatus[i] = 0;
+          start = 0U;  len = (uint16_t)idx;             /* partial 1st half */
+        }
+        else if ((idx > h) && (idx < H))
+        {
+          start = h;   len = (uint16_t)(idx - h);       /* partial 2nd half */
+        }
+        else if (idx == h)
+        {
+          if (st == 1U) { start = 0U; len = h; }        /* full 1st half, unsent */
+        }
+        else /* idx == 0 */
+        {
+          if (st == 2U) { start = h;  len = h; }        /* full 2nd half, unsent */
+        }
+
+        if (len == 0U)
+        {
+          lastPacketSent[i] = 1;                        /* nothing to flush */
+        }
+        else
+        {
+          (void)USBD_WCID_STREAMING_SetTxBuffer(pdev, (uint8_t *) & (TxBuffer[i][start]), len);
+          if (USBD_WCID_STREAMING_TransmitPacket(pdev, (i + 1U) | 0x80U) == USBD_OK)
+          {
+            TxBuffStatus[i] = 0;
+            lastPacketSent[i] = 1;
+          }
+          /* else BUSY (transfer still in flight): retry on next SOF */
         }
       }
       sum += lastPacketSent[i];
-      if (sum == N_IN_ENDPOINTS)
-      {
-        *status = STREAMING_STATUS_IDLE;
-      }
+    }
+
+    if (sum == N_IN_ENDPOINTS)
+    {
+      *status = STREAMING_STATUS_IDLE;
     }
   }
   return 0;     /* USBD_OK */
