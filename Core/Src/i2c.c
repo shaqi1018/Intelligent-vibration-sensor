@@ -2,17 +2,18 @@
 
 I2C_HandleTypeDef hi2c2;
 
-/* PB10 = I2C2_SCL (AF4), PB11 = I2C2_SDA (AF4)
- * 400kHz 快速模式，外部已有上拉，不启用内部上拉 */
+/* PB13 = I2C2_SCL (AF4), PB14 = I2C2_SDA (AF4) —— 对应原理图 MCU pin 34/35。
+ * 注意：PB10 已被 SPI2_SCK 占用（见 bsp_spi.c），不可用于 I2C2。
+ * 启用内部上拉作为保险（若 PCB 已有外部上拉，并联无害）。 */
 void MX_I2C2_Init(void)
 {
   __HAL_RCC_I2C2_CLK_ENABLE();
   __HAL_RCC_GPIOB_CLK_ENABLE();
 
   GPIO_InitTypeDef g = {0};
-  g.Pin       = GPIO_PIN_10 | GPIO_PIN_11;
+  g.Pin       = GPIO_PIN_13 | GPIO_PIN_14;
   g.Mode      = GPIO_MODE_AF_OD;
-  g.Pull      = GPIO_NOPULL;
+  g.Pull      = GPIO_PULLUP;
   g.Speed     = GPIO_SPEED_FREQ_LOW;
   g.Alternate = GPIO_AF4_I2C2;
   HAL_GPIO_Init(GPIOB, &g);
