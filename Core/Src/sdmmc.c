@@ -13,7 +13,11 @@ SD_HandleTypeDef hsd1;
 
 uint8_t SDMMC1_IsCardDetected(void)
 {
-  return (HAL_GPIO_ReadPin(SDMMC1_DET_GPIO_Port, SDMMC1_DET_Pin) == SDMMC1_DET_INSERTED_LEVEL) ? 1U : 0U;
+  /* HW-v2 push-type slot (TF-102-15) has no hardware detect pin.
+   * PC13 is pulled high, so the GPIO read always returns "not inserted".
+   * Return 1 unconditionally; actual card presence is determined by
+   * MX_SDMMC1_SD_Init() / HAL_SD_GetCardState() succeeding or failing. */
+  return 1U;
 }
 
 uint8_t SDMMC1_InitCard(void)

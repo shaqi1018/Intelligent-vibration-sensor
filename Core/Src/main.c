@@ -128,12 +128,12 @@ int main(void)
 
   if (g_boot_mode == BOOT_MODE_USB_MSC)
   {
-    if (SDMMC1_IsCardDetected() == 0U)
+    /* No hardware detect pin on HW-v2. Try init; failure = no card. */
+    if (MX_SDMMC1_SD_Init() != HAL_OK)
     {
       BootMode_Write(BOOT_MODE_DATA_LOG);
       NVIC_SystemReset();
     }
-    MX_SDMMC1_SD_Init();
 
     MX_USB_OTG_FS_PCD_Init();
 
