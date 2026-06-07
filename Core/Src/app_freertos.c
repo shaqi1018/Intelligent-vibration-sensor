@@ -49,6 +49,7 @@
 #include "user_ctrl.h"
 #include "board_io.h"
 #include "app_time.h"
+#include "rtc_pcf85063.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -1530,6 +1531,42 @@ static void UsbCmd_Process(const char *cmd)
     printf("BootMode flag written, readback=%d, resetting...\r\n", (int)verify);
     osDelay(200U);
     NVIC_SystemReset();
+  }
+  else if (strncmp(cmd, "set_time ", 9U) == 0)
+  {
+    /* 格式: set_time YYYY-MM-DDTHH:MM:SS（从偏移 9 开始，共 19 字符）
+     * 位置：0123456789012345678
+     *       YYYY-MM-DDTHH:MM:SS
+     * p[0..3]=年, p[5..6]=月, p[8..9]=日, p[11..12]=时, p[14..15]=分, p[17..18]=秒 */
+    const char *p = cmd + 9U;
+    if (strlen(p) < 19U)
+    {
+      printf("ERR set_time: parse fail\r\n");
+    }
+    else
+    {
+      uint32_t yr = (uint32_t)(p[2] - '0') * 10U + (uint32_t)(p[3] - '0'); /* 年后两位 */
+      uint32_t mo = (uint32_t)(p[5] - '0') * 10U + (uint32_t)(p[6] - '0');
+      uint32_t dy = (uint32_t)(p[8] - '0') * 10U + (uint32_t)(p[9] - '0');
+      uint32_t hr = (uint32_t)(p[11] - '0') * 10U + (uint32_t)(p[12] - '0');
+      uint32_t mn = (uint32_t)(p[14] - '0') * 10U + (uint32_t)(p[15] - '0');
+      uint32_t sc = (uint32_t)(p[17] - '0') * 10U + (uint32_t)(p[18] - '0');
+      if (mo >= 1U && mo <= 12U && dy >= 1U && dy <= 31U &&
+          hr <= 23U && mn <= 59U && sc <= 59U)
+      {
+        Pcf85063_Time_t t;
+        t.year = (uint8_t)yr;  t.month  = (uint8_t)mo; t.day    = (uint8_t)dy;
+        t.hour = (uint8_t)hr;  t.minute = (uint8_t)mn; t.second = (uint8_t)sc;
+        if (Pcf85063_SetTime(&t) == PCF85063_OK)
+        {
+          AppTime_Sync();
+          printf("OK set_time %04u-%02u-%02uT%02u:%02u:%02u\r\n",
+                 2000U + yr, mo, dy, hr, mn, sc);
+        }
+        else { printf("ERR set_time: I2C write fail\r\n"); }
+      }
+      else { printf("ERR set_time: parse fail\r\n"); }
+    }
   }
   else
   {
