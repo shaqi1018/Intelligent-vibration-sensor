@@ -1330,7 +1330,7 @@ static void UsbCmd_Ping(void)
 
 static void UsbCmd_Help(void)
 {
-  const char *msg = "Commands: ping, help, status, acq_start, acq_stop, s <lsm|h3|qma> <odr|range|en> <val>, boot_msc\r\n";
+  const char *msg = "Commands: ping, help, status, acq_start, acq_stop, s <lsm|h3|qma> <odr|range|en> <val>, set_time YYYY-MM-DDTHH:MM:SS, boot_msc\r\n";
   UsbCdcService_Write((const uint8_t *)msg, strlen(msg));
 }
 
@@ -1532,7 +1532,7 @@ static void UsbCmd_Process(const char *cmd)
     const char *p = cmd + 9U;
     if (strlen(p) < 19U)
     {
-      printf("ERR set_time: parse fail\r\n");
+      UsbCdcService_Write((const uint8_t *)"ERR set_time: parse fail\r\n", 26U);
     }
     else
     {
@@ -1551,17 +1551,19 @@ static void UsbCmd_Process(const char *cmd)
         if (Pcf85063_SetTime(&t) == PCF85063_OK)
         {
           AppTime_Sync();
-          printf("OK set_time %04u-%02u-%02uT%02u:%02u:%02u\r\n",
-                 2000U + yr, mo, dy, hr, mn, sc);
+          char _line[48];
+          int _n = snprintf(_line, sizeof(_line), "OK set_time %04u-%02u-%02uT%02u:%02u:%02u\r\n",
+                            2000U + yr, mo, dy, hr, mn, sc);
+          UsbCdcService_Write((const uint8_t *)_line, (uint32_t)_n);
         }
-        else { printf("ERR set_time: I2C write fail\r\n"); }
+        else { UsbCdcService_Write((const uint8_t *)"ERR set_time: I2C fail\r\n", 24U); }
       }
-      else { printf("ERR set_time: parse fail\r\n"); }
+      else { UsbCdcService_Write((const uint8_t *)"ERR set_time: parse fail\r\n", 26U); }
     }
   }
   else
   {
-    printf("Unknown cmd\r\n");
+    UsbCdcService_Write((const uint8_t *)"ERR: unknown cmd\r\n", 18U);
   }
 }
 

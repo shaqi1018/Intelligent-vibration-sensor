@@ -32,15 +32,16 @@ USBD_StatusTypeDef USBD_LL_Init(USBD_HandleTypeDef *pdev)
    * Total USB OTG FS FIFO = 320 words (1280 bytes). */
   if (g_boot_mode == BOOT_MODE_WCID_BULK)
   {
-    /* WCID Bulk: 3 IN + 1 OUT endpoints.
-     * RX = 64 words (256B) — matches DATALOG1; 32 words starves EP0 control.
-     * TX0 = EP0, TX1-3 = EP1-3 IN (224B each = 56 words).
-     * Total = 64+64+56*3 = 296 <= 320 words available. */
+    /* WCID Bulk: 4 IN + 1 OUT endpoints.
+     * RX = 64 words (256B), TX0 = EP0, TX1-3 = sensor IN (56 words each),
+     * TX4 = EP4 cmd response (16 words = 64B, one FS packet).
+     * Total = 64+64+56*3+16 = 312 <= 320 words available. */
     HAL_PCDEx_SetRxFiFo(&hpcd_USB_OTG_FS, 0x40U);    /* 64 words = 256 bytes */
     HAL_PCDEx_SetTxFiFo(&hpcd_USB_OTG_FS, 0U, 0x40U); /* 64 words = 256 bytes EP0 */
     HAL_PCDEx_SetTxFiFo(&hpcd_USB_OTG_FS, 1U, 0x38U); /* 56 words = 224 bytes EP1 IN */
     HAL_PCDEx_SetTxFiFo(&hpcd_USB_OTG_FS, 2U, 0x38U); /* 56 words = 224 bytes EP2 IN */
     HAL_PCDEx_SetTxFiFo(&hpcd_USB_OTG_FS, 3U, 0x38U); /* 56 words = 224 bytes EP3 IN */
+    HAL_PCDEx_SetTxFiFo(&hpcd_USB_OTG_FS, 4U, 0x10U); /* 16 words =  64 bytes EP4 IN (cmd resp) */
   }
   else
   {
