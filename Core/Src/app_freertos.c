@@ -61,7 +61,6 @@
 /* USER CODE BEGIN PD */
 #define SAMPLE_PERIOD_MS         APP_SENSOR_SAMPLE_PERIOD_MS
 #define LOGGER_RETRY_DELAY_MS    1000U
-#define LOGGER_SYNC_EVERY_ROWS   32U
 
 /* CDC removed — redirect UsbCdcService calls to printf (UART1) */
 #define UsbCdcService_Write(buf, len)  printf("%.*s", (int)(len), (const char *)(buf))
@@ -86,6 +85,7 @@
 
 static osMutexId_t spi2_mutex;
 static osMutexId_t snapshot_mutex;
+static volatile uint8_t s_usb_done_armed;
 static osMutexId_t frame_buffer_mutex;
 static osMutexId_t acq_ctrl_mutex;
 SemaphoreHandle_t s_sdmmc_dma_sem;  /* signaled by HAL SD DMA completion ISR */
@@ -99,6 +99,7 @@ typedef struct
   uint8_t running;
   uint8_t sink;
   uint8_t stop_pending;
+  uint8_t timer_armed;   /* 0=计时未开始，1=计时中；SD session 由 logger 在 SD 就绪后 arm */
   uint32_t requested_hz;
   uint32_t period_ms;
   uint32_t effective_hz;
@@ -255,6 +256,7 @@ static void AppFlowStatsSetMode(uint8_t usb_active, uint8_t sd_active);
 static void AppLoggerStopSdSession(uint8_t *sd_file_open, uint32_t *rows_since_sync);
 static void AppAcqStopInternal(uint32_t now_ms);
 static void AppAcqCheckAutoStop(void);
+static void AppAcqResetSessionTimer(void);
 uint32_t AppAcqStart(uint8_t sink, uint32_t duration_ms);
 uint32_t AppAcqStop(void);
 static uint32_t AppAcqDrainPendingStop(void);
@@ -735,7 +737,7 @@ static void AppAcqCheckAutoStop(void)
   uint32_t now_ms = osKernelGetTickCount();
 
   AppAcqGetCopy(&ctrl);
-  if ((ctrl.running == 0U) || (ctrl.duration_ms == 0U))
+  if ((ctrl.running == 0U) || (ctrl.duration_ms == 0U) || (ctrl.timer_armed == 0U))
   {
     return;
   }
@@ -745,6 +747,25 @@ static void AppAcqCheckAutoStop(void)
     AppAcqStopInternal(now_ms);
   }
 }
+/* Arm the session countdown from now — called when SD files are open and data
+ * actually starts flowing, so duration_ms is measured from SD-ready, not from
+ * the acq_start command (which includes SD init overhead). Safe to call even
+ * if another task already triggered stop_pending: we re-arm unconditionally
+ * so the logger gets the full duration for actual data capture. */
+static void AppAcqResetSessionTimer(void)
+{
+  if (acq_ctrl_mutex == NULL) { return; }
+  osMutexAcquire(acq_ctrl_mutex, osWaitForever);
+  if (g_acq_ctrl.duration_ms != 0U)
+  {
+    g_acq_ctrl.running       = 1U;
+    g_acq_ctrl.stop_pending  = 0U;
+    g_acq_ctrl.timer_armed   = 1U;
+    g_acq_ctrl.start_tick_ms = osKernelGetTickCount();
+  }
+  osMutexRelease(acq_ctrl_mutex);
+}
+
 /* Apply current AcqConfig to all three sensors. Called on each acq_start so
  * set_sensor changes take effect without restarting the tasks. */
 static void AppApplySensorConfig(void)
@@ -828,6 +849,9 @@ uint32_t AppAcqStart(uint8_t sink, uint32_t duration_ms)
   g_acq_ctrl.duration_ms = duration_ms;
   g_acq_ctrl.start_tick_ms = now_ms;
   g_acq_ctrl.stop_pending = 0U;
+  /* SD session: timer starts only after SD files are open (logger arms it).
+   * USB session: no init delay, arm immediately. */
+  g_acq_ctrl.timer_armed = (sink == APP_ACQ_SINK_USB) ? 1U : 0U;
   osMutexRelease(acq_ctrl_mutex);
 
   AppFlowStatsSetMode((uint8_t)((sink == APP_ACQ_SINK_USB) ? 1U : 0U),
@@ -895,12 +919,20 @@ static void UsbCmd_AcqStatus(void)
     } \
   } while (0)
 
-  USB_ACQ_LINE("ACQ state=%s sink=%s duration_ms=%lu elapsed_ms=%lu remaining_ms=%lu\r\n",
-               (ctrl.running != 0U) ? "running" : "stopped",
-               AppAcqSinkToString(ctrl.sink),
-               (unsigned long)ctrl.duration_ms,
-               (unsigned long)elapsed_ms,
-               (unsigned long)remaining_ms);
+  if (ctrl.running != 0U)
+  {
+    if (ctrl.duration_ms == 0U)
+      USB_ACQ_LINE("running  sink=%s\r\n", AppAcqSinkToString(ctrl.sink));
+    else
+      USB_ACQ_LINE("running  sink=%s  elapsed=%lums  remaining=%lums\r\n",
+                   AppAcqSinkToString(ctrl.sink),
+                   (unsigned long)elapsed_ms,
+                   (unsigned long)remaining_ms);
+  }
+  else
+  {
+    USB_ACQ_LINE("stopped\r\n");
+  }
 
 #undef USB_ACQ_LINE
 }
@@ -910,8 +942,6 @@ static void UsbCmd_AcqStart(const char *cmd)
   char sink_text[8];
   unsigned long duration_ms = 0UL;
   uint8_t sink = 0U;
-  char line[128];
-  int len;
 
   int n = sscanf(cmd, "acq_start %7s %lu", sink_text, &duration_ms);
   if (n < 1)
@@ -935,22 +965,19 @@ static void UsbCmd_AcqStart(const char *cmd)
     return;
   }
 
-  len = snprintf(line, sizeof(line),
-                 "OK acq_start sink=%s duration_ms=%lu\r\n",
-                 AppAcqSinkToString(sink),
-                 duration_ms);
-  if ((len > 0) && ((uint32_t)len < sizeof(line)))
-  {
-    UsbCdcService_Write((const uint8_t *)line, (uint32_t)len);
-  }
+  if ((sink == APP_ACQ_SINK_USB) && (duration_ms > 0UL))
+    s_usb_done_armed = 1U;
+
+  UsbCdcService_Write((const uint8_t *)"start\r\n", 7U);
 }
 
 static void UsbCmd_AcqStop(void)
 {
   const char *msg;
 
-  AppAcqCheckAutoStop();
-  msg = (AppAcqStop() != 0U) ? "OK acq_stop\r\n" : "ACQ already stopped\r\n";
+  AppAcqStop();
+  s_usb_done_armed = 0U;
+  msg = "stop\r\n";
   UsbCdcService_Write((const uint8_t *)msg, strlen(msg));
 }
 
@@ -1373,10 +1400,7 @@ static void UsbCmd_SetSensor(const char *cmd)
     }
     if (AcqConfig_Set(&cfg) == 0)
     {
-      if (snapped != (uint16_t)val)
-        len = snprintf(line, sizeof(line), "OK %s odr=%lu->%u\r\n", sensor, val, (unsigned)snapped);
-      else
-        len = snprintf(line, sizeof(line), "OK %s odr=%lu\r\n", sensor, val);
+      len = snprintf(line, sizeof(line), "OK %s odr=%u\r\n", sensor, (unsigned)snapped);
       updated = 1;
     }
     else
@@ -1431,79 +1455,30 @@ static void UsbCmd_SetSensor(const char *cmd)
 
 static void UsbCmd_Status(void)
 {
-  char line[128];
+  char line[96];
   int len;
-  uint32_t tick = osKernelGetTickCount();
-  AppFlowStats_t stats;
-  AppAcqControl_t acq;
-  uint32_t elapsed_ms = 0U;
-  uint32_t remaining_ms = 0U;
+  AcqConfig_t cfg;
+  AcqConfig_GetCopy(&cfg);
 
-  AppAcqCheckAutoStop();
-
-  if (snapshot_mutex != NULL)
-  {
-    osMutexAcquire(snapshot_mutex, osWaitForever);
-    stats = g_flow_stats;
-    osMutexRelease(snapshot_mutex);
-  }
-  else
-  {
-    memset(&stats, 0, sizeof(stats));
-  }
-
-  AppAcqGetCopy(&acq);
-  if (acq.start_tick_ms != 0U)
-  {
-    uint32_t end_tick = (acq.running != 0U) ? tick : acq.last_stop_tick_ms;
-    elapsed_ms = end_tick - acq.start_tick_ms;
-  }
-  if ((acq.running != 0U) && (acq.duration_ms > elapsed_ms))
-  {
-    remaining_ms = acq.duration_ms - elapsed_ms;
-  }
-
-#define USB_STATUS_LINE(fmt, ...) \
+#define STATUS_LINE(fmt, ...) \
   do { \
     len = snprintf(line, sizeof(line), fmt, ##__VA_ARGS__); \
-    if (len > 0 && (uint32_t)len < sizeof(line)) { \
+    if (len > 0 && (uint32_t)len < sizeof(line)) \
       UsbCdcService_Write((const uint8_t *)line, (uint32_t)len); \
-    } \
   } while (0)
 
-  USB_STATUS_LINE("tick=%lu heap=%lu\r\n",
-                  (unsigned long)tick,
-                  (unsigned long)xPortGetFreeHeapSize());
-  USB_STATUS_LINE("flow frames=%lu write_fail=%lu stale=%lu mixed=%lu coherent=%lu\r\n",
-                  (unsigned long)stats.logger_rows,
-                  (unsigned long)stats.logger_write_failures,
-                  (unsigned long)stats.stale_rows,
-                  (unsigned long)stats.mixed_rows,
-                  (unsigned long)stats.coherent_rows);
-  USB_STATUS_LINE("sensor updates lsm=%lu h3=%lu qma=%lu\r\n",
-                  (unsigned long)stats.lsm_updates,
-                  (unsigned long)stats.h3_updates,
-                  (unsigned long)stats.qma_updates);
-  USB_STATUS_LINE("frame io sd_written=%lu usb_sent=%lu last_frame=%lu\r\n",
-                  (unsigned long)stats.sd_frames_written,
-                  (unsigned long)stats.usb_frames_sent,
-                  (unsigned long)stats.frame_id);
-  USB_STATUS_LINE("frame queue depth=%lu dropped=%lu high=%lu\r\n",
-                  (unsigned long)stats.frame_buffer_depth,
-                  (unsigned long)stats.frame_dropped,
-                  (unsigned long)stats.frame_high_watermark);
-  USB_STATUS_LINE("mode usb=%u sd=%s\r\n",
-                  (unsigned int)stats.usb_streaming_active,
-                  (stats.sd_logging_active != 0U) ? "active" : "paused");
-  USB_STATUS_LINE("acq state=%s sink=%s duration_ms=%lu elapsed_ms=%lu remaining_ms=%lu\r\n",
-                  (acq.running != 0U) ? "running" : "stopped",
-                  AppAcqSinkToString(acq.sink),
-                  (unsigned long)acq.duration_ms,
-                  (unsigned long)elapsed_ms,
-                  (unsigned long)remaining_ms);
-  USB_STATUS_LINE("cfg lsm=+-4g/833Hz gyro=+-2000dps/833Hz h3=+-100g/400Hz qma=+-4g/1600Hz\r\n");
+  STATUS_LINE("lsm  odr=%uHz  xl=+-%ug  gyro=+-%udps\r\n",
+              (unsigned)cfg.lsm6dsox.odr_hz,
+              (unsigned)cfg.lsm6dsox.range,
+              (unsigned)cfg.lsm6dsox.range2);
+  STATUS_LINE("h3   odr=%uHz  range=+-%ug\r\n",
+              (unsigned)cfg.h3lis100dl.odr_hz,
+              (unsigned)cfg.h3lis100dl.range);
+  STATUS_LINE("qma  odr=%uHz  range=+-%ug\r\n",
+              (unsigned)cfg.qma6100p.odr_hz,
+              (unsigned)cfg.qma6100p.range);
 
-#undef USB_STATUS_LINE
+#undef STATUS_LINE
 }
 
 static void UsbCmd_Process(const char *cmd)
@@ -1658,6 +1633,19 @@ void StartUsbCdcTask(void *argument)
     for (;;)
     {
       osDelay(20U);
+
+      if (s_usb_done_armed != 0U)
+      {
+        AppAcqControl_t acq;
+        AppAcqGetCopy(&acq);
+        if (acq.running == 0U)
+        {
+          s_usb_done_armed = 0U;
+          osDelay(500U);
+          UsbCdcService_Write((const uint8_t *)"DONE\r\n", 6U);
+        }
+      }
+
       if (s_wcid_cmd_pending != 0U)
       {
         char local_cmd[64];
@@ -2501,8 +2489,20 @@ void StartLoggerTask(void *argument)
 
     if (sd_session_active == 0U)
     {
-      AppFlowStatsSetMode(AppAcqIsUsbSinkActive(), 0U);
-      AppLoggerStopSdSession(&sd_file_open, &rows_since_sync);
+      if (sd_file_open != 0U)
+      {
+        char done_dir[48];
+        const char *dir = FatFs_SD_GetSessionDir();
+        strncpy(done_dir, (dir != NULL) ? dir : "?", sizeof(done_dir) - 1U);
+        done_dir[sizeof(done_dir) - 1U] = '\0';
+        AppFlowStatsSetMode(AppAcqIsUsbSinkActive(), 0U);
+        AppLoggerStopSdSession(&sd_file_open, &rows_since_sync);
+        printf("DONE dir=%s\r\n", done_dir);
+      }
+      else
+      {
+        AppFlowStatsSetMode(AppAcqIsUsbSinkActive(), 0U);
+      }
       osDelay(10U);
       continue;
     }
@@ -2525,6 +2525,7 @@ void StartLoggerTask(void *argument)
 
         sd_file_open = 1U;
         rows_since_sync = 0U;
+        AppAcqResetSessionTimer();
         AppFlowStatsSetMode(0U, 1U);
         printf("[Logger] SD logging resumed\r\n");
       }
@@ -2651,39 +2652,30 @@ void StartLoggerTask(void *argument)
         AppFlowStatsRecordWriteFailure();
       }
 
-      AppLoggerStopSdSession(&sd_file_open, &rows_since_sync);
-      AppFlowStatsSetMode(AppAcqIsUsbSinkActive(), 0U);
-      printf("[Logger] SD logging paused\r\n");
+      {
+        char done_dir[48];
+        const char *dir = FatFs_SD_GetSessionDir();
+        strncpy(done_dir, (dir != NULL) ? dir : "?", sizeof(done_dir) - 1U);
+        done_dir[sizeof(done_dir) - 1U] = '\0';
+        AppLoggerStopSdSession(&sd_file_open, &rows_since_sync);
+        AppFlowStatsSetMode(AppAcqIsUsbSinkActive(), 0U);
+        printf("DONE dir=%s\r\n", done_dir);
+      }
       osDelay(10U);
       continue;
     }
 
     if ((sd_file_open != 0U) && (AppAcqIsSdSessionActive() == 0U))
     {
+      char done_dir[48];
+      const char *dir = FatFs_SD_GetSessionDir();
+      strncpy(done_dir, (dir != NULL) ? dir : "?", sizeof(done_dir) - 1U);
+      done_dir[sizeof(done_dir) - 1U] = '\0';
       AppLoggerStopSdSession(&sd_file_open, &rows_since_sync);
       AppFlowStatsSetMode(AppAcqIsUsbSinkActive(), 0U);
-      printf("[Logger] SD logging paused\r\n");
+      printf("DONE dir=%s\r\n", done_dir);
       osDelay(10U);
       continue;
-    }
-
-    if ((sd_file_open != 0U) && (rows_since_sync >= LOGGER_SYNC_EVERY_ROWS))
-    {
-      result = FatFs_SD_LoggerSync();
-      if (result != FR_OK)
-      {
-        printf("[Logger] sync fail rows=%lu err=%s (%d)\r\n",
-               (unsigned long)rows_since_sync,
-               FatFs_SD_ResultToString(result),
-               (int)result);
-        AppFlowStatsRecordWriteFailure();
-        AppLoggerStopSdSession(&sd_file_open, &rows_since_sync);
-        AppFlowStatsSetMode(0U, 0U);
-        osDelay(LOGGER_RETRY_DELAY_MS);
-        rows_since_sync = 0U;
-        continue;
-      }
-      rows_since_sync = 0U;
     }
 
     AppFlowStatsSetMode(0U, (uint8_t)(sd_file_open != 0U));
