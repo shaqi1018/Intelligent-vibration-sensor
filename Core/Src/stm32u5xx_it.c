@@ -52,7 +52,44 @@
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
+#include "usart.h"
+#include <string.h>
 
+/* Emit a fault marker directly over USART1 (polling, no RTOS/printf) so a
+ * crash becomes visible instead of a silent while(1) freeze. */
+static void FaultPrint(const char *msg)
+{
+  (void)HAL_UART_Transmit(&huart1, (uint8_t *)msg, (uint16_t)strlen(msg), 100U);
+}
+
+static void FaultPrintHex(const char *label, uint32_t v)
+{
+  char buf[16];
+  static const char hx[] = "0123456789ABCDEF";
+  for (int i = 0; i < 8; i++) { buf[i] = hx[(v >> ((7 - i) * 4)) & 0xFU]; }
+  buf[8] = '\r'; buf[9] = '\n'; buf[10] = '\0';
+  FaultPrint(label);
+  FaultPrint(buf);
+}
+
+/* Decode the exception stack frame of the faulting task (FreeRTOS tasks run on
+ * PSP). sp[6] = PC of the faulting instruction — look it up in SensorProj.map. */
+void HardFault_ReportC(uint32_t *sp)
+{
+  FaultPrint("\r\n*** HARDFAULT ***\r\n");
+  FaultPrintHex("R0  =0x", sp[0]);
+  FaultPrintHex("R1  =0x", sp[1]);
+  FaultPrintHex("R2  =0x", sp[2]);
+  FaultPrintHex("R3  =0x", sp[3]);
+  FaultPrintHex("R12 =0x", sp[4]);
+  FaultPrintHex("LR  =0x", sp[5]);
+  FaultPrintHex("PC  =0x", sp[6]);   /* faulting instruction */
+  FaultPrintHex("xPSR=0x", sp[7]);
+  FaultPrintHex("CFSR=0x", SCB->CFSR);
+  FaultPrintHex("HFSR=0x", SCB->HFSR);
+  FaultPrintHex("BFAR=0x", SCB->BFAR);
+  for (;;) { }
+}
 /* USER CODE END 0 */
 
 extern TIM_HandleTypeDef htim6;
@@ -90,7 +127,7 @@ void NMI_Handler(void)
 void HardFault_Handler(void)
 {
   /* USER CODE BEGIN HardFault_IRQn 0 */
-
+  HardFault_ReportC((uint32_t *)__get_PSP());
   /* USER CODE END HardFault_IRQn 0 */
   while (1)
   {
@@ -105,7 +142,7 @@ void HardFault_Handler(void)
 void MemManage_Handler(void)
 {
   /* USER CODE BEGIN MemoryManagement_IRQn 0 */
-
+  FaultPrint("\r\n*** MEMMANAGE FAULT ***\r\n");
   /* USER CODE END MemoryManagement_IRQn 0 */
   while (1)
   {
@@ -120,7 +157,7 @@ void MemManage_Handler(void)
 void BusFault_Handler(void)
 {
   /* USER CODE BEGIN BusFault_IRQn 0 */
-
+  FaultPrint("\r\n*** BUSFAULT ***\r\n");
   /* USER CODE END BusFault_IRQn 0 */
   while (1)
   {
@@ -135,7 +172,7 @@ void BusFault_Handler(void)
 void UsageFault_Handler(void)
 {
   /* USER CODE BEGIN UsageFault_IRQn 0 */
-
+  FaultPrint("\r\n*** USAGEFAULT ***\r\n");
   /* USER CODE END UsageFault_IRQn 0 */
   while (1)
   {

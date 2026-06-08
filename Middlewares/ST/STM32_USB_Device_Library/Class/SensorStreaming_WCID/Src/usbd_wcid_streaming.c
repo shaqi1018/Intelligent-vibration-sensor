@@ -1160,6 +1160,7 @@ uint8_t  USBD_WCID_STREAMING_RegisterInterface(USBD_HandleTypeDef *pdev, USBD_WC
   */
 uint8_t USBD_WCID_STREAMING_FillTxDataBuffer(USBD_HandleTypeDef *pdev, uint8_t ch_number, uint8_t *buf, uint32_t size)
 {
+  if ((pdev == NULL) || (pdev->pClassData == NULL)) { return 1U; }
   USBD_WCID_STREAMING_HandleTypeDef *hwcid = (USBD_WCID_STREAMING_HandleTypeDef *) pdev->pClassData;
   uint8_t **TxBuffer = hwcid->TxBuffer;
 
@@ -1285,6 +1286,9 @@ uint8_t USBD_WCID_STREAMING_SetTxDataBuffer(USBD_HandleTypeDef *pdev, uint8_t ch
   */
 uint8_t USBD_WCID_STREAMING_StartStreaming(USBD_HandleTypeDef *pdev)
 {
+  /* pClassData is only allocated when the host configures the device. On
+   * battery boot with no USB host it is NULL — guard against a NULL deref. */
+  if ((pdev == NULL) || (pdev->pClassData == NULL)) { return 1U; }
   uint8_t *status = &(((USBD_WCID_STREAMING_HandleTypeDef *)(pdev->pClassData))->streamingStatus);
   __IO uint8_t *lastPacketSent = ((USBD_WCID_STREAMING_HandleTypeDef *)(pdev->pClassData))->lastPacketSent;
 
@@ -1304,6 +1308,10 @@ uint8_t USBD_WCID_STREAMING_StartStreaming(USBD_HandleTypeDef *pdev)
   */
 uint8_t USBD_WCID_STREAMING_StopStreaming(USBD_HandleTypeDef *pdev)
 {
+  /* pClassData is NULL until the host configures the device (e.g. battery boot
+   * with no USB host). Stopping acquisition still calls this, so guard it —
+   * otherwise NULL->streamingStatus (offset 0x150) faults and hangs the MCU. */
+  if ((pdev == NULL) || (pdev->pClassData == NULL)) { return 1U; }
   uint8_t *status = &(((USBD_WCID_STREAMING_HandleTypeDef *)(pdev->pClassData))->streamingStatus);
   *status = STREAMING_STATUS_STOPPING;
   return 0;     /* USBD_OK */

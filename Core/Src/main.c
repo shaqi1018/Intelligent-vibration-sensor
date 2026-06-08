@@ -116,7 +116,8 @@ int main(void)
   MX_I2C2_Init();
   MX_ICACHE_Init();
   MX_USART1_UART_Init();
-  BoardIO_Init();  /* HW-v2: latch POWER_CTL HIGH + init LED/buttons */
+  BoardIO_Init();          /* HW-v2: init LED/buttons/POWER_CTL (starts LOW) */
+  BoardIO_StartupLatch();  /* 电源键按住 2s → 锁存电池；否则不锁存 */
 
   /* Boot mode is decided by a TAMP backup register written by the previous session.
    * MSC mode = bare-metal U-disk (SD as block device), exits via USB unplug.

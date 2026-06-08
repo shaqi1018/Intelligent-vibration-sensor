@@ -2,6 +2,7 @@
 
 #include "sdmmc.h"
 #include "FreeRTOS.h"
+#include "task.h"
 #include "semphr.h"
 
 extern SemaphoreHandle_t s_sdmmc_dma_sem;
@@ -98,6 +99,7 @@ DRESULT SD_disk_read(BYTE pdrv, BYTE *buff, DWORD sector, UINT count)
           cs = HAL_SD_GetCardState(&hsd1);
           if (cs == HAL_SD_CARD_TRANSFER) { return RES_OK; }
           if ((xTaskGetTickCount() - t0) > pdMS_TO_TICKS(500)) { break; }
+          vTaskDelay(1U); /* yield while card programs — don't starve other tasks */
         } while (cs == HAL_SD_CARD_PROGRAMMING || cs == HAL_SD_CARD_RECEIVING);
       }
       /* Timeout or bad card state — abort and re-init. */
@@ -164,6 +166,7 @@ DRESULT SD_disk_write(BYTE pdrv, const BYTE *buff, DWORD sector, UINT count)
           cs = HAL_SD_GetCardState(&hsd1);
           if (cs == HAL_SD_CARD_TRANSFER) { return RES_OK; }
           if ((xTaskGetTickCount() - t0) > pdMS_TO_TICKS(500)) { break; }
+          vTaskDelay(1U); /* yield while card programs — don't starve other tasks */
         } while (cs == HAL_SD_CARD_PROGRAMMING);
       }
       HAL_SD_Abort(&hsd1);

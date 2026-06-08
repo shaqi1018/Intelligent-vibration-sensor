@@ -362,10 +362,14 @@ void MX_FREERTOS_Init(void)
   printf("[RTOS] usbCdcTask created: %s\r\n", (usbCdcTaskHandle != NULL) ? "ok" : "FAILED");
   printf("[RTOS] usbUploadTask created: %s\r\n", (usbUploadTaskHandle != NULL) ? "ok" : "FAILED");
 #endif
-  /* UserCtrl task: button polling + LED + power-off */
+  /* UserCtrl task: button polling + LED + power-off.
+   * Priority AboveNormal (= sensor tasks) so the power button is still polled
+   * during high-rate SD acquisition — at BelowNormal it was starved and the
+   * 3s power-off never triggered while logging. The task does negligible work
+   * (read 2 GPIOs then osDelay 20ms), so it does not disturb sensor timing. */
   static const osThreadAttr_t userCtrlTask_attributes = {
     .name       = "userCtrlTask",
-    .priority   = (osPriority_t)osPriorityBelowNormal,
+    .priority   = (osPriority_t)osPriorityAboveNormal,
     .stack_size = 512 * 4
   };
   osThreadNew(StartUserCtrlTask, NULL, &userCtrlTask_attributes);
@@ -1632,9 +1636,50 @@ void StartUsbCdcTask(void *argument)
 
     /* WCID mode: WcidCmdCallback (ISR) sets s_wcid_cmd_pending.
      * Process commands here in task context where RTOS mutexes are safe. */
+    /* USB connect management via PC7 (USB_DET, VBUS divider) — battery boot only.
+     * USB-first boot: USBD_Start already connected D+ to the present host, leave
+     * it. Battery boot: keep D+ disconnected until the cable is detected (PC7
+     * HIGH), then connect so the host sees a clean insertion and enumerates.
+     * This is the board's intended VBUS-detect design. */
+    uint8_t  s_usb_present_prev = 0xFFU;   /* 0xFF forces initial sync */
+    uint32_t s_usb_connect_tick = 0U;
     for (;;)
     {
       osDelay(20U);
+
+      uint32_t now = osKernelGetTickCount();
+
+      /* Battery boot: drive D+ connect/disconnect from the USB_DET pin (PC7). */
+      if (BoardIO_IsBatteryLatched())
+      {
+        uint8_t usb_now = UsbDet_IsPresent();
+        if (usb_now != s_usb_present_prev)
+        {
+          s_usb_present_prev = usb_now;
+          if (usb_now != 0U)
+          {
+            HAL_PCD_DevConnect(&hpcd_USB_OTG_FS);    /* cable in: advertise */
+            s_usb_connect_tick = now;
+            printf("[USB] cable detected (PC7 HIGH) -> connect D+\r\n");
+          }
+          else
+          {
+            HAL_PCD_DevDisconnect(&hpcd_USB_OTG_FS); /* cable out: stop adv */
+            printf("[USB] cable removed (PC7 LOW) -> disconnect D+\r\n");
+          }
+        }
+        else if ((usb_now != 0U) &&
+                 (hUSB_Device.dev_state != USBD_STATE_CONFIGURED) &&
+                 ((int32_t)(now - (s_usb_connect_tick + 1500U)) >= 0))
+        {
+          /* Cable present but enumeration stalled: re-pulse D+ once. */
+          HAL_PCD_DevDisconnect(&hpcd_USB_OTG_FS);
+          osDelay(80U);
+          HAL_PCD_DevConnect(&hpcd_USB_OTG_FS);
+          s_usb_connect_tick = now;
+          printf("[USB] re-advertise (PC7 HIGH, not configured)\r\n");
+        }
+      }
 
       if (s_usb_done_armed != 0U)
       {

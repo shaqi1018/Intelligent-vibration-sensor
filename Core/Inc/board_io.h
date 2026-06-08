@@ -9,7 +9,7 @@
 #define BOARD_LED_PORT          GPIOB
 
 /* POWER_CTL: PB7, output push-pull.
- * HIGH = 锁存供电（上电后立即拉高）; LOW = 断电 */
+ * HIGH = 锁存电池供电; LOW = 不锁存（仅 USB 供电或已关机） */
 #define BOARD_POWER_CTL_PIN     GPIO_PIN_7
 #define BOARD_POWER_CTL_PORT    GPIOB
 
@@ -21,11 +21,19 @@
 #define BOARD_PWR_BTN_PIN       GPIO_PIN_14
 #define BOARD_PWR_BTN_PORT      GPIOC
 
+/* USB_DET: PC7, input. VBUS via 10K/20K divider → ~3.33V when USB plugged.
+ * HIGH = USB cable present; LOW = battery only. */
+#define BOARD_USB_DET_PIN       GPIO_PIN_7
+#define BOARD_USB_DET_PORT      GPIOC
+
 void    BoardIO_Init(void);
+void    BoardIO_StartupLatch(void);
+uint8_t BoardIO_IsBatteryLatched(void);
 void    LED_Set(uint8_t on);
 void    LED_Toggle(void);
 void    PowerCtl_Set(uint8_t on);
 uint8_t UserBtn_IsPressed(void);
 uint8_t PwrBtn_IsPressed(void);
+uint8_t UsbDet_IsPresent(void);   /* 1 = USB cable plugged (PC7 HIGH) */
 
 #endif /* BOARD_IO_H */
