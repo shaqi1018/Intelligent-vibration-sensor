@@ -41,4 +41,7 @@ void    UsbWcidApp_RespReset(void);
 void    UsbWcidApp_RespAppend(const uint8_t *buf, uint32_t len);
 uint8_t UsbWcidApp_RespSend(void);
 
+/* Send raw bytes back to host via EP4 IN (command response channel). */
+uint8_t UsbWcidApp_Write(const uint8_t *buf, uint32_t len);
+
 #endif

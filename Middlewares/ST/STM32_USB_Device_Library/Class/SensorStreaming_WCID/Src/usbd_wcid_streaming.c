@@ -72,6 +72,9 @@ static uint8_t *USBD_WCID_STREAMING_OSCompIDDescriptor(USBD_SpeedTypeDef speed, 
 static uint8_t *USBD_WCID_STREAMING_OSPropertiesFeatureDescriptor(USBD_SpeedTypeDef speed, uint16_t *length);
 static uint8_t *USBD_WCID_STREAMING_GetUsrStrDescriptor(USBD_HandleTypeDef *pdev, uint8_t index,  uint16_t *length);
 static uint8_t USBD_WCID_STREAMING_SetTxBuffer(USBD_HandleTypeDef   *pdev, uint8_t  *pbuff, uint16_t length);
+
+static volatile uint8_t s_resp_busy = 0U;
+static uint8_t          s_resp_ep_buf[64U];
 static USBD_StatusTypeDef USBD_WCID_STREAMING_TransmitPacket(USBD_HandleTypeDef *pdev, uint8_t epNumber);
 static USBD_StatusTypeDef USBD_WCID_STREAMING_ReceivePacket(USBD_HandleTypeDef *pdev);
 static USBD_StatusTypeDef  USBD_VendDevReq(USBD_HandleTypeDef *pdev, USBD_SetupReqTypedef *req);
@@ -245,7 +248,7 @@ __ALIGN_BEGIN static uint8_t USBD_WCID_STREAMING_CfgHSDesc[USB_SS_WCID_CONFIG_DE
   /* Interface descriptor type */
   0x00,   /* bInterfaceNumber: Number of Interface */
   0x00,   /* bAlternateSetting: Alternate setting */
-  N_IN_ENDPOINTS + 1,   /* bNumEndpoints: N_IN_ENDPOINTS + 1 OUT endpoints used */
+  N_IN_ENDPOINTS + 2,   /* bNumEndpoints: N_IN_ENDPOINTS sensor IN + 1 resp IN + 1 cmd OUT */
   0x00,   /* bInterfaceClass: Communication Interface Class */
   0x00,   /* bInterfaceSubClass: Abstract Control Model */
   0x00,   /* bInterfaceProtocol: Common AT commands */
@@ -304,6 +307,15 @@ __ALIGN_BEGIN static uint8_t USBD_WCID_STREAMING_CfgHSDesc[USB_SS_WCID_CONFIG_DE
 #endif
 #endif
 #endif
+
+  /*Endpoint IN 4 (Response) Descriptor*/
+  0x07,                           /* bLength: Endpoint Descriptor size */
+  USB_DESC_TYPE_ENDPOINT,   /* bDescriptorType: Endpoint */
+  DATA_IN_EP_RESP,                  /* bEndpointAddress */
+  0x02,                           /* bmAttributes: Bulk */
+  LOBYTE(SS_WCID_DATA_FS_MAX_PACKET_SIZE),     /* wMaxPacketSize: */
+  HIBYTE(SS_WCID_DATA_FS_MAX_PACKET_SIZE),
+  0x00,                           /* bInterval: ignore for Bulk transfer */
 
   /*Endpoint OUT 1 Descriptor*/
   0x07,                           /* bLength: Endpoint Descriptor size */
@@ -339,7 +351,7 @@ __ALIGN_BEGIN static uint8_t USBD_WCID_STREAMING_CfgFSDesc[] __ALIGN_END =
   /* Interface descriptor type */
   0x00,   /* bInterfaceNumber: Number of Interface */
   0x00,   /* bAlternateSetting: Alternate setting */
-  N_IN_ENDPOINTS + 1,   /* bNumEndpoints: N_IN_ENDPOINTS + 1 OUT endpoints used */
+  N_IN_ENDPOINTS + 2,   /* bNumEndpoints: N_IN_ENDPOINTS sensor IN + 1 resp IN + 1 cmd OUT */
   0x00,   /* bInterfaceClass: Communication Interface Class */
   0x00,   /* bInterfaceSubClass: Abstract Control Model */
   0x00,   /* bInterfaceProtocol: Common AT commands */
@@ -398,6 +410,15 @@ __ALIGN_BEGIN static uint8_t USBD_WCID_STREAMING_CfgFSDesc[] __ALIGN_END =
 #endif
 #endif
 #endif
+
+  /*Endpoint IN 4 (Response) Descriptor*/
+  0x07,                           /* bLength: Endpoint Descriptor size */
+  USB_DESC_TYPE_ENDPOINT,   /* bDescriptorType: Endpoint */
+  DATA_IN_EP_RESP,                  /* bEndpointAddress */
+  0x02,                           /* bmAttributes: Bulk */
+  LOBYTE(SS_WCID_DATA_FS_MAX_PACKET_SIZE),     /* wMaxPacketSize: */
+  HIBYTE(SS_WCID_DATA_FS_MAX_PACKET_SIZE),
+  0x00,                           /* bInterval: ignore for Bulk transfer */
 
   /*Endpoint OUT 1 Descriptor*/
   0x07,                           /* bLength: Endpoint Descriptor size */
@@ -507,6 +528,10 @@ static uint8_t  USBD_WCID_STREAMING_Init(USBD_HandleTypeDef *pdev, uint8_t cfgid
 #endif
 #endif
 #endif
+  /* Open EP IN for command responses */
+  (void)USBD_LL_OpenEP(pdev, DATA_IN_EP_RESP, USBD_EP_TYPE_BULK, SS_WCID_DATA_FS_IN_PACKET_SIZE);
+  s_resp_busy = 0U;
+
   /* Open EP OUT */
   (void)USBD_LL_OpenEP(pdev, DATA_OUT_EP1, USBD_EP_TYPE_BULK, SS_WCID_DATA_FS_OUT_PACKET_SIZE);
 
@@ -569,6 +594,8 @@ static uint8_t  USBD_WCID_STREAMING_DeInit(USBD_HandleTypeDef *pdev, uint8_t cfg
 #endif
 #endif
 
+  /* Close response EP IN */
+  (void)USBD_LL_CloseEP(pdev, DATA_IN_EP_RESP);
   /* Open EP OUT */
   (void)USBD_LL_CloseEP(pdev, DATA_OUT_EP1);
 
@@ -803,6 +830,11 @@ static uint8_t  USBD_WCID_STREAMING_Setup(USBD_HandleTypeDef *pdev, USBD_SetupRe
   */
 static uint8_t  USBD_WCID_STREAMING_DataIn(USBD_HandleTypeDef *pdev, uint8_t epnum)
 {
+  if ((epnum & 0x7FU) == (DATA_IN_EP_RESP & 0x7FU))
+  {
+    s_resp_busy = 0U;
+    return 0;
+  }
   USBD_WCID_STREAMING_HandleTypeDef   *hwcid = (USBD_WCID_STREAMING_HandleTypeDef *) pdev->pClassData;
   hwcid->TXStates[(epnum & 0x7FU) - 1U] = 0;
   return 0;
@@ -1275,6 +1307,23 @@ uint8_t USBD_WCID_STREAMING_StopStreaming(USBD_HandleTypeDef *pdev)
   uint8_t *status = &(((USBD_WCID_STREAMING_HandleTypeDef *)(pdev->pClassData))->streamingStatus);
   *status = STREAMING_STATUS_STOPPING;
   return 0;     /* USBD_OK */
+}
+
+uint8_t USBD_WCID_STREAMING_SendResponse(USBD_HandleTypeDef *pdev, const uint8_t *buf, uint16_t len)
+{
+  if ((pdev == NULL) || (pdev->pClassData == NULL)) { return 1U; }
+  if (len == 0U) { return 0U; }
+  if (len > (uint16_t)sizeof(s_resp_ep_buf)) { len = (uint16_t)sizeof(s_resp_ep_buf); }
+
+  /* Spin-wait for previous transfer (completes in <1ms on FS USB). */
+  uint32_t t = 5000U;
+  while ((s_resp_busy != 0U) && (t-- != 0U)) {}
+  if (s_resp_busy != 0U) { return 1U; }
+
+  memcpy(s_resp_ep_buf, buf, len);
+  s_resp_busy = 1U;
+  (void)USBD_LL_Transmit(pdev, DATA_IN_EP_RESP, s_resp_ep_buf, len);
+  return 0U;
 }
 
 

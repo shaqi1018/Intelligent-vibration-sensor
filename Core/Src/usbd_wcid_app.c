@@ -114,4 +114,18 @@ void UsbWcidApp_RespAppend(const uint8_t *buf, uint32_t len)
   if (len > space) { len = space; }
   if (len != 0U) { memcpy(&s_resp_buf[s_resp_len], buf, len); s_resp_len += len; }
 }
-uint8_t UsbWcidApp_RespSend(void) { return 1U; }
+uint8_t UsbWcidApp_RespSend(void)
+{
+  if (s_resp_len == 0U) { return 0U; }
+  uint8_t r = UsbWcidApp_Write(s_resp_buf, s_resp_len);
+  s_resp_len = 0U;
+  return r;
+}
+
+uint8_t UsbWcidApp_Write(const uint8_t *buf, uint32_t len)
+{
+  if (s_pdev == NULL) { return 1U; }
+  if (len == 0U)      { return 0U; }
+  if (len > 0xFFFFU)  { len = 0xFFFFU; }
+  return USBD_WCID_STREAMING_SendResponse(s_pdev, buf, (uint16_t)len);
+}

@@ -46,11 +46,13 @@ extern "C" {
 #define DATA_IN_EP1                                   0x81  /* EP1 for LSM6DSOX IMU */
 #define DATA_IN_EP2                                   0x82  /* EP2 for H3LIS100DL Accel */
 #define DATA_IN_EP3                                   0x83  /* EP3 for QMA6100P Accel */
+#define DATA_IN_EP_RESP                               0x84  /* EP4 for command responses */
 #define DATA_OUT_EP1                                  0x01  /* EP1 for command OUT */
 
 #define SS_WCID_DATA_FS_MAX_PACKET_SIZE               64U  /* Endpoint IN & OUT Packet size */
 
-#define USB_SS_WCID_CONFIG_DESC_SIZ                   (25 + (7 * N_IN_ENDPOINTS))
+/* +7: one extra endpoint descriptor for DATA_IN_EP_RESP */
+#define USB_SS_WCID_CONFIG_DESC_SIZ                   (25 + (7 * N_IN_ENDPOINTS) + 7)
 #define USB_SS_WCID_OTHER_CONFIG_DESC_SIZ             (25 + (7 * 2))
 #define SS_WCID_DATA_HS_IN_PACKET_SIZE                SS_WCID_DATA_HS_MAX_PACKET_SIZE
 #define SS_WCID_DATA_HS_OUT_PACKET_SIZE               SS_WCID_DATA_HS_MAX_PACKET_SIZE
@@ -143,6 +145,7 @@ uint8_t USBD_WCID_STREAMING_CleanTxDataBuffer(USBD_HandleTypeDef *pdev, uint8_t 
 uint8_t USBD_WCID_STREAMING_FillTxDataBuffer(USBD_HandleTypeDef *pdev, uint8_t ch_number, uint8_t *buf, uint32_t size);
 uint8_t USBD_WCID_STREAMING_StartStreaming(USBD_HandleTypeDef *pdev);
 uint8_t USBD_WCID_STREAMING_StopStreaming(USBD_HandleTypeDef *pdev);
+uint8_t USBD_WCID_STREAMING_SendResponse(USBD_HandleTypeDef *pdev, const uint8_t *buf, uint16_t len);
 
 /**
   * @}

@@ -62,8 +62,8 @@
 #define SAMPLE_PERIOD_MS         APP_SENSOR_SAMPLE_PERIOD_MS
 #define LOGGER_RETRY_DELAY_MS    1000U
 
-/* CDC removed — redirect UsbCdcService calls to printf (UART1) */
-#define UsbCdcService_Write(buf, len)  printf("%.*s", (int)(len), (const char *)(buf))
+/* Route command responses to USB EP4 IN via UsbWcidApp_Write. */
+#define UsbCdcService_Write(buf, len)  UsbWcidApp_Write((buf), (len))
 #define UsbCdcService_IsReady()        (1U)
 #define USB_UPLOAD_PERIOD_MS     5U
 #define APP_ACQ_IDLE_DELAY_MS    10U
@@ -2497,7 +2497,8 @@ void StartLoggerTask(void *argument)
         done_dir[sizeof(done_dir) - 1U] = '\0';
         AppFlowStatsSetMode(AppAcqIsUsbSinkActive(), 0U);
         AppLoggerStopSdSession(&sd_file_open, &rows_since_sync);
-        printf("DONE dir=%s\r\n", done_dir);
+        { char _d[64]; int _n = snprintf(_d, sizeof(_d), "DONE dir=%s\r\n", done_dir); \
+          UsbWcidApp_Write((const uint8_t*)_d, (uint32_t)_n); }
       }
       else
       {
@@ -2659,7 +2660,8 @@ void StartLoggerTask(void *argument)
         done_dir[sizeof(done_dir) - 1U] = '\0';
         AppLoggerStopSdSession(&sd_file_open, &rows_since_sync);
         AppFlowStatsSetMode(AppAcqIsUsbSinkActive(), 0U);
-        printf("DONE dir=%s\r\n", done_dir);
+        { char _d[64]; int _n = snprintf(_d, sizeof(_d), "DONE dir=%s\r\n", done_dir); \
+          UsbWcidApp_Write((const uint8_t*)_d, (uint32_t)_n); }
       }
       osDelay(10U);
       continue;
