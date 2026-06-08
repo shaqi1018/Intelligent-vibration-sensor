@@ -41,20 +41,34 @@ uint8_t AppTime_Sync(void)
   return 1U;
 }
 
+/* DWT µs 绕回周期：2^32 cycles / 160MHz = 26843545.6 µs，取整为 26843546 */
+#define APP_TIME_DWT_US_PERIOD  26843546ULL
+
 uint64_t AppTime_GetEpochUs(void)
 {
   if (s_synced == 0U) { return 0ULL; }
 
   uint32_t now = DwtUs();
 
-  /* uint32 溢出检测（DWT µs 约 71 分钟绕回） */
+  /* 临界区保护：LSM/H3/QMA 三个 task 并发调用此函数。
+   * 若 Task A 读完 now 被切走、Task B 更新了 s_dwt_prev，
+   * Task A 回来时会误判 now < s_dwt_prev → 假溢出 → +71 分钟跳变。
+   * 屏蔽中断可阻止 FreeRTOS PendSV 抢占，保证 read-modify-write 原子。 */
+  uint32_t primask = __get_PRIMASK();
+  __disable_irq();
   if (now < s_dwt_prev) { s_wrap_count++; }
   s_dwt_prev = now;
+  uint32_t wraps = s_wrap_count;
+  __set_PRIMASK(primask);
 
-  uint64_t offset_us = (uint64_t)s_wrap_count * 0xFFFFFFFFULL
-                     + (uint64_t)(now - s_anchor_dwt_us);
+  /* 有符号 delta：wrap 后 now < s_anchor_dwt_us 时 uint32 减法下溢，
+   * 转为 int32 可正确还原负值；wraps * PERIOD 补偿整圈时间。 */
+  int32_t  signed_delta = (int32_t)(now - s_anchor_dwt_us);
+  int64_t  offset_us    = (int64_t)wraps * (int64_t)APP_TIME_DWT_US_PERIOD
+                        + (int64_t)signed_delta;
+  if (offset_us < 0) { offset_us = 0; }
 
-  return (uint64_t)s_anchor_epoch_s * 1000000ULL + offset_us;
+  return (uint64_t)s_anchor_epoch_s * 1000000ULL + (uint64_t)offset_us;
 }
 
 uint32_t AppTime_GetAnchorEpochS(void)

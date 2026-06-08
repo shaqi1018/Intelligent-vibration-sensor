@@ -66,3 +66,32 @@ uint32_t Pcf85063_ToEpochSeconds(const Pcf85063_Time_t *t)
   days += t->day - 1U;
   return days * 86400U + (uint32_t)t->hour * 3600U + (uint32_t)t->minute * 60U + t->second;
 }
+
+void Pcf85063_FromEpochSeconds(uint32_t epoch, Pcf85063_Time_t *t)
+{
+  uint32_t days = epoch / 86400U;
+  uint32_t rem  = epoch % 86400U;
+  t->hour   = (uint8_t)(rem / 3600U);
+  t->minute = (uint8_t)((rem % 3600U) / 60U);
+  t->second = (uint8_t)(rem % 60U);
+
+  uint32_t year = 1970U;
+  for (;;)
+  {
+    uint32_t diy = (year % 4U == 0U && (year % 100U != 0U || year % 400U == 0U)) ? 366U : 365U;
+    if (days < diy) { break; }
+    days -= diy;
+    year++;
+  }
+  uint8_t leap = (year % 4U == 0U && (year % 100U != 0U || year % 400U == 0U)) ? 1U : 0U;
+  uint8_t mon = 0U;
+  for (; mon < 12U; mon++)
+  {
+    uint32_t dim = (uint32_t)s_days_per_month[mon] + ((mon == 1U && leap) ? 1U : 0U);
+    if (days < dim) { break; }
+    days -= dim;
+  }
+  t->year  = (uint8_t)(year - 2000U);
+  t->month = (uint8_t)(mon + 1U);
+  t->day   = (uint8_t)(days + 1U);
+}

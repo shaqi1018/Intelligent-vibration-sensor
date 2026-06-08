@@ -205,7 +205,7 @@ const osThreadAttr_t h3lis100dlTask_attributes = {
 osThreadId_t loggerTaskHandle;
 const osThreadAttr_t loggerTask_attributes = {
   .name = "loggerTask",
-  .priority = (osPriority_t)osPriorityNormal,
+  .priority = (osPriority_t)osPriorityAboveNormal,
   .stack_size = 1024 * 4  /* 4KB — logger only buffers small line[128] + locals */
 };
 
@@ -1043,6 +1043,22 @@ static inline uint32_t AppU64ToDec(char *out, uint64_t v)
   while (v > 0ULL) { tmp[n++] = (char)('0' + (uint8_t)(v % 10ULL)); v /= 10ULL; }
   for (uint32_t i = 0U; i < n; i++) { out[i] = tmp[n - 1U - i]; }
   return n;
+}
+
+/* 把 Unix 纪元秒格式化为 12 位 YYMMDDHHMMSS（定长，无分隔符，UTC 无时区）。
+ * 返回写入字节数（固定 12）。秒级精度：同一秒内的多个样本时间戳相同，
+ * 秒内顺序靠连续递增的 frame_id 区分。 */
+static uint32_t AppFmtDateTime12(char *out, uint32_t epoch_s)
+{
+  Pcf85063_Time_t t;
+  Pcf85063_FromEpochSeconds(epoch_s, &t);
+  out[0]  = (char)('0' + t.year   / 10U); out[1]  = (char)('0' + t.year   % 10U);
+  out[2]  = (char)('0' + t.month  / 10U); out[3]  = (char)('0' + t.month  % 10U);
+  out[4]  = (char)('0' + t.day    / 10U); out[5]  = (char)('0' + t.day    % 10U);
+  out[6]  = (char)('0' + t.hour   / 10U); out[7]  = (char)('0' + t.hour   % 10U);
+  out[8]  = (char)('0' + t.minute / 10U); out[9]  = (char)('0' + t.minute % 10U);
+  out[10] = (char)('0' + t.second / 10U); out[11] = (char)('0' + t.second % 10U);
+  return 12U;
 }
 
 /* Write float as "dd.d" (one decimal place) into out. Returns bytes written. */
@@ -1998,6 +2014,11 @@ void StartLsm6dsoxTask(void *argument)
       float xl_s = AppLsmXlSensitivity(lcfg.lsm6dsox.range);
       float g_s  = AppLsmGyrSensitivity(lcfg.lsm6dsox.range2);
 
+      /* Fetch timestamp once per batch: epoch_s is 1-second resolution,
+       * same value for all ~256 samples. Avoids concurrent GetEpochUs()
+       * calls from multiple tasks racing on s_dwt_prev / s_wrap_count. */
+      uint32_t epoch_s_batch = (uint32_t)(AppTime_GetEpochUs() / 1000000ULL);
+
       char rowbuf[160];
       for (uint16_t i = 0; i < to_read; i++)
       {
@@ -2013,13 +2034,13 @@ void StartLsm6dsoxTask(void *argument)
         if (cur_has_acc && cur_has_gyr)
         {
           lsm_ts_us += s_lsm_odr_interval_us;
-          uint64_t epoch_us_i = AppTime_GetEpochUs();
+          uint32_t epoch_s_i = epoch_s_batch;
           uint32_t fid = ++g_lsm_frame_id_counter;
 
           uint32_t off = 0;
           off += AppU32ToDec(&rowbuf[off], fid);
           rowbuf[off++] = ',';
-          off += AppU64ToDec(&rowbuf[off], epoch_us_i);
+          off += AppFmtDateTime12(&rowbuf[off], epoch_s_i);
           rowbuf[off++] = ',';
           off += AppF1ToDec(&rowbuf[off], (float)cur_acc[0] * xl_s);
           rowbuf[off++] = ',';
@@ -2178,12 +2199,12 @@ void StartH3lis100dlTask(void *argument)
       h3_ts_us += s_h3_odr_interval_us;
 
       uint32_t fid = ++g_h3_frame_id_counter;
-      uint64_t epoch_us_i = AppTime_GetEpochUs();
+      uint32_t epoch_s_i = (uint32_t)(AppTime_GetEpochUs() / 1000000ULL);
       char rowbuf[96];
       uint32_t off = 0;
       off += AppU32ToDec(&rowbuf[off], fid);
       rowbuf[off++] = ',';
-      off += AppU64ToDec(&rowbuf[off], epoch_us_i);
+      off += AppFmtDateTime12(&rowbuf[off], epoch_s_i);
       rowbuf[off++] = ',';
       off += AppF1ToDec(&rowbuf[off], data.acc_mg[0]);
       rowbuf[off++] = ',';
@@ -2361,6 +2382,7 @@ void StartQma6100pTask(void *argument)
       default: qma_lsb1g = 4096U; break;
     }
     float qma_scale = 1000.0f / (float)qma_lsb1g;
+    uint32_t epoch_s_batch_qma = (uint32_t)(AppTime_GetEpochUs() / 1000000ULL);
 
     char rowbuf[96];
     for (uint8_t i = 0; i < fifo_level; i++)
@@ -2371,13 +2393,13 @@ void StartQma6100pTask(void *argument)
       int16_t rz = (int16_t)(((int16_t)((uint16_t)p[5] << 8 | p[4])) >> 2);
 
       qma_ts_us += s_qma_odr_interval_us;
-      uint64_t epoch_us_i = AppTime_GetEpochUs();
+      uint32_t epoch_s_i = epoch_s_batch_qma;
       uint32_t fid = ++g_qma_frame_id_counter;
 
       uint32_t off = 0;
       off += AppU32ToDec(&rowbuf[off], fid);
       rowbuf[off++] = ',';
-      off += AppU64ToDec(&rowbuf[off], epoch_us_i);
+      off += AppFmtDateTime12(&rowbuf[off], epoch_s_i);
       rowbuf[off++] = ',';
       off += AppF1ToDec(&rowbuf[off], (float)rx * qma_scale);
       rowbuf[off++] = ',';

@@ -19,5 +19,6 @@ uint8_t  Pcf85063_Init(void);
 uint8_t  Pcf85063_GetTime(Pcf85063_Time_t *t);
 uint8_t  Pcf85063_SetTime(const Pcf85063_Time_t *t);
 uint32_t Pcf85063_ToEpochSeconds(const Pcf85063_Time_t *t);  /* UTC Unix 纪元秒 */
+void     Pcf85063_FromEpochSeconds(uint32_t epoch_s, Pcf85063_Time_t *t);  /* 纪元秒 → 年月日时分秒 */
 
 #endif
