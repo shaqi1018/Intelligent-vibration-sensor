@@ -2631,7 +2631,12 @@ void StartLoggerTask(void *argument)
           AcqConfig_t mcfg; AcqConfig_GetCopy(&mcfg);
           if (mcfg.es8311.enabled)
           {
-            (void)FatFs_SD_WavCreate(mcfg.es8311.sample_rate_hz, mcfg.es8311.bits);
+            FRESULT wav_r = FatFs_SD_WavCreate(mcfg.es8311.sample_rate_hz, mcfg.es8311.bits);
+            if (wav_r != FR_OK)
+            {
+              printf("[Logger] MIC.WAV create failed: %s (%d) — audio will be dropped\r\n",
+                     FatFs_SD_ResultToString(wav_r), (int)wav_r);
+            }
           }
         }
 
@@ -2729,6 +2734,14 @@ void StartLoggerTask(void *argument)
             RingBuf_Consume(&g_ring_mic, n);
             rows_since_sync += n;
             did_work = 1;
+          }
+          else if (result == FR_NOT_ENABLED)
+          {
+            /* WAV not open (e.g. FatFs_SD_WavCreate failed at session start) but
+             * the SAI ISR keeps filling g_ring_mic. Drop the audio and continue
+             * — never wedge the drain loop or pollute write-failure stats over a
+             * sink that simply isn't there. */
+            RingBuf_Consume(&g_ring_mic, n);
           }
           else
           {

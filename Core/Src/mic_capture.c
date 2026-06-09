@@ -42,9 +42,13 @@ int Mic_Start(uint32_t sample_rate_hz, uint16_t gain_db)
   if (ES8311_InitAdc(sample_rate_hz, gain_db) != 0) { PaEn_Set(0); return -2; }
   if (MX_SAI1_Init(sample_rate_hz) != HAL_OK) { ES8311_PowerDown(); PaEn_Set(0); return -3; }
   s_dropped = 0U;
-  /* size 参数单位为“数据项个数”：本设计双半缓冲，半满/全满各触发一次，
-   * 故传两半总样本数（MIC_DMA_HALF_SAMPLES*2）并依赖 DMA 循环模式。
-   * 确切的 item-count 语义在台架（Task 7）确认，必要时改为单半大小。 */
+  /* ⚠️ 台架第一要务（Task 7 / 见计划风险）：确认 HAL_SAI_Receive_DMA 的 size 单位。
+   *   - 经典 HAL：size = 数据项个数 → 整个缓冲 = MIC_DMA_HALF_SAMPLES*2 = 2048 项（当前值，
+   *     半满中断落在 &s_dma_buf[1024]，与两个回调一致）。
+   *   - 若所用 U5 SAI/GPDMA HAL 把 size 当“字节数”：需改为 sizeof(s_dma_buf)=4096，
+   *     否则只搬运半个缓冲、全满回调读到陈旧数据 → 音频损坏。
+   * 添加 SAI HAL 源文件后，查 HAL_SAI_Receive_DMA 是否把 XferSize 直接当 GPDMA BNDT(字节)。
+   * 用 1kHz 已知音验证：频谱峰在 1kHz 且无周期性断点即为正确。 */
   if (HAL_SAI_Receive_DMA(&hsai_BlockA1, (uint8_t *)s_dma_buf,
                           MIC_DMA_HALF_SAMPLES * 2U) != HAL_OK) {
     MX_SAI1_DeInit(); ES8311_PowerDown(); PaEn_Set(0); return -4;

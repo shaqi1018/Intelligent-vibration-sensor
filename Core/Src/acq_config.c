@@ -307,7 +307,10 @@ int AcqConfig_SetMic(uint8_t enabled, uint32_t sample_rate_hz, uint16_t gain_db)
 {
   if (enabled)
   {
-    if ((sample_rate_hz != 8000U) && (sample_rate_hz != 16000U) && (sample_rate_hz != 48000U))
+    /* sample_rate_hz == 0 means "keep current rate" (see below); only validate
+     * when a concrete rate is supplied. */
+    if ((sample_rate_hz != 0U) &&
+        (sample_rate_hz != 8000U) && (sample_rate_hz != 16000U) && (sample_rate_hz != 48000U))
     {
       return -1;
     }
