@@ -50,6 +50,7 @@
 #include "board_io.h"
 #include "app_time.h"
 #include "rtc_pcf85063.h"
+#include "mic_capture.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -156,6 +157,8 @@ static uint8_t s_h3_acc_ringbuf[APP_RING_H3_ACC_SIZE];
 static AppRingBuffer_t g_ring_lsm_imu;
 static AppRingBuffer_t g_ring_qma_acc;
 static AppRingBuffer_t g_ring_h3_acc;
+static uint8_t s_mic_ringbuf[APP_RING_MIC_SIZE];
+AppRingBuffer_t g_ring_mic;                     /* 非 static：mic_capture.c extern 引用 */
 static volatile uint32_t g_lsm_frame_id_counter;
 static volatile uint32_t g_qma_frame_id_counter;
 static volatile uint32_t g_h3_frame_id_counter;
@@ -208,6 +211,13 @@ const osThreadAttr_t loggerTask_attributes = {
   .name = "loggerTask",
   .priority = (osPriority_t)osPriorityAboveNormal,
   .stack_size = 1024 * 4  /* 4KB — logger only buffers small line[128] + locals */
+};
+
+osThreadId_t micTaskHandle;
+const osThreadAttr_t micTask_attributes = {
+  .name = "micTask",
+  .priority = (osPriority_t)osPriorityAboveNormal,
+  .stack_size = 1024 * 1  /* 1KB — codec/SAI start-stop supervisor + small locals */
 };
 
 osThreadId_t usbCdcTaskHandle;
@@ -269,6 +279,7 @@ void StartLsm6dsoxTask(void *argument);
 void StartQma6100pTask(void *argument);
 void StartH3lis100dlTask(void *argument);
 void StartLoggerTask(void *argument);
+void StartMicTask(void *argument);
 void StartUsbCdcTask(void *argument);
 void StartUsbUploadTask(void *argument);
 
@@ -333,6 +344,7 @@ void MX_FREERTOS_Init(void)
   RingBuf_Init(&g_ring_lsm_imu, s_lsm_imu_ringbuf, APP_RING_LSM_IMU_SIZE);
   RingBuf_Init(&g_ring_qma_acc, s_qma_acc_ringbuf, APP_RING_QMA_ACC_SIZE);
   RingBuf_Init(&g_ring_h3_acc,  s_h3_acc_ringbuf,  APP_RING_H3_ACC_SIZE);
+  RingBuf_Init(&g_ring_mic,     s_mic_ringbuf,     APP_RING_MIC_SIZE);
 
   /* USER CODE BEGIN RTOS_TIMERS */
   /* USER CODE END RTOS_TIMERS */
@@ -353,12 +365,14 @@ void MX_FREERTOS_Init(void)
   h3lis100dlTaskHandle = osThreadNew(StartH3lis100dlTask, NULL, &h3lis100dlTask_attributes);
   qma6100pTaskHandle  = osThreadNew(StartQma6100pTask,  NULL, &qma6100pTask_attributes);
   loggerTaskHandle    = osThreadNew(StartLoggerTask,    NULL, &loggerTask_attributes);
+  micTaskHandle       = osThreadNew(StartMicTask,       NULL, &micTask_attributes);
   usbCdcTaskHandle = osThreadNew(StartUsbCdcTask, NULL, &usbCdcTask_attributes);
   usbUploadTaskHandle = osThreadNew(StartUsbUploadTask, NULL, &usbUploadTask_attributes);
   printf("[RTOS] lsm6dsoxTask created: %s\r\n", (lsm6dsoxTaskHandle != NULL) ? "ok" : "FAILED");
   printf("[RTOS] h3lis100dlTask created: %s\r\n", (h3lis100dlTaskHandle != NULL) ? "ok" : "FAILED");
   printf("[RTOS] qma6100pTask created: %s\r\n", (qma6100pTaskHandle != NULL) ? "ok" : "FAILED");
   printf("[RTOS] loggerTask created: %s\r\n", (loggerTaskHandle != NULL) ? "ok" : "FAILED");
+  printf("[RTOS] micTask created: %s\r\n", (micTaskHandle != NULL) ? "ok" : "FAILED");
   printf("[RTOS] usbCdcTask created: %s\r\n", (usbCdcTaskHandle != NULL) ? "ok" : "FAILED");
   printf("[RTOS] usbUploadTask created: %s\r\n", (usbUploadTaskHandle != NULL) ? "ok" : "FAILED");
 #endif
@@ -1170,6 +1184,14 @@ static uint32_t RingBuf_Write(AppRingBuffer_t *rb, const uint8_t *src, uint32_t 
   uint32_t avail = RingBuf_Available(rb);
   if (avail > rb->high_watermark) rb->high_watermark = avail;
   return len;
+}
+
+/* Non-static producer wrapper for the mic ring (SPSC). Sole writer is the SAI
+ * DMA ISR (HAL_SAI_RxHalf/CpltCallback in mic_capture.c). Resolves the extern
+ * declared in mic_capture.c. */
+uint32_t AppRing_WriteMic(const uint8_t *src, uint32_t len)
+{
+  return RingBuf_Write(&g_ring_mic, src, len);
 }
 
 /* Return pointer to next contiguous chunk of unread bytes (no wrap), capped
@@ -2500,6 +2522,44 @@ void StartQma6100pTask(void *argument)
 #endif
 }
 
+/* Mic supervisor: starts/stops the ES8311 + SAI DMA capture in lock-step with
+ * the global acquisition state when the codec is enabled in config. Audio data
+ * itself is pushed to g_ring_mic by the SAI DMA ISR; this task only handles the
+ * start/stop edges. */
+void StartMicTask(void *argument)
+{
+  (void)argument;
+  uint8_t running = 0U;
+  for (;;)
+  {
+    uint8_t want = (uint8_t)(AppAcqIsRunning() != 0U);
+    AcqConfig_t cfg; AcqConfig_GetCopy(&cfg);
+    want = (uint8_t)(want && cfg.es8311.enabled);
+
+    if (want && !running)
+    {
+      if (Mic_Start(cfg.es8311.sample_rate_hz, cfg.es8311.gain_db) == 0)
+      {
+        running = 1U;
+        printf("[Mic] started %luHz gain%u\r\n",
+               (unsigned long)cfg.es8311.sample_rate_hz, (unsigned)cfg.es8311.gain_db);
+      }
+      else
+      {
+        printf("[Mic] start failed\r\n");
+        osDelay(500U);
+      }
+    }
+    else if (!want && running)
+    {
+      Mic_Stop();
+      running = 0U;
+      printf("[Mic] stopped (dropped=%lu)\r\n", (unsigned long)Mic_GetDropped());
+    }
+    osDelay(20U);
+  }
+}
+
 void StartLoggerTask(void *argument)
 {
   FRESULT result;
@@ -2565,11 +2625,22 @@ void StartLoggerTask(void *argument)
         /* 将当前配置快照写入会话目录 */
         (void)DeviceCfg_WriteConfigToDir(FatFs_SD_GetSessionDir());
 
+        /* If the mic is enabled, create the MIC.WAV file (placeholder header,
+         * size patched on stop inside FatFs_SD_LoggerStop). */
+        {
+          AcqConfig_t mcfg; AcqConfig_GetCopy(&mcfg);
+          if (mcfg.es8311.enabled)
+          {
+            (void)FatFs_SD_WavCreate(mcfg.es8311.sample_rate_hz, mcfg.es8311.bits);
+          }
+        }
+
         /* Discard data buffered between sessions so each file starts clean
          * and frame_id/tick_ms in the new session align with real samples. */
         RingBuf_Reset(&g_ring_lsm_imu);
         RingBuf_Reset(&g_ring_qma_acc);
         RingBuf_Reset(&g_ring_h3_acc);
+        RingBuf_Reset(&g_ring_mic);
 
         sd_file_open = 1U;
         rows_since_sync = 0U;
@@ -2645,6 +2716,23 @@ void StartLoggerTask(void *argument)
           else
           {
             printf("[Logger] H3_ACC write fail %s (%d)\r\n",
+                   FatFs_SD_ResultToString(result), (int)result);
+            AppFlowStatsRecordWriteFailure();
+            break;
+          }
+        }
+        if (RingBuf_PeekContiguous(&g_ring_mic, &p, &n))
+        {
+          result = FatFs_SD_LoggerWriteFileIndex(FATFS_SD_FILE_MIC_WAV, p, n);  /* MIC.WAV */
+          if (result == FR_OK)
+          {
+            RingBuf_Consume(&g_ring_mic, n);
+            rows_since_sync += n;
+            did_work = 1;
+          }
+          else
+          {
+            printf("[Logger] MIC.WAV write fail %s (%d)\r\n",
                    FatFs_SD_ResultToString(result), (int)result);
             AppFlowStatsRecordWriteFailure();
             break;
