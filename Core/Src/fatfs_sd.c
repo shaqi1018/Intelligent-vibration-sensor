@@ -20,6 +20,7 @@
 #define FATFS_SD_FNAME_LSM_TMP   "LSM_TMP.CSV"
 #define FATFS_SD_FNAME_H3_ACC    "H3_ACC.CSV"
 #define FATFS_SD_FNAME_QMA_ACC   "QMA_ACC.CSV"
+#define FATFS_SD_FNAME_MIC_WAV   "MIC.WAV"
 
 #define FATFS_SD_FILE_LSM_IMU     0U
 #define FATFS_SD_FILE_LSM_TMP     1U
@@ -34,6 +35,21 @@ static char g_session_dir[FATFS_SD_DIR_PATH_MAX];
 static uint8_t g_sd_mounted = 0U;
 static uint8_t g_logger_active = 0U;
 static uint32_t g_logger_rows_written = 0U;
+
+/* MIC.WAV —— 单独的 FIL + 字节计数器（区别于 CSV 的 g_log_files[]）。
+ * 头里的 chunk_size/data_size 先写占位，停止时 f_lseek 回填。 */
+static FIL      g_wav_file;
+static uint8_t  g_wav_open  = 0U;
+static uint32_t g_wav_bytes = 0U;   /* 已写入的 PCM 字节数 */
+
+/* 标准 WAV 头：44 字节、紧凑排布、字段按 canonical WAV 顺序。
+ * chunk_size 在偏移 4、data_size 在偏移 40（FatFs_SD_WavFinalize 回填用）。 */
+typedef struct __attribute__((packed)) {
+  char     riff[4];        uint32_t chunk_size;   char     wave[4];
+  char     fmt[4];         uint32_t fmt_size;     uint16_t audio_format; uint16_t num_channels;
+  uint32_t sample_rate;    uint32_t byte_rate;    uint16_t block_align;  uint16_t bits_per_sample;
+  char     data[4];        uint32_t data_size;
+} WavHeader_t;
 
 const char *FatFs_SD_ResultToString(FRESULT result)
 {
@@ -166,6 +182,11 @@ FRESULT FatFs_SD_Mount(void)
 
 void FatFs_SD_Unmount(void)
 {
+  if (g_wav_open != 0U)
+  {
+    (void)FatFs_SD_WavFinalize();
+  }
+
   if (g_logger_active != 0U)
   {
     for (uint32_t i = 0U; i < FATFS_SD_NUM_FILES; i++)
@@ -308,14 +329,85 @@ FRESULT FatFs_SD_LoggerAppendFrame(const AppSensorFrame_t *frame)
   return FR_OK;
 }
 
+/* MIC.WAV：在会话目录创建文件并写入占位头（chunk_size=36、data_size=0）。
+ * sample_rate_hz ∈ {8000,16000,48000}，bits 固定 16。停止时由
+ * FatFs_SD_WavFinalize 回填 chunk_size/data_size。 */
+FRESULT FatFs_SD_WavCreate(uint32_t sample_rate_hz, uint16_t bits)
+{
+  if (g_logger_active == 0U) return FR_NOT_ENABLED;
+
+  char path[FATFS_SD_FILE_PATH_MAX];
+  (void)snprintf(path, sizeof(path), "%s/%s", g_session_dir, FATFS_SD_FNAME_MIC_WAV);
+
+  FRESULT r = f_open(&g_wav_file, path, FA_CREATE_ALWAYS | FA_WRITE);
+  if (r != FR_OK)
+  {
+    printf("[FatFs] 打开 %s 失败: %s (%d)\r\n", path, FatFs_SD_ResultToString(r), (int)r);
+    return r;
+  }
+
+  WavHeader_t h;
+  memcpy(h.riff, "RIFF", 4); memcpy(h.wave, "WAVE", 4);
+  memcpy(h.fmt,  "fmt ", 4); memcpy(h.data, "data", 4);
+  h.chunk_size      = 36U;          /* 占位：36 + data_size，停止时回填 */
+  h.fmt_size        = 16U;
+  h.audio_format    = 1U;           /* PCM */
+  h.num_channels    = 1U;           /* 单声道 */
+  h.sample_rate     = sample_rate_hz;
+  h.bits_per_sample = bits;
+  h.block_align     = (uint16_t)(1U * bits / 8U);
+  h.byte_rate       = sample_rate_hz * h.block_align;
+  h.data_size       = 0U;           /* 占位 */
+
+  r = FatFs_SD_WriteExact(&g_wav_file, &h, sizeof(h));
+  if (r != FR_OK)
+  {
+    (void)f_close(&g_wav_file);
+    return r;
+  }
+
+  g_wav_open  = 1U;
+  g_wav_bytes = 0U;
+  return FR_OK;
+}
+
 /* Generic single-file log write — used by the ring buffer flush path
- * (LSM_IMU and QMA_ACC both come through here from the logger task). */
+ * (LSM_IMU and QMA_ACC both come through here from the logger task).
+ * idx==FATFS_SD_FILE_MIC_WAV(4) 路由到独立的 g_wav_file 并累加字节数。 */
 FRESULT FatFs_SD_LoggerWriteFileIndex(uint8_t idx, const uint8_t *data, uint32_t len)
 {
-  if (idx >= FATFS_SD_NUM_FILES || data == NULL || len == 0U) return FR_INVALID_PARAMETER;
+  if (data == NULL || len == 0U) return FR_INVALID_PARAMETER;
+
+  if (idx == FATFS_SD_FILE_MIC_WAV)
+  {
+    if (g_wav_open == 0U) return FR_NOT_ENABLED;
+    if (SDMMC1_IsCardDetected() == 0U) return FR_NOT_READY;
+    FRESULT r = FatFs_SD_WriteExact(&g_wav_file, data, (UINT)len);
+    if (r == FR_OK) g_wav_bytes += len;
+    return r;
+  }
+
+  if (idx >= FATFS_SD_NUM_FILES) return FR_INVALID_PARAMETER;
   if (g_logger_active == 0U) return FR_NOT_ENABLED;
   if (SDMMC1_IsCardDetected() == 0U) return FR_NOT_READY;
   return FatFs_SD_WriteExact(&g_log_files[idx], data, (UINT)len);
+}
+
+/* MIC.WAV 收尾：回填 chunk_size(@偏移4) 与 data_size(@偏移40)，同步并关闭。 */
+FRESULT FatFs_SD_WavFinalize(void)
+{
+  if (g_wav_open == 0U) return FR_OK;
+
+  uint32_t chunk_size = 36U + g_wav_bytes;
+  FRESULT r1 = f_lseek(&g_wav_file, 4U);
+  if (r1 == FR_OK) r1 = FatFs_SD_WriteExact(&g_wav_file, &chunk_size, 4U);
+  FRESULT r2 = f_lseek(&g_wav_file, 40U);
+  if (r2 == FR_OK) r2 = FatFs_SD_WriteExact(&g_wav_file, &g_wav_bytes, 4U);
+
+  (void)f_sync(&g_wav_file);
+  (void)f_close(&g_wav_file);
+  g_wav_open = 0U;
+  return (r1 == FR_OK) ? r2 : r1;
 }
 
 FRESULT FatFs_SD_LoggerSync(void)
@@ -336,6 +428,8 @@ FRESULT FatFs_SD_LoggerSync(void)
     }
   }
 
+  if (g_wav_open != 0U) { (void)f_sync(&g_wav_file); }
+
   if (result != FR_OK)
   {
     printf("[FatFs] sync rows=%lu result=%s (%d)\r\n",
@@ -348,6 +442,8 @@ FRESULT FatFs_SD_LoggerSync(void)
 
 void FatFs_SD_LoggerStop(void)
 {
+  if (g_wav_open != 0U) { (void)FatFs_SD_WavFinalize(); }
+
   if (g_logger_active != 0U)
   {
     for (uint32_t i = 0U; i < FATFS_SD_NUM_FILES; i++)

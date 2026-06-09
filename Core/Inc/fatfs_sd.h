@@ -20,6 +20,13 @@ FRESULT FatFs_SD_LoggerAppendFrame(const AppSensorFrame_t *frame);
  *   0=LSM_IMU, 1=LSM_TMP, 2=H3_ACC, 3=QMA_ACC
  * Used by the ring buffer flush path in StartLoggerTask. */
 FRESULT FatFs_SD_LoggerWriteFileIndex(uint8_t idx, const uint8_t *data, uint32_t len);
+
+/* MIC.WAV —— 文件索引 4。因需开头占位头、停止时回填大小，单独用一个
+ * FIL + 字节计数器管理，不走 CSV 的 g_log_files[] 数组。 */
+#define FATFS_SD_FILE_MIC_WAV   4U
+FRESULT FatFs_SD_WavCreate(uint32_t sample_rate_hz, uint16_t bits);
+FRESULT FatFs_SD_WavFinalize(void);
+
 FRESULT FatFs_SD_LoggerSync(void);
 void FatFs_SD_LoggerStop(void);
 void FatFs_SD_RunPhaseBSmokeTest(void);
