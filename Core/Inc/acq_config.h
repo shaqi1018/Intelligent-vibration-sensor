@@ -50,6 +50,14 @@ typedef struct {
   uint16_t odr_hz;          /* 期望 ODR Hz（驱动选最接近的支持挡位）      */
 } AcqSensorCfg_t;
 
+/* 麦克风（ES8311）配置 */
+typedef struct {
+  uint8_t  enabled;         /* 1 = 参与采集 */
+  uint32_t sample_rate_hz;  /* 8000 / 16000 / 48000 */
+  uint16_t bits;            /* 固定 16 */
+  uint16_t gain_db;         /* 0..42 */
+} AcqMicCfg_t;
+
 typedef struct {
   uint32_t sample_rate_hz;             /* 1..10000 */
   uint8_t  sink_mask;                  /* USB / SD / BOTH */
@@ -62,6 +70,7 @@ typedef struct {
   AcqSensorCfg_t lsm6dsox;
   AcqSensorCfg_t h3lis100dl;
   AcqSensorCfg_t qma6100p;
+  AcqMicCfg_t    es8311;
 } AcqConfig_t;
 
 typedef enum {
@@ -97,6 +106,14 @@ int  AcqConfig_SetTrigger(AcqTriggerMode_t mode, uint32_t arg_ms);
 int  AcqConfig_SetDuration(uint32_t duration_ms);
 int  AcqConfig_SetRingSize(uint32_t bytes);
 int  AcqConfig_SetSensor(uint8_t which /*0=lsm,1=h3,2=qma*/, uint8_t enabled, uint16_t range, uint16_t odr_hz);
+
+/**
+ * @brief 设置麦克风（ES8311）配置：使能 / 采样率 / 增益。
+ *        采样率仅接受 8000/16000/48000；gain_db ≤ 42；bits 固定 16。
+ *        sample_rate_hz 传 0 表示保持不变。
+ * @return 0=成功；非0=参数非法
+ */
+int  AcqConfig_SetMic(uint8_t enabled, uint32_t sample_rate_hz, uint16_t gain_db);
 
 /**
  * @brief 扩展版 SetSensor：同时设置 range2（陀螺仪量程 dps，仅 LSM6DSOX 有效）。

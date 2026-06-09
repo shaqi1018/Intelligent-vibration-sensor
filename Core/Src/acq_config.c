@@ -59,6 +59,12 @@ static void AcqCfgLoadDefaults(void)
   s_cfg.qma6100p.range   = 4U;      /* ±4 g  */
   s_cfg.qma6100p.range2  = 0U;
   s_cfg.qma6100p.odr_hz  = 100U;
+
+  /* ES8311 麦克风：默认关闭，由 DEVCFG 打开 */
+  s_cfg.es8311.enabled        = 0U;
+  s_cfg.es8311.sample_rate_hz = 16000U;
+  s_cfg.es8311.bits           = 16U;
+  s_cfg.es8311.gain_db        = 24U;
 }
 
 void AcqConfig_Init(void)
@@ -122,6 +128,22 @@ static int AcqCfgValidate(const AcqConfig_t *cfg)
       (cfg->trigger_mode != ACQ_TRIGGER_TIMER))
   {
     return -1;
+  }
+  if (cfg->es8311.enabled)
+  {
+    uint32_t sr = cfg->es8311.sample_rate_hz;
+    if ((sr != 8000U) && (sr != 16000U) && (sr != 48000U))
+    {
+      return -1;
+    }
+    if (cfg->es8311.bits != 16U)
+    {
+      return -1;
+    }
+    if (cfg->es8311.gain_db > 42U)
+    {
+      return -1;
+    }
   }
   return 0;
 }
@@ -278,6 +300,28 @@ int AcqConfig_SetSensorFull(uint8_t which, uint8_t enabled,
     s_cfg.lsm6dsox.range2 = range2;
     AcqCfgUnlock();
   }
+  return 0;
+}
+
+int AcqConfig_SetMic(uint8_t enabled, uint32_t sample_rate_hz, uint16_t gain_db)
+{
+  if (enabled)
+  {
+    if ((sample_rate_hz != 8000U) && (sample_rate_hz != 16000U) && (sample_rate_hz != 48000U))
+    {
+      return -1;
+    }
+    if (gain_db > 42U)
+    {
+      return -1;
+    }
+  }
+  AcqCfgLock();
+  s_cfg.es8311.enabled = (enabled != 0U) ? 1U : 0U;
+  if (sample_rate_hz != 0U) { s_cfg.es8311.sample_rate_hz = sample_rate_hz; }
+  s_cfg.es8311.bits    = 16U;
+  s_cfg.es8311.gain_db = gain_db;
+  AcqCfgUnlock();
   return 0;
 }
 
