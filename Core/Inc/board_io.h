@@ -26,6 +26,12 @@
 #define BOARD_USB_DET_PIN       GPIO_PIN_7
 #define BOARD_USB_DET_PORT      GPIOC
 
+/* PA_EN: codec 供电门控（AO3401A P 沟道 PFET 栅，脚36 = PB15）。
+ * 低电平有效：拉低 → PFET 导通 → PAVCC = 3V3 给 ES8311 供电。
+ * 默认拉高（关断，上电安全、省功耗）。 */
+#define BOARD_PA_EN_PIN         GPIO_PIN_15
+#define BOARD_PA_EN_PORT        GPIOB
+
 void    BoardIO_Init(void);
 void    BoardIO_StartupLatch(void);
 uint8_t BoardIO_IsBatteryLatched(void);
@@ -35,5 +41,6 @@ void    PowerCtl_Set(uint8_t on);
 uint8_t UserBtn_IsPressed(void);
 uint8_t PwrBtn_IsPressed(void);
 uint8_t UsbDet_IsPresent(void);   /* 1 = USB cable plugged (PC7 HIGH) */
+void    PaEn_Set(uint8_t on);     /* 1 = 给 codec 供电（内部拉低 PA_EN） */
 
 #endif /* BOARD_IO_H */

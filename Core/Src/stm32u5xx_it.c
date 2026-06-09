@@ -23,6 +23,7 @@
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 #include "dma_sampling.h"
+#include "sai.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -271,6 +272,15 @@ void EXTI1_IRQHandler(void)   /* H3LIS100DL DRDY → PA1 */
 void EXTI4_IRQHandler(void)   /* QMA6100P INT1 → PC4 */
 {
   HAL_GPIO_EXTI_IRQHandler(GPIO_PIN_4);
+}
+
+/**
+  * @brief This function handles GPDMA1 Channel 4 global interrupt
+  *        (SAI1_A RX circular DMA feeding the ES8311 mic ring buffer).
+  */
+void GPDMA1_Channel4_IRQHandler(void)
+{
+  HAL_DMA_IRQHandler(&handle_GPDMA1_Channel_SAI);
 }
 
 /* USER CODE BEGIN 1 */

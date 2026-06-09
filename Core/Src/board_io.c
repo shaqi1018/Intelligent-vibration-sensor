@@ -37,6 +37,15 @@ void BoardIO_Init(void)
   g.Pin = BOARD_LED_PIN;
   HAL_GPIO_Init(BOARD_LED_PORT, &g);
   HAL_GPIO_WritePin(BOARD_LED_PORT, BOARD_LED_PIN, GPIO_PIN_RESET);
+
+  /* PA_EN (PB15) — push-pull output. Active-LOW: default HIGH so the codec is
+   * NOT powered (saves current, safe on boot). PaEn_Set(1) pulls it LOW. */
+  HAL_GPIO_WritePin(BOARD_PA_EN_PORT, BOARD_PA_EN_PIN, GPIO_PIN_SET);
+  g.Pin   = BOARD_PA_EN_PIN;
+  g.Mode  = GPIO_MODE_OUTPUT_PP;
+  g.Pull  = GPIO_NOPULL;
+  g.Speed = GPIO_SPEED_FREQ_LOW;
+  HAL_GPIO_Init(BOARD_PA_EN_PORT, &g);
 }
 
 /* Called from main() before RTOS/USB starts.
@@ -112,4 +121,12 @@ uint8_t UsbDet_IsPresent(void)
 {
   return (HAL_GPIO_ReadPin(BOARD_USB_DET_PORT, BOARD_USB_DET_PIN)
           == GPIO_PIN_SET) ? 1U : 0U;
+}
+
+/* PA_EN is active-LOW (AO3401A P-channel PFET gate): on=1 → drive LOW → PFET
+ * conducts → PAVCC=3V3 to ES8311; on=0 → drive HIGH → codec powered off. */
+void PaEn_Set(uint8_t on)
+{
+  HAL_GPIO_WritePin(BOARD_PA_EN_PORT, BOARD_PA_EN_PIN,
+                    on ? GPIO_PIN_RESET : GPIO_PIN_SET);
 }
