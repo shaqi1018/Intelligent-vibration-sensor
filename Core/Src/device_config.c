@@ -77,6 +77,16 @@ static const char kCfgTemplate[] =
 "    \"odr_hz\": 100,\r\n"
 "    \"_options_odr_hz\": [100, 200, 400, 800, 1600],\r\n"
 "    \"_options_odr_hz_lowpower\": [12, 25, 50]\r\n"
+"  },\r\n"
+"\r\n"
+"  \"es8311\": {\r\n"
+"    \"_doc\": \"ES8311 mono microphone codec on I2C2 (shared with RTC), I2S/SAI capture\",\r\n"
+"    \"enabled\": 1,\r\n"
+"    \"sample_rate_hz\": 16000,\r\n"
+"    \"_options_sample_rate_hz\": [8000, 16000, 48000],\r\n"
+"    \"bits\": 16,\r\n"
+"    \"gain_db\": 24,\r\n"
+"    \"_doc_gain_db\": \"mic PGA gain 0..42 dB (approx 3 dB steps)\"\r\n"
 "  }\r\n"
 "}\r\n";
 
@@ -335,6 +345,26 @@ static void DeviceCfg_ParseAndApply(const char *buf)
             cfg.qma6100p.odr_hz = (uint16_t)v;
     }
 
+    /* ---- es8311 子对象（麦克风） ---- */
+    if (json_extract_object(buf, "es8311", s_obj, sizeof(s_obj)))
+    {
+        p = json_find_value(s_obj, "enabled");
+        if (json_parse_uint(p, &v))
+            cfg.es8311.enabled = (uint8_t)(v != 0U ? 1U : 0U);
+
+        p = json_find_value(s_obj, "sample_rate_hz");
+        if (json_parse_uint(p, &v))
+            cfg.es8311.sample_rate_hz = v;
+
+        p = json_find_value(s_obj, "bits");
+        if (json_parse_uint(p, &v))
+            cfg.es8311.bits = (uint16_t)v;
+
+        p = json_find_value(s_obj, "gain_db");
+        if (json_parse_uint(p, &v))
+            cfg.es8311.gain_db = (uint16_t)v;
+    }
+
     if (AcqConfig_Set(&cfg) == 0)
     {
         printf("[DevCfg] 配置已应用: %lu Hz, sink=0x%02X\r\n",
@@ -430,7 +460,7 @@ FRESULT DeviceCfg_WriteCurrentToSD(void)
     const char *sink_name;
     const char *storage_str;
     const char *trigger_str;
-    static char s_line[1024];
+    static char s_line[2048];
     int         line_len;
 
     AcqConfig_GetCopy(&cfg);
@@ -507,6 +537,16 @@ FRESULT DeviceCfg_WriteCurrentToSD(void)
         "    \"odr_hz\": %u,\r\n"
         "    \"_options_odr_hz\": [100, 200, 400, 800, 1600],\r\n"
         "    \"_options_odr_hz_lowpower\": [12, 25, 50]\r\n"
+        "  },\r\n"
+        "\r\n"
+        "  \"es8311\": {\r\n"
+        "    \"_doc\": \"ES8311 mono microphone codec on I2C2 (shared with RTC), I2S/SAI capture\",\r\n"
+        "    \"enabled\": %u,\r\n"
+        "    \"sample_rate_hz\": %lu,\r\n"
+        "    \"_options_sample_rate_hz\": [8000, 16000, 48000],\r\n"
+        "    \"bits\": %u,\r\n"
+        "    \"gain_db\": %u,\r\n"
+        "    \"_doc_gain_db\": \"mic PGA gain 0..42 dB (approx 3 dB steps)\"\r\n"
         "  }\r\n"
         "}\r\n",
         (unsigned long)cfg.sample_rate_hz,
@@ -525,7 +565,11 @@ FRESULT DeviceCfg_WriteCurrentToSD(void)
         (unsigned int)cfg.h3lis100dl.odr_hz,
         (unsigned int)cfg.qma6100p.enabled,
         (unsigned int)cfg.qma6100p.range,
-        (unsigned int)cfg.qma6100p.odr_hz);
+        (unsigned int)cfg.qma6100p.odr_hz,
+        (unsigned int)cfg.es8311.enabled,
+        (unsigned long)cfg.es8311.sample_rate_hz,
+        (unsigned int)cfg.es8311.bits,
+        (unsigned int)cfg.es8311.gain_db);
 
     if ((line_len < 0) || ((size_t)line_len >= sizeof(s_line)))
         return FR_INT_ERR;
@@ -560,7 +604,7 @@ FRESULT DeviceCfg_WriteConfigToDir(const char *dir)
     FIL         file;
     AcqConfig_t cfg;
     char        path[48];
-    static char s_line[512];
+    static char s_line[768];
     int         line_len;
 
     if (dir == NULL) return FR_INVALID_PARAMETER;
@@ -585,6 +629,12 @@ FRESULT DeviceCfg_WriteConfigToDir(const char *dir)
         "    \"enabled\": %u,\r\n"
         "    \"range_g\": %u,\r\n"
         "    \"odr_hz\": %u\r\n"
+        "  },\r\n"
+        "  \"es8311\": {\r\n"
+        "    \"enabled\": %u,\r\n"
+        "    \"sample_rate_hz\": %lu,\r\n"
+        "    \"bits\": %u,\r\n"
+        "    \"gain_db\": %u\r\n"
         "  }\r\n"
         "}\r\n",
         (unsigned int)cfg.lsm6dsox.enabled,
@@ -596,7 +646,11 @@ FRESULT DeviceCfg_WriteConfigToDir(const char *dir)
         (unsigned int)cfg.h3lis100dl.odr_hz,
         (unsigned int)cfg.qma6100p.enabled,
         (unsigned int)cfg.qma6100p.range,
-        (unsigned int)cfg.qma6100p.odr_hz);
+        (unsigned int)cfg.qma6100p.odr_hz,
+        (unsigned int)cfg.es8311.enabled,
+        (unsigned long)cfg.es8311.sample_rate_hz,
+        (unsigned int)cfg.es8311.bits,
+        (unsigned int)cfg.es8311.gain_db);
 
     if ((line_len < 0) || ((size_t)line_len >= sizeof(s_line)))
         return FR_INT_ERR;
