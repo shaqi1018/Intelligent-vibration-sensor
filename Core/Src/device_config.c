@@ -85,7 +85,7 @@ static const char kCfgTemplate[] =
 "    \"sample_rate_hz\": 16000,\r\n"
 "    \"_options_sample_rate_hz\": [8000, 16000, 48000],\r\n"
 "    \"bits\": 16,\r\n"
-"    \"gain_db\": 24,\r\n"
+"    \"gain_db\": 33,\r\n"
 "    \"_doc_gain_db\": \"mic PGA gain 0..42 dB (approx 3 dB steps)\"\r\n"
 "  }\r\n"
 "}\r\n";

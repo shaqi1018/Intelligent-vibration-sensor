@@ -7,9 +7,13 @@
 #include <string.h>
 
 /* DMA 目标：双半缓冲，半字（int16）。每半 1024 样本 = 2KB。
- * 半满/全满回调各搬运一半到 g_ring_mic（SPSC 生产者侧）。 */
+ * SAI 以立体声帧运行（I2S 标准要求 2 slot），ES8311 单声道 ADC 在两个 slot
+ * 输出相同数据（L=R）。mic_push 只取偶数索引（slot-0/L 声道），丢弃奇数索引（slot-1/R），
+ * 向 ring 写入真实 16kHz 单声道样本。 */
 #define MIC_DMA_HALF_SAMPLES   1024U
+#define MIC_MONO_HALF          (MIC_DMA_HALF_SAMPLES / 2U)   /* 512 单声道样本 */
 static int16_t s_dma_buf[MIC_DMA_HALF_SAMPLES * 2U];
+static int16_t s_mono_buf[MIC_MONO_HALF];
 static volatile uint32_t s_dropped = 0U;
 
 /* 由 app_freertos.c 暴露（写 g_ring_mic，SPSC 生产者侧）。
@@ -18,8 +22,15 @@ extern uint32_t AppRing_WriteMic(const uint8_t *src, uint32_t len);
 
 static void mic_push(const int16_t *p, uint32_t nsamp)
 {
-  uint32_t w = AppRing_WriteMic((const uint8_t *)p, nsamp * 2U);
-  if (w == 0U) s_dropped += nsamp * 2U;
+  /* p is [L0,R0,L1,R1,...] (nsamp=1024 stereo elements).
+   * Extract L channel (even indices) → 512 true mono samples at 16 kHz. */
+  (void)nsamp;
+  for (uint32_t i = 0U; i < MIC_MONO_HALF; i++)
+  {
+    s_mono_buf[i] = p[i * 2U];
+  }
+  uint32_t w = AppRing_WriteMic((const uint8_t *)s_mono_buf, MIC_MONO_HALF * 2U);
+  if (w == 0U) { s_dropped += MIC_MONO_HALF * 2U; }
 }
 
 void HAL_SAI_RxHalfCpltCallback(SAI_HandleTypeDef *hsai)

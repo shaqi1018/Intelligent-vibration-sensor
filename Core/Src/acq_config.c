@@ -64,7 +64,7 @@ static void AcqCfgLoadDefaults(void)
   s_cfg.es8311.enabled        = 0U;
   s_cfg.es8311.sample_rate_hz = 16000U;
   s_cfg.es8311.bits           = 16U;
-  s_cfg.es8311.gain_db        = 24U;
+  s_cfg.es8311.gain_db        = 33U;
 }
 
 void AcqConfig_Init(void)
