@@ -94,7 +94,7 @@ typedef struct {
   volatile uint32_t high_watermark;   /* peak fill level for diagnostics */
 } AppRingBuffer_t;
 
-#define APP_RING_LSM_IMU_SIZE   (64U * 1024U)   /* combined ACC+GYR rows */
+#define APP_RING_LSM_IMU_SIZE   (128U * 1024U)  /* 6664Hz×60B/row≈400KB/s；128KB≈0.32s，覆盖SD最坏擦写延迟 */
 #define APP_RING_QMA_ACC_SIZE   (32U * 1024U)
 #define APP_RING_H3_ACC_SIZE    (16U * 1024U)   /* 400Hz × 14B/row × 5s ≈ 28KB cap, 16KB enough with logger drain */
 /* Largest contiguous chunk handed to f_write per call. Bigger = fewer FAT
