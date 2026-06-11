@@ -196,14 +196,14 @@ osThreadId_t qma6100pTaskHandle;
 const osThreadAttr_t qma6100pTask_attributes = {
   .name = "qma6100pTask",
   .priority = (osPriority_t)osPriorityAboveNormal,
-  .stack_size = 1024 * 4  /* 4KB — small char rowbuf + fifo_buf static */
+  .stack_size = 2048 * 4  /* 8KB — fifo_buf(static)+rowbuf+局部变量；4KB曾导致栈溢出破坏frame_id计数器 */
 };
 
 osThreadId_t h3lis100dlTaskHandle;
 const osThreadAttr_t h3lis100dlTask_attributes = {
   .name = "h3lis100dlTask",
   .priority = (osPriority_t)osPriorityAboveNormal,
-  .stack_size = 1024 * 4  /* 4KB — small char rowbuf + locals */
+  .stack_size = 2048 * 4  /* 8KB — 与QMA同步扩容，防止低概率栈溢出 */
 };
 
 osThreadId_t loggerTaskHandle;
@@ -2112,12 +2112,21 @@ void StartLsm6dsoxTask(void *argument)
           off += AppF1ToDec(&rowbuf[off], (float)cur_gyr[2] * g_s);
           rowbuf[off++] = '\r';
           rowbuf[off++] = '\n';
-          RingBuf_Write(&g_ring_lsm_imu, (const uint8_t *)rowbuf, off);
-
-          /* WCID Bulk: write CSV directly to USB endpoint double-buffer. */
-          if (g_boot_mode == BOOT_MODE_WCID_BULK && AppAcqIsUsbSinkActive() != 0U)
+          /* Guard: verify exactly 7 commas (8 columns) before writing.
+           * ~0.5% of rows have missing/extra commas from an unknown cause;
+           * silently dropping them is better than corrupting the CSV file. */
           {
-            UsbWcidApp_SendCsv(WCID_CH_LSM_IMU, rowbuf, off);
+            uint32_t nc = 0U;
+            for (uint32_t k = 0U; k < off - 2U; k++) { if (rowbuf[k] == ',') nc++; }
+            if (nc == 7U)
+            {
+              RingBuf_Write(&g_ring_lsm_imu, (const uint8_t *)rowbuf, off);
+              /* WCID Bulk: write CSV directly to USB endpoint double-buffer. */
+              if (g_boot_mode == BOOT_MODE_WCID_BULK && AppAcqIsUsbSinkActive() != 0U)
+              {
+                UsbWcidApp_SendCsv(WCID_CH_LSM_IMU, rowbuf, off);
+              }
+            }
           }
 
           last_acc[0] = cur_acc[0]; last_acc[1] = cur_acc[1]; last_acc[2] = cur_acc[2];
@@ -2646,6 +2655,9 @@ void StartLoggerTask(void *argument)
         RingBuf_Reset(&g_ring_qma_acc);
         RingBuf_Reset(&g_ring_h3_acc);
         RingBuf_Reset(&g_ring_mic);
+        g_lsm_frame_id_counter = 0U;
+        g_qma_frame_id_counter = 0U;
+        g_h3_frame_id_counter  = 0U;
 
         sd_file_open = 1U;
         rows_since_sync = 0U;
@@ -2831,5 +2843,15 @@ void StartLoggerTask(void *argument)
     AppFlowStatsSetMode(0U, (uint8_t)(sd_file_open != 0U));
     osDelay(10U);
   }
+}
+/* FreeRTOS stack-overflow hook — called when configCHECK_FOR_STACK_OVERFLOW≥1
+ * detects a task has overrun its stack. Prints the offending task name and
+ * halts so the fault is visible on the debug console. */
+void vApplicationStackOverflowHook(TaskHandle_t xTask, char *pcTaskName)
+{
+  (void)xTask;
+  printf("[FATAL] stack overflow in task: %s\r\n", pcTaskName);
+  taskDISABLE_INTERRUPTS();
+  for (;;) {}
 }
 /* USER CODE END Application */
