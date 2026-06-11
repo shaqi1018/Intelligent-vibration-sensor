@@ -32,8 +32,8 @@
 
 #define _FS_TINY             0
 #define _FS_EXFAT            0
-#define _FS_NORTC            1
-#define _NORTC_MON           1
+#define _FS_NORTC            0    /* 0=调 get_fattime() 读 RTC 实时时间作为文件时间戳 */
+#define _NORTC_MON           1    /* 仅 _FS_NORTC==1 时生效，此处保留不用 */
 #define _NORTC_MDAY          1
 #define _NORTC_YEAR          2026
 #define _FS_LOCK             0

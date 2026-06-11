@@ -38,7 +38,9 @@ int ES8311_InitAdc(uint32_t sample_rate_hz, uint16_t gain_db)
   osDelay(1);
   es_write(0x45, 0x00);
   /* 时钟管理：MCLK 来源、使能 ADC 时钟 */
-  es_write(0x01, 0x30);            /* mclk on, adc clk on */
+  es_write(0x01, 0x3F);            /* 全时钟使能：MCLK/BCLK/ADC clk/DAC clk/模拟 clk
+                                    * （官方驱动值；此前误设 0x30 漏开 ADC 时钟低位位，
+                                    *  导致 ADC 内核无时钟、SDOUT 恒 0、录音全静音） */
   es_write(0x02, ES_REG02_CLK);
   es_write(0x03, ES_REG03_CLK);
   es_write(0x16, 0x24);

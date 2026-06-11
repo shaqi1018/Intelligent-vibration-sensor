@@ -32,3 +32,9 @@ void MX_I2C2_Init(void)
   hi2c2.Init.NoStretchMode    = I2C_NOSTRETCH_DISABLE;
   HAL_I2C_Init(&hi2c2);
 }
+
+void I2C2_BusRecover(void)
+{
+  HAL_I2C_DeInit(&hi2c2);
+  MX_I2C2_Init();
+}

@@ -20,18 +20,25 @@ uint8_t Pcf85063_Init(void)
 uint8_t Pcf85063_GetTime(Pcf85063_Time_t *t)
 {
   uint8_t raw[7];
-  if (HAL_I2C_Mem_Read(&hi2c2, PCF85063_ADDR, PCF85063_REG_SECONDS,
-                        I2C_MEMADD_SIZE_8BIT, raw, 7U, 50U) != HAL_OK)
-    return PCF85063_ERR;
-
-  t->second = BcdToDec(raw[0] & 0x7FU);  /* 屏蔽 OS bit */
-  t->minute = BcdToDec(raw[1] & 0x7FU);
-  t->hour   = BcdToDec(raw[2] & 0x3FU);
-  t->day    = BcdToDec(raw[3] & 0x3FU);
-  /* raw[4] = weekday，忽略 */
-  t->month  = BcdToDec(raw[5] & 0x1FU);
-  t->year   = BcdToDec(raw[6]);
-  return PCF85063_OK;
+  /* 失败重试：若前序 I2C2 传输（如 ES8311 配置）留下错误态，第一次读会失败，
+   * 恢复总线后重试即可成功 —— 避免 SD 文件时间戳整批 fallback。 */
+  for (uint8_t attempt = 0U; attempt < 3U; attempt++)
+  {
+    if (HAL_I2C_Mem_Read(&hi2c2, PCF85063_ADDR, PCF85063_REG_SECONDS,
+                         I2C_MEMADD_SIZE_8BIT, raw, 7U, 50U) == HAL_OK)
+    {
+      t->second = BcdToDec(raw[0] & 0x7FU);  /* 屏蔽 OS bit */
+      t->minute = BcdToDec(raw[1] & 0x7FU);
+      t->hour   = BcdToDec(raw[2] & 0x3FU);
+      t->day    = BcdToDec(raw[3] & 0x3FU);
+      /* raw[4] = weekday，忽略 */
+      t->month  = BcdToDec(raw[5] & 0x1FU);
+      t->year   = BcdToDec(raw[6]);
+      return PCF85063_OK;
+    }
+    I2C2_BusRecover();   /* 恢复被前序失败污染的总线后重试 */
+  }
+  return PCF85063_ERR;
 }
 
 uint8_t Pcf85063_SetTime(const Pcf85063_Time_t *t)

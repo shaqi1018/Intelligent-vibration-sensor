@@ -409,21 +409,6 @@
               <FilePath>../Core/Src/app_freertos.c</FilePath>
             </File>
             <File>
-              <FileName>app_time.c</FileName>
-              <FileType>1</FileType>
-              <FilePath>../Core/Src/app_time.c</FilePath>
-            </File>
-            <File>
-              <FileName>i2c.c</FileName>
-              <FileType>1</FileType>
-              <FilePath>../Core/Src/i2c.c</FilePath>
-            </File>
-            <File>
-              <FileName>rtc_pcf85063.c</FileName>
-              <FileType>1</FileType>
-              <FilePath>../Core/Src/rtc_pcf85063.c</FilePath>
-            </File>
-            <File>
               <FileName>icache.c</FileName>
               <FileType>1</FileType>
               <FilePath>../Core/Src/icache.c</FilePath>
@@ -492,6 +477,36 @@
               <FileName>frame_ring.c</FileName>
               <FileType>1</FileType>
               <FilePath>../Core/Src/frame_ring.c</FilePath>
+            </File>
+            <File>
+              <FileName>i2c.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\Core\Src\i2c.c</FilePath>
+            </File>
+            <File>
+              <FileName>app_time.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\Core\Src\app_time.c</FilePath>
+            </File>
+            <File>
+              <FileName>rtc_pcf85063.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\Core\Src\rtc_pcf85063.c</FilePath>
+            </File>
+            <File>
+              <FileName>sai.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>../Core/Src/sai.c</FilePath>
+            </File>
+            <File>
+              <FileName>es8311.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>../Core/Src/es8311.c</FilePath>
+            </File>
+            <File>
+              <FileName>mic_capture.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>../Core/Src/mic_capture.c</FilePath>
             </File>
           </Files>
         </Group>
@@ -1232,6 +1247,16 @@
               <FileName>stm32u5xx_ll_usb.c</FileName>
               <FileType>1</FileType>
               <FilePath>../Drivers/STM32U5xx_HAL_Driver/Src/stm32u5xx_ll_usb.c</FilePath>
+            </File>
+            <File>
+              <FileName>stm32u5xx_hal_sai.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>../Drivers/STM32U5xx_HAL_Driver/Src/stm32u5xx_hal_sai.c</FilePath>
+            </File>
+            <File>
+              <FileName>stm32u5xx_hal_sai_ex.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>../Drivers/STM32U5xx_HAL_Driver/Src/stm32u5xx_hal_sai_ex.c</FilePath>
             </File>
           </Files>
         </Group>

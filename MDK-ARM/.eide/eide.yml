@@ -37,6 +37,9 @@ virtualFolder:
                 - path: ../Core/Src/acq_config.c
                 - path: ../Core/Src/sensor_bin.c
                 - path: ../Core/Src/frame_ring.c
+                - path: ../Core/Src/i2c.c
+                - path: ../Core/Src/app_time.c
+                - path: ../Core/Src/rtc_pcf85063.c
               folders: []
             - name: Storage
               files:
@@ -64,6 +67,8 @@ virtualFolder:
                 - path: ../USBX/App/ux_user.h
                 - path: ../USBX/Target/ux_stm32_config.h
                 - path: ../Core/Src/boot_mode.c
+                - path: ../Core/Src/board_io.c
+                - path: ../Core/Src/user_ctrl.c
                 - path: ../Core/Inc/boot_mode.h
                 - path: ../Core/Src/usb_pcd_dispatch.c
                 - path: ../Core/Inc/usb_pcd_dispatch.h

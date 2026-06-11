@@ -88,12 +88,14 @@ void HAL_SAI_MspInit(SAI_HandleTypeDef *hsai)
   __HAL_RCC_GPIOB_CLK_ENABLE();
   __HAL_RCC_GPIOC_CLK_ENABLE();
 
-  /* PB8 = SAI1_MCLK_A, PB9 = SAI1_FS_A  (AF3) */
+  /* PB8 = SAI1_MCLK_A, PB9 = SAI1_FS_A  (AF13 —— 经 CubeMX 生成参考核对，
+   * U5 SAI1_A 这组引脚统一为 AF13；此前误设 AF3 导致 MCLK/LRCK 不出引脚，
+   * ES8311 收不到主时钟 → ADC 不工作 → SDOUT 恒 0 → 录音全静音) */
   g.Pin       = GPIO_PIN_8 | GPIO_PIN_9;
   g.Mode      = GPIO_MODE_AF_PP;
   g.Pull      = GPIO_NOPULL;
   g.Speed     = GPIO_SPEED_FREQ_VERY_HIGH;
-  g.Alternate = GPIO_AF3_SAI1;
+  g.Alternate = GPIO_AF13_SAI1;
   HAL_GPIO_Init(GPIOB, &g);
 
   /* PA8 = SAI1_SCK_A  (AF13) */
