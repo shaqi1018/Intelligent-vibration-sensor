@@ -132,7 +132,7 @@ static int AcqCfgValidate(const AcqConfig_t *cfg)
   if (cfg->es8311.enabled)
   {
     uint32_t sr = cfg->es8311.sample_rate_hz;
-    if ((sr != 8000U) && (sr != 16000U) && (sr != 48000U))
+    if ((sr != 8000U) && (sr != 16000U) && (sr != 48000U) && (sr != 96000U))
     {
       return -1;
     }
@@ -310,7 +310,8 @@ int AcqConfig_SetMic(uint8_t enabled, uint32_t sample_rate_hz, uint16_t gain_db)
     /* sample_rate_hz == 0 means "keep current rate" (see below); only validate
      * when a concrete rate is supplied. */
     if ((sample_rate_hz != 0U) &&
-        (sample_rate_hz != 8000U) && (sample_rate_hz != 16000U) && (sample_rate_hz != 48000U))
+        (sample_rate_hz != 8000U) && (sample_rate_hz != 16000U) &&
+        (sample_rate_hz != 48000U) && (sample_rate_hz != 96000U))
     {
       return -1;
     }

@@ -16,6 +16,7 @@
   *
   * The SAI master clock generator then divides the 49.152 MHz kernel by MCKDIV
   * (computed by HAL from AudioFrequency) to output MCLK = 256 x Fs:
+  *   Fs = 96000 -> MCKDIV = 2  -> MCLK = 24.576 MHz  (double speed; ES8311 fs_mode=1)
   *   Fs = 48000 -> MCKDIV = 4  -> MCLK = 12.288 MHz   (the design's nominal MCLK)
   *   Fs = 16000 -> MCKDIV = 12 -> MCLK = 4.096 MHz
   *   Fs = 8000  -> MCKDIV = 24 -> MCLK = 2.048 MHz
@@ -46,6 +47,7 @@ static uint32_t sai_audio_freq(uint32_t sr)
     case 8000U:  return SAI_AUDIO_FREQUENCY_8K;
     case 16000U: return SAI_AUDIO_FREQUENCY_16K;
     case 48000U: return SAI_AUDIO_FREQUENCY_48K;
+    case 96000U: return SAI_AUDIO_FREQUENCY_96K;   /* 双速：MCLK=24.576MHz, MCKDIV=2 */
     default:     return SAI_AUDIO_FREQUENCY_16K;
   }
 }

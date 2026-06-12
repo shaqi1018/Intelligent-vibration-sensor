@@ -21,9 +21,14 @@ int ES8311_Probe(void)
   return (id1 == 0x83 && id2 == 0x11) ? 0 : -2;
 }
 
-/* MCLK/Fs = 256（恒定）→ 三档采样率共用一组时钟系数。 */
+/* MCLK/Fs = 256（恒定）→ 所有采样率共用一组时钟系数（REG02/05/06/07/08/OSR）。
+ * 唯一随采样率变化的是 REG03 的 fs_mode 位（bit6）：
+ *   单速模式 single speed（8..48k）：fs_mode=0
+ *   双速模式 double speed（64..96k）：fs_mode=1
+ * 与 ESP 官方 es8311 驱动 coeff_div 表 {24.576MHz,96k} 那一档完全吻合（osr 仍 0x10）。*/
 #define ES_REG02_CLK   0x00   /* pre_div=1,pre_multi=1 → 低3位保留,高位0 */
-#define ES_REG03_CLK   0x10   /* fs_mode=0<<6 | adc_osr=0x10 */
+#define ES_REG03_SINGLE 0x10  /* fs_mode=0<<6 | adc_osr=0x10（8..48k） */
+#define ES_REG03_DOUBLE 0x50  /* fs_mode=1<<6 | adc_osr=0x10（64..96k） */
 #define ES_REG04_CLK   0x10   /* dac_osr(adc-only 无害) */
 #define ES_REG05_CLK   0x00   /* (adc_div-1)<<4 | (dac_div-1) = 0 */
 #define ES_REG06_CLK   0x03   /* bclk_div=4 (<19 → 写 bclk_div-1=3),高3位保留 */
@@ -32,7 +37,8 @@ int ES8311_Probe(void)
 
 int ES8311_InitAdc(uint32_t sample_rate_hz, uint16_t gain_db)
 {
-  (void)sample_rate_hz;            /* MCLK/Fs 恒为 256，时钟系数与采样率无关 */
+  /* fs_mode：≥64kHz 用双速模式，否则单速。其余时钟系数与采样率无关（MCLK/Fs 恒 256）。 */
+  uint8_t reg03 = (sample_rate_hz >= 64000U) ? ES_REG03_DOUBLE : ES_REG03_SINGLE;
   /* 复位 */
   if (es_write(0x00, 0x1F) != 0) return -1;
   osDelay(1);
@@ -42,7 +48,7 @@ int ES8311_InitAdc(uint32_t sample_rate_hz, uint16_t gain_db)
                                     * （官方驱动值；此前误设 0x30 漏开 ADC 时钟低位位，
                                     *  导致 ADC 内核无时钟、SDOUT 恒 0、录音全静音） */
   es_write(0x02, ES_REG02_CLK);
-  es_write(0x03, ES_REG03_CLK);
+  es_write(0x03, reg03);
   es_write(0x16, 0x24);
   es_write(0x04, ES_REG04_CLK);
   es_write(0x05, ES_REG05_CLK);
