@@ -4,11 +4,58 @@
 #include "FreeRTOS.h"
 #include "task.h"
 #include "semphr.h"
+#include <stdio.h>
 
 extern SemaphoreHandle_t s_sdmmc_dma_sem;
 
 static DSTATUS g_sd_status = STA_NOINIT;
 static volatile uint8_t g_sd_use_dma = 0U;  /* 0=polling (default), 1=DMA */
+
+/* DMA write completion outcome flag. HAL_SD_TxCpltCallback and
+ * HAL_SD_ErrorCallback BOTH release s_sdmmc_dma_sem, so after the semaphore is
+ * taken the write path cannot otherwise tell a clean completion from an errored
+ * one (e.g. a TXUNDERR FIFO underrun under bus contention). The error callback
+ * sets this flag so the write path retries instead of trusting corrupt data. */
+static volatile uint8_t g_sd_dma_error = 0U;
+
+/* SDMMC write-path health counters (route-2 instrumentation). Read/printed via
+ * SD_PrintWriteStats; reset per SD session via SD_ResetWriteStats. */
+typedef struct {
+  uint32_t writes;             /* SD_disk_write (DMA) calls */
+  uint32_t dma_err_completions;/* completions signalled by HAL_SD_ErrorCallback */
+  uint32_t last_error_code;    /* hsd1.ErrorCode captured at last DMA error */
+  uint32_t retries;            /* write-loop retries (iterations past the first) */
+  uint32_t sem_timeouts;       /* 5s DMA-complete semaphore timeouts */
+  uint32_t prog_timeouts;      /* 500ms card-PROGRAMMING wait breaks */
+  uint32_t deinits;            /* HAL_SD_DeInit + re-init recovery events */
+  uint32_t write_failures;     /* SD_disk_write returning RES_ERROR */
+} SdWriteStats_t;
+static volatile SdWriteStats_t g_sd_wstats;
+
+void SD_ResetWriteStats(void)
+{
+  g_sd_wstats.writes = 0U;
+  g_sd_wstats.dma_err_completions = 0U;
+  g_sd_wstats.last_error_code = 0U;
+  g_sd_wstats.retries = 0U;
+  g_sd_wstats.sem_timeouts = 0U;
+  g_sd_wstats.prog_timeouts = 0U;
+  g_sd_wstats.deinits = 0U;
+  g_sd_wstats.write_failures = 0U;
+}
+
+void SD_PrintWriteStats(void)
+{
+  printf("[SDstat] writes=%lu dma_err=%lu(code=0x%lX) retry=%lu sem_to=%lu prog_to=%lu deinit=%lu fail=%lu\r\n",
+         (unsigned long)g_sd_wstats.writes,
+         (unsigned long)g_sd_wstats.dma_err_completions,
+         (unsigned long)g_sd_wstats.last_error_code,
+         (unsigned long)g_sd_wstats.retries,
+         (unsigned long)g_sd_wstats.sem_timeouts,
+         (unsigned long)g_sd_wstats.prog_timeouts,
+         (unsigned long)g_sd_wstats.deinits,
+         (unsigned long)g_sd_wstats.write_failures);
+}
 
 void SD_SetDmaMode(unsigned char enable)
 {
@@ -143,14 +190,19 @@ DRESULT SD_disk_write(BYTE pdrv, const BYTE *buff, DWORD sector, UINT count)
     return RES_NOTRDY;
   }
 
+  g_sd_wstats.writes++;
+
   for (retries = 0U; retries < 3U; retries++)
   {
+    if (retries > 0U) { g_sd_wstats.retries++; }
     if (g_sd_use_dma != 0U)
     {
       SD_CleanupAfterOp();
       __HAL_SD_CLEAR_FLAG(&hsd1, SDMMC_STATIC_FLAGS);
+      g_sd_dma_error = 0U;   /* cleared before each transfer; set by error ISR */
       if (HAL_SD_WriteBlocks_DMA(&hsd1, buff, (uint32_t)sector, (uint32_t)count) != HAL_OK)
       {
+        g_sd_wstats.deinits++;
         HAL_SD_DeInit(&hsd1);
         MX_SDMMC1_SD_Init();
         HAL_NVIC_EnableIRQ(SDMMC1_IRQn);
@@ -158,16 +210,28 @@ DRESULT SD_disk_write(BYTE pdrv, const BYTE *buff, DWORD sector, UINT count)
       }
       if (xSemaphoreTake(s_sdmmc_dma_sem, pdMS_TO_TICKS(5000)) == pdTRUE)
       {
-        /* Wait for card to exit PROGRAMMING state. The SDMMC transfer is
-         * done (DATAEND fired) but the card may still be writing to flash. */
-        uint32_t t0 = xTaskGetTickCount();
-        HAL_SD_CardStateTypeDef cs;
-        do {
-          cs = HAL_SD_GetCardState(&hsd1);
-          if (cs == HAL_SD_CARD_TRANSFER) { return RES_OK; }
-          if ((xTaskGetTickCount() - t0) > pdMS_TO_TICKS(500)) { break; }
-          vTaskDelay(1U); /* yield while card programs — don't starve other tasks */
-        } while (cs == HAL_SD_CARD_PROGRAMMING);
+        /* Only trust the transfer if it completed WITHOUT an error callback.
+         * A TXUNDERR/DCRCFAIL under bus contention fires HAL_SD_ErrorCallback,
+         * which also gives the semaphore — if we trusted that, a partially/
+         * wrongly written sector would land on the card (the byte-level CSV
+         * corruption). On error, fall through to Abort + DeInit + retry. */
+        if (g_sd_dma_error == 0U)
+        {
+          /* Wait for card to exit PROGRAMMING state. The SDMMC transfer is
+           * done (DATAEND fired) but the card may still be writing to flash. */
+          uint32_t t0 = xTaskGetTickCount();
+          HAL_SD_CardStateTypeDef cs;
+          do {
+            cs = HAL_SD_GetCardState(&hsd1);
+            if (cs == HAL_SD_CARD_TRANSFER) { return RES_OK; }
+            if ((xTaskGetTickCount() - t0) > pdMS_TO_TICKS(500)) { g_sd_wstats.prog_timeouts++; break; }
+            vTaskDelay(1U); /* yield while card programs — don't starve other tasks */
+          } while (cs == HAL_SD_CARD_PROGRAMMING);
+        }
+      }
+      else
+      {
+        g_sd_wstats.sem_timeouts++;
       }
       HAL_SD_Abort(&hsd1);
       SD_CleanupAfterOp();
@@ -189,11 +253,13 @@ DRESULT SD_disk_write(BYTE pdrv, const BYTE *buff, DWORD sector, UINT count)
       SD_CleanupAfterOp();
       return RES_OK;
     }
+    g_sd_wstats.deinits++;
     HAL_SD_DeInit(&hsd1);
     MX_SDMMC1_SD_Init();
     HAL_NVIC_EnableIRQ(SDMMC1_IRQn);
   }
 
+  g_sd_wstats.write_failures++;
   return RES_ERROR;
 }
 
@@ -274,6 +340,12 @@ void HAL_SD_RxCpltCallback(SD_HandleTypeDef *hsd)
 
 void HAL_SD_ErrorCallback(SD_HandleTypeDef *hsd)
 {
+  /* Mark the in-flight DMA transfer as failed so the write path retries rather
+   * than trusting (possibly corrupt) data on the card. Capture the error code
+   * for the route-2 diagnostics print. */
+  g_sd_dma_error = 1U;
+  g_sd_wstats.dma_err_completions++;
+  if (hsd != NULL) { g_sd_wstats.last_error_code = hsd->ErrorCode; }
   if (s_sdmmc_dma_sem != NULL)
   {
     BaseType_t xHigherPriorityTaskWoken = pdFALSE;

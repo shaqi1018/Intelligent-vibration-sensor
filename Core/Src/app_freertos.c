@@ -688,6 +688,30 @@ static uint8_t AppAcqIsSdSessionActive(void)
   return (uint8_t)((ctrl.running != 0U) && (ctrl.sink == APP_ACQ_SINK_SD));
 }
 
+/* Route-2 RAM-corruption diagnostics, printed at SD session stop.
+ *  [Stack] = per-task minimum free stack (bytes) since boot. A value near 0 on
+ *            any task means its stack overflowed into adjacent .bss — the prime
+ *            suspect for the stray write that corrupts the ring buffers.
+ *  [Ring]  = per-session dropped bytes + peak fill vs size. hwm≈size means the
+ *            ring ran full (producer overran the logger) — explains fid GAPS,
+ *            and a near-full wrap is where any index/overlap bug would surface. */
+static void AppPrintRuntimeDiag(void)
+{
+  printf("[Stack] lsm=%lu h3=%lu qma=%lu log=%lu mic=%lu cdc=%lu up=%lu (min free bytes)\r\n",
+         (unsigned long)osThreadGetStackSpace(lsm6dsoxTaskHandle),
+         (unsigned long)osThreadGetStackSpace(h3lis100dlTaskHandle),
+         (unsigned long)osThreadGetStackSpace(qma6100pTaskHandle),
+         (unsigned long)osThreadGetStackSpace(loggerTaskHandle),
+         (unsigned long)osThreadGetStackSpace(micTaskHandle),
+         (unsigned long)osThreadGetStackSpace(usbCdcTaskHandle),
+         (unsigned long)osThreadGetStackSpace(usbUploadTaskHandle));
+  printf("[Ring] lsm drop=%lu hwm=%lu/%lu | h3 drop=%lu hwm=%lu/%lu | qma drop=%lu hwm=%lu/%lu | mic drop=%lu hwm=%lu/%lu\r\n",
+         (unsigned long)g_ring_lsm_imu.dropped, (unsigned long)g_ring_lsm_imu.high_watermark, (unsigned long)g_ring_lsm_imu.size,
+         (unsigned long)g_ring_h3_acc.dropped,  (unsigned long)g_ring_h3_acc.high_watermark,  (unsigned long)g_ring_h3_acc.size,
+         (unsigned long)g_ring_qma_acc.dropped, (unsigned long)g_ring_qma_acc.high_watermark, (unsigned long)g_ring_qma_acc.size,
+         (unsigned long)g_ring_mic.dropped,     (unsigned long)g_ring_mic.high_watermark,     (unsigned long)g_ring_mic.size);
+}
+
 static void AppLoggerStopSdSession(uint8_t *sd_file_open, uint32_t *rows_since_sync)
 {
   if (sd_file_open == NULL)
@@ -699,6 +723,8 @@ static void AppLoggerStopSdSession(uint8_t *sd_file_open, uint32_t *rows_since_s
   {
     (void)DeviceCfg_WriteCurrentToSD();
     FatFs_SD_LoggerStop();
+    SD_PrintWriteStats();   /* route-2: per-session SDMMC write-path health */
+    AppPrintRuntimeDiag();  /* route-2: per-task stack margin + ring overrun */
     *sd_file_open = 0U;
   }
 
@@ -1144,6 +1170,7 @@ static void RingBuf_Reset(AppRingBuffer_t *rb)
 {
   rb->rd_idx = rb->wr_idx;
   rb->dropped = 0U;
+  rb->high_watermark = 0U;   /* per-session peak fill for diagnostics */
 }
 
 static uint32_t RingBuf_Available(const AppRingBuffer_t *rb)
@@ -1215,6 +1242,45 @@ static void RingBuf_Consume(AppRingBuffer_t *rb, uint32_t len)
 {
   if (rb == NULL || len == 0U) return;
   rb->rd_idx = (rb->rd_idx + len) % rb->size;
+}
+
+/* Private bounce buffer for SD flushes. The logger copies each peeked ring
+ * chunk here BEFORE f_write so the SDMMC IDMA never reads directly from the
+ * live ring. This decouples SD timing (PROGRAMMING stalls, abort/retry, the
+ * DeInit/re-init recovery path) from the producer: the DMA source stays
+ * perfectly static for the whole transfer even if the write is retried.
+ * One buffer is reused across all files — the logger drains serially and each
+ * f_write blocks on the SD DMA-complete semaphore before the next starts. */
+static uint8_t s_sd_bounce[APP_RING_FLUSH_CHUNK];
+
+/* Drain one contiguous chunk from a ring to its file via s_sd_bounce.
+ * Returns:  1 = wrote a chunk (caller keeps looping),
+ *           0 = nothing to do / audio dropped with no WAV sink (no progress),
+ *          -1 = write error (caller breaks; *out_res holds the FRESULT). */
+static int LoggerDrainRing(AppRingBuffer_t *rb, uint8_t file_idx,
+                           uint32_t *rows_since_sync, FRESULT *out_res)
+{
+  const uint8_t *p; uint32_t n;
+  if (RingBuf_PeekContiguous(rb, &p, &n) == 0U) return 0;
+
+  memcpy(s_sd_bounce, p, n);
+  FRESULT r = FatFs_SD_LoggerWriteFileIndex(file_idx, s_sd_bounce, n);
+  *out_res = r;
+
+  if (r == FR_OK)
+  {
+    RingBuf_Consume(rb, n);
+    *rows_since_sync += n;
+    return 1;
+  }
+  if ((r == FR_NOT_ENABLED) && (file_idx == FATFS_SD_FILE_MIC_WAV))
+  {
+    /* WAV not open but the SAI ISR keeps filling g_ring_mic — drop the audio
+     * and keep the drain loop healthy (matches prior behaviour). */
+    RingBuf_Consume(rb, n);
+    return 0;
+  }
+  return -1;
 }
 
 static uint32_t AppSnapshotComputeMaxDeltaMs(const AppSensorSnapshot_t *snapshot)
@@ -2587,10 +2653,20 @@ void StartLoggerTask(void *argument)
   hsd1.Context = SD_CONTEXT_NONE;
   hsd1.Instance->IDMACTRL = 0U;
   __HAL_SD_CLEAR_FLAG(&hsd1, SDMMC_STATIC_FLAGS);
-  SD_SetDmaMode(1U);
+  /* SD writes use POLLING (PIO), NOT SDMMC IDMA — this is the fix for the
+   * long-standing ~0.4% byte-level CSV corruption. Root cause (confirmed by
+   * A/B test CKBX0079 DMA=0.40% bad vs CKBX0080/0081 polling=0.00% bad): the
+   * SDMMC IDMA, as a second bus master reading SRAM, corrupts the CPU's
+   * concurrent writes to the ring buffers (a bus-matrix hazard the SD CRC can't
+   * catch — the damage is in source RAM, not on the SD bus). Polling has no
+   * IDMA, so no hazard. Full-load test (96k mic + 3 sensors) stayed 100% clean
+   * with zero ring drops, so the PIO path sustains throughput here.
+   * NOTE: the polling write path masks IRQs for the transfer + PROGRAMMING wait
+   * (see SD_disk_write); fine with this card/clock, watch it on slower cards. */
+  SD_SetDmaMode(0U);
   HAL_NVIC_SetPriority(SDMMC1_IRQn, 6, 0);
   HAL_NVIC_EnableIRQ(SDMMC1_IRQn);
-  printf("[Logger] SDMMC DMA mode enabled\r\n");
+  printf("[Logger] SDMMC POLLING mode (corruption-free SD writes)\r\n");
 
   for (;;)
   {
@@ -2661,6 +2737,7 @@ void StartLoggerTask(void *argument)
 
         sd_file_open = 1U;
         rows_since_sync = 0U;
+        SD_ResetWriteStats();   /* route-2: count SDMMC write events per session */
         AppAcqResetSessionTimer();
         AppFlowStatsSetMode(0U, 1U);
         printf("[Logger] SD logging resumed\r\n");
@@ -2677,92 +2754,56 @@ void StartLoggerTask(void *argument)
       }
     }
 
-    /* Round-robin drain of the two ring buffers. Each loop iteration pops
-     * one contiguous chunk (up to APP_RING_FLUSH_CHUNK = 16KB) from each
-     * ring and writes it to its file. Both rings are checked every cycle so
-     * neither stream starves under heavy load. */
+    /* Round-robin drain of the four ring buffers. Each chunk is copied into the
+     * private s_sd_bounce buffer (inside LoggerDrainRing) before f_write, so the
+     * SDMMC IDMA never reads from a live ring — see the helper's comment. Every
+     * ring is checked each cycle so no stream starves under heavy load. */
     {
-      const uint8_t *p; uint32_t n;
       uint8_t did_work = 1;
       while (did_work && (sd_file_open != 0U) && (AppAcqIsSdSessionActive() != 0U))
       {
+        int dr;
         did_work = 0;
-        if (RingBuf_PeekContiguous(&g_ring_lsm_imu, &p, &n))
+
+        dr = LoggerDrainRing(&g_ring_lsm_imu, 0U, &rows_since_sync, &result);
+        if (dr < 0)
         {
-          result = FatFs_SD_LoggerWriteFileIndex(0U, p, n);  /* LSM_IMU */
-          if (result == FR_OK)
-          {
-            RingBuf_Consume(&g_ring_lsm_imu, n);
-            rows_since_sync += n;
-            did_work = 1;
-          }
-          else
-          {
-            printf("[Logger] LSM_IMU write fail %s (%d)\r\n",
-                   FatFs_SD_ResultToString(result), (int)result);
-            AppFlowStatsRecordWriteFailure();
-            break;
-          }
+          printf("[Logger] LSM_IMU write fail %s (%d)\r\n",
+                 FatFs_SD_ResultToString(result), (int)result);
+          AppFlowStatsRecordWriteFailure();
+          break;
         }
-        if (RingBuf_PeekContiguous(&g_ring_qma_acc, &p, &n))
+        if (dr > 0) did_work = 1;
+
+        dr = LoggerDrainRing(&g_ring_qma_acc, 3U, &rows_since_sync, &result);
+        if (dr < 0)
         {
-          result = FatFs_SD_LoggerWriteFileIndex(3U, p, n);  /* QMA_ACC */
-          if (result == FR_OK)
-          {
-            RingBuf_Consume(&g_ring_qma_acc, n);
-            rows_since_sync += n;
-            did_work = 1;
-          }
-          else
-          {
-            printf("[Logger] QMA_ACC write fail %s (%d)\r\n",
-                   FatFs_SD_ResultToString(result), (int)result);
-            AppFlowStatsRecordWriteFailure();
-            break;
-          }
+          printf("[Logger] QMA_ACC write fail %s (%d)\r\n",
+                 FatFs_SD_ResultToString(result), (int)result);
+          AppFlowStatsRecordWriteFailure();
+          break;
         }
-        if (RingBuf_PeekContiguous(&g_ring_h3_acc, &p, &n))
+        if (dr > 0) did_work = 1;
+
+        dr = LoggerDrainRing(&g_ring_h3_acc, 2U, &rows_since_sync, &result);
+        if (dr < 0)
         {
-          result = FatFs_SD_LoggerWriteFileIndex(2U, p, n);  /* H3_ACC */
-          if (result == FR_OK)
-          {
-            RingBuf_Consume(&g_ring_h3_acc, n);
-            rows_since_sync += n;
-            did_work = 1;
-          }
-          else
-          {
-            printf("[Logger] H3_ACC write fail %s (%d)\r\n",
-                   FatFs_SD_ResultToString(result), (int)result);
-            AppFlowStatsRecordWriteFailure();
-            break;
-          }
+          printf("[Logger] H3_ACC write fail %s (%d)\r\n",
+                 FatFs_SD_ResultToString(result), (int)result);
+          AppFlowStatsRecordWriteFailure();
+          break;
         }
-        if (RingBuf_PeekContiguous(&g_ring_mic, &p, &n))
+        if (dr > 0) did_work = 1;
+
+        dr = LoggerDrainRing(&g_ring_mic, FATFS_SD_FILE_MIC_WAV, &rows_since_sync, &result);
+        if (dr < 0)
         {
-          result = FatFs_SD_LoggerWriteFileIndex(FATFS_SD_FILE_MIC_WAV, p, n);  /* MIC.WAV */
-          if (result == FR_OK)
-          {
-            RingBuf_Consume(&g_ring_mic, n);
-            rows_since_sync += n;
-            did_work = 1;
-          }
-          else if (result == FR_NOT_ENABLED)
-          {
-            /* WAV not open (e.g. FatFs_SD_WavCreate failed at session start) but
-             * the SAI ISR keeps filling g_ring_mic. Drop the audio and continue
-             * — never wedge the drain loop or pollute write-failure stats over a
-             * sink that simply isn't there. */
-            RingBuf_Consume(&g_ring_mic, n);
-          }
-          else
-          {
-            printf("[Logger] MIC.WAV write fail %s (%d)\r\n",
-                   FatFs_SD_ResultToString(result), (int)result);
-            AppFlowStatsRecordWriteFailure();
-            break;
-          }
+          printf("[Logger] MIC.WAV write fail %s (%d)\r\n",
+                 FatFs_SD_ResultToString(result), (int)result);
+          AppFlowStatsRecordWriteFailure();
+          break;
         }
+        if (dr > 0) did_work = 1;
       }
     }
 

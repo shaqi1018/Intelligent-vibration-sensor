@@ -67,9 +67,14 @@ HAL_StatusTypeDef MX_SDMMC1_SD_Init(void)
   {
     hsd1.Init.BusWide = SDMMC_BUS_WIDE_4B;
   }
-  /* Boost data transfer clock: 48 MHz / (1+2) = 16 MHz.
-   * Only touches CLKCR, no card re-init needed. */
-  MODIFY_REG(hsd1.Instance->CLKCR, SDMMC_CLKCR_CLKDIV, 1U << SDMMC_CLKCR_CLKDIV_Pos);
+  /* Data transfer clock. CLKDIV is the route-2 power-integrity test knob:
+   *   CLKDIV=1 -> 48/(1+2) = 16   MHz  (previous default)
+   *   CLKDIV=5 -> 48/(5+2) ≈  6.86 MHz  (current — halve the SDMMC current
+   *                                      burst rate to test whether VDD droop
+   *                                      during SD writes is flipping RAM bits)
+   * 6.86 MHz × 4-bit ≈ 3.4 MB/s gross, ~13× the worst-case ~250 KB/s load,
+   * so throughput is not the variable here. Only touches CLKCR (no re-init). */
+  MODIFY_REG(hsd1.Instance->CLKCR, SDMMC_CLKCR_CLKDIV, 5U << SDMMC_CLKCR_CLKDIV_Pos);
 
   return HAL_OK;
 }
