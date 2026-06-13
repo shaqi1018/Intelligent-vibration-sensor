@@ -9,6 +9,7 @@
 #include "lsm6dsox.h"
 #include "dma_sampling.h"
 #include <stdio.h>
+#include <string.h>
 #include "cmsis_os2.h"
 
 #define LSM6DSOX_SPI_READ_FLAG   0x80
@@ -267,10 +268,16 @@ HAL_StatusTypeDef LSM6DSOX_FIFO_GetLevel(uint16_t *level)
 HAL_StatusTypeDef LSM6DSOX_FIFO_ReadBlock(uint8_t *buf, uint16_t n_words)
 {
   /* Each FIFO word = 7 bytes (1 tag + 6 data). Auto-increment is enabled
-   * (CTRL3_C IF_INC), and reads of register 0x78 stream the FIFO content. */
+   * (CTRL3_C IF_INC); a continuous burst from 0x78 streams the FIFO, but the
+   * device needs a brief gap at each word boundary (0x7E->0x78 wrap) for the
+   * FIFO to advance to the next sample. A fully-continuous bulk read (no gaps)
+   * only returned the first word + non-advancing junk (~122 Hz). The old
+   * per-byte loop worked but did 1792 HAL calls/batch (too slow → ~55% capture
+   * at 6664 Hz). Read ONE 7-byte word per HAL call instead: the inter-call gap
+   * lands exactly on the word boundary, and it is 7x fewer calls (256/batch). */
+  static const uint8_t dummy7[7] = {0U, 0U, 0U, 0U, 0U, 0U, 0U};
   uint8_t tx_cmd;
   HAL_StatusTypeDef ret;
-  uint16_t total = (uint16_t)(n_words * 7U);
 
   if ((buf == NULL) || (n_words == 0U)) return HAL_ERROR;
 
@@ -281,12 +288,10 @@ HAL_StatusTypeDef LSM6DSOX_FIFO_ReadBlock(uint8_t *buf, uint16_t n_words)
   ret = HAL_SPI_Transmit(&hspi1, &tx_cmd, 1, LSM_SPI_TIMEOUT_MS);
   if (ret == HAL_OK)
   {
-    uint8_t dummy = 0x00U;
-    /* Stream-read: send dummies, capture into buf. Use a single TX/RX call
-     * for speed if SPI HAL supports it; here loop is simpler and bounded. */
-    for (uint16_t i = 0; i < total; i++)
+    for (uint16_t w = 0U; w < n_words; w++)
     {
-      ret = HAL_SPI_TransmitReceive(&hspi1, &dummy, &buf[i], 1, LSM_SPI_TIMEOUT_MS);
+      ret = HAL_SPI_TransmitReceive(&hspi1, (uint8_t *)dummy7, &buf[w * 7U], 7U,
+                                    LSM_SPI_TIMEOUT_MS);
       if (ret != HAL_OK) break;
     }
   }

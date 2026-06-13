@@ -248,8 +248,24 @@ DRESULT SD_disk_write(BYTE pdrv, const BYTE *buff, DWORD sector, UINT count)
         HAL_NVIC_EnableIRQ(SDMMC1_IRQn);
         continue;
       }
-      while (HAL_SD_GetCardState(&hsd1) != HAL_SD_CARD_TRANSFER) {}
+      /* The data transfer is done — re-enable IRQs BEFORE the card-PROGRAMMING
+       * wait. Only the transfer itself needs IRQs masked (the CPU must feed the
+       * SDMMC FIFO without an underrun); the flash-program wait does not. Keeping
+       * it masked blocked the LSM FIFO-watermark ISR and the sensor tasks for the
+       * whole program time → ~31% LSM undercapture at 6664 Hz. Yield while the
+       * card programs so the sensor tasks run (mirrors the DMA path). */
       __enable_irq();
+      {
+        HAL_SD_CardStateTypeDef cs;
+        do {
+          cs = HAL_SD_GetCardState(&hsd1);
+          if (cs == HAL_SD_CARD_TRANSFER) { break; }
+          /* Yield only once the scheduler is running. This polling path also runs
+           * pre-kernel (boot DeviceCfg / phase-B test) where vTaskDelay is illegal
+           * — there, busy-spin (no tasks to yield to anyway). */
+          if (xTaskGetSchedulerState() == taskSCHEDULER_RUNNING) { vTaskDelay(1U); }
+        } while (cs == HAL_SD_CARD_PROGRAMMING);
+      }
       SD_CleanupAfterOp();
       return RES_OK;
     }

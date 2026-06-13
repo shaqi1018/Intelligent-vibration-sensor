@@ -379,10 +379,12 @@ HAL_StatusTypeDef QMA6100P_ReadAccXYZ(QMA6100P_Data_t *data)
 
 HAL_StatusTypeDef QMA6100P_FIFO_Config(uint8_t wtm_samples)
 {
-  /* STREAM mode: FIFO is a circular buffer. When it wraps from 63→0 the fill
-   * level drops below watermark and the edge-triggered interrupt fires again
-   * automatically. No Rearm (Bypass→FIFO) needed, eliminating the race where
-   * a delayed rearm loses the interrupt edge under SPI2 bus contention. */
+  /* STREAM mode: FIFO is a circular buffer; the 2ms timeout poll self-heals any
+   * lost watermark edge (avoids the Bypass→FIFO rearm race). NOTE: ~31% of
+   * emitted rows are duplicates because FIFO_CNT over-reports the available
+   * frames slightly, so each read grabs a few stale tail frames — this is in the
+   * level read, not the FIFO mode (FIFO mode gave the identical 31%). The unique
+   * data is the true 1600 Hz; the duplicate tail is filtered downstream. */
   if (wtm_samples == 0U || wtm_samples > 63U) wtm_samples = 16U;
 
   if (QMA6100P_WriteReg(QMA6100P_REG_FIFO_CFG, QMA6100P_FIFO_MODE_BYPASS | QMA6100P_FIFO_CH_XYZ) != HAL_OK) return HAL_ERROR;
@@ -405,6 +407,12 @@ HAL_StatusTypeDef QMA6100P_FIFO_GetLevel(uint8_t *level)
 
 HAL_StatusTypeDef QMA6100P_FIFO_ReadBlock(uint8_t *buf, uint8_t n_frames)
 {
+  /* MUST be a per-byte read. QMA6100P FIFO_DATA is a single streaming register
+   * that advances one byte per SPI access; a multi-byte burst re-reads the same
+   * frame (measured 61.6% duplicate frames, inflating the apparent ODR). The
+   * generic ReadReg does the correct 1-byte-per-access stream. (LSM's 7-byte
+   * block read works because its FIFO is a 7-register auto-increment window —
+   * different mechanism, do NOT copy it here.) */
   if (buf == NULL || n_frames == 0U) return HAL_ERROR;
   return QMA6100P_ReadReg(QMA6100P_REG_FIFO_DATA, buf, (uint16_t)(n_frames * 6U));
 }

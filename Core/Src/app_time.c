@@ -48,14 +48,14 @@ uint64_t AppTime_GetEpochUs(void)
 {
   if (s_synced == 0U) { return 0ULL; }
 
-  uint32_t now = DwtUs();
-
   /* 临界区保护：LSM/H3/QMA 三个 task 并发调用此函数。
-   * 若 Task A 读完 now 被切走、Task B 更新了 s_dwt_prev，
-   * Task A 回来时会误判 now < s_dwt_prev → 假溢出 → +71 分钟跳变。
-   * 屏蔽中断可阻止 FreeRTOS PendSV 抢占，保证 read-modify-write 原子。 */
+   * now 必须在临界区【内】采样。否则 Task A 采完 now 被切走、Task B 用更大的
+   * now 更新了 s_dwt_prev，Task A 回来 now < s_dwt_prev → 假溢出 → 整段 +26.84s。
+   * 重载下(6664Hz 多任务高频调用)实测时间戳偏快约 1.8×(37.9s 被记成 68s)，
+   * 即多次假绕回。把 DwtUs() 与 wrap 判定/更新一起放进临界区，三者原子，根除。 */
   uint32_t primask = __get_PRIMASK();
   __disable_irq();
+  uint32_t now = DwtUs();
   if (now < s_dwt_prev) { s_wrap_count++; }
   s_dwt_prev = now;
   uint32_t wraps = s_wrap_count;

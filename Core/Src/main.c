@@ -235,6 +235,10 @@ int main(void)
   printf("  USB FS: PA11(D-) PA12(D+)\r\n");
   printf("  串口: PA9/PA10 115200bps\r\n");
 #endif
+  /* Clock sanity: AppDwtUs/AppTime derive µs from SystemCoreClock. If this is
+   * not the true SYSCLK (expected 160000000), every CSV timestamp is scaled
+   * wrong — the ~40%-fast timestamp seen at high load points here. */
+  printf("  SystemCoreClock = %lu Hz (expect 160000000)\r\n", (unsigned long)SystemCoreClock);
   printf("========================================\r\n\r\n");
 
   /* USER CODE END 2 */

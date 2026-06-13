@@ -67,14 +67,13 @@ HAL_StatusTypeDef MX_SDMMC1_SD_Init(void)
   {
     hsd1.Init.BusWide = SDMMC_BUS_WIDE_4B;
   }
-  /* Data transfer clock. CLKDIV is the route-2 power-integrity test knob:
-   *   CLKDIV=1 -> 48/(1+2) = 16   MHz  (previous default)
-   *   CLKDIV=5 -> 48/(5+2) ≈  6.86 MHz  (current — halve the SDMMC current
-   *                                      burst rate to test whether VDD droop
-   *                                      during SD writes is flipping RAM bits)
-   * 6.86 MHz × 4-bit ≈ 3.4 MB/s gross, ~13× the worst-case ~250 KB/s load,
-   * so throughput is not the variable here. Only touches CLKCR (no re-init). */
-  MODIFY_REG(hsd1.Instance->CLKCR, SDMMC_CLKCR_CLKDIV, 5U << SDMMC_CLKCR_CLKDIV_Pos);
+  /* Data transfer clock: 48/(1+2) = 16 MHz (4-bit ≈ 8 MB/s gross). In polling
+   * mode the CPU busy-writes each sector with IRQs masked, so a FASTER SD clock
+   * means SHORTER IRQ-off windows — important for full-config stability
+   * (LSM 6664 + 96k mic). The clock had been lowered to 6.86 MHz during the
+   * power-integrity test; that test ruled SD clock out, so restore the fast
+   * clock for maximum throughput headroom. Only touches CLKCR (no re-init). */
+  MODIFY_REG(hsd1.Instance->CLKCR, SDMMC_CLKCR_CLKDIV, 1U << SDMMC_CLKCR_CLKDIV_Pos);
 
   return HAL_OK;
 }

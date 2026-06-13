@@ -162,6 +162,10 @@ AppRingBuffer_t g_ring_mic;                     /* 非 static：mic_capture.c ex
 static volatile uint32_t g_lsm_frame_id_counter;
 static volatile uint32_t g_qma_frame_id_counter;
 static volatile uint32_t g_h3_frame_id_counter;
+static uint64_t s_session_start_us;   /* AppTime µs at SD-session start (route-2 real-ODR diag) */
+/* QMA FIFO over-read dedup: last emitted raw sample, to drop byte-identical stale repeats. */
+static int16_t s_qma_prev_x, s_qma_prev_y, s_qma_prev_z;
+static uint8_t s_qma_prev_valid;
 static uint32_t s_qma_odr_interval_us = 625U;  /* 1/1600Hz, updated by QMA task init */
 static uint32_t s_lsm_odr_interval_us = 150U;  /* 1/6667Hz, updated by LSM task init */
 static uint32_t s_h3_odr_interval_us  = 2500U; /* 1/400Hz, updated by H3 task init */
@@ -500,6 +504,10 @@ static void AppSnapshotReset(void)
   }
 }
 
+/* The QMA6100P register-0x10 "BW_xxxx" value IS the output data rate in Hz
+ * (verified: BW_1600 → 1523 Hz unique ≈ 1600 Hz; an earlier "ODR = 2x BW"
+ * assumption was wrong — the apparent over-sampling was just natural duplicate
+ * frames from a stationary sensor inflating the row count). So map directly. */
 static QMA6100P_Bandwidth_t AppQmaBwToEnum(uint32_t odr_hz)
 {
   if (odr_hz >= 1600U) return QMA6100P_BW_1600;
@@ -512,6 +520,7 @@ static QMA6100P_Bandwidth_t AppQmaBwToEnum(uint32_t odr_hz)
   return QMA6100P_BW_12_5;
 }
 
+/* QMA6100P "BW_xxxx" register value = ODR in Hz directly (see AppQmaBwToEnum). */
 static uint32_t AppQmaBwToOdrHz(QMA6100P_Bandwidth_t bw)
 {
   switch (bw)
@@ -710,6 +719,20 @@ static void AppPrintRuntimeDiag(void)
          (unsigned long)g_ring_h3_acc.dropped,  (unsigned long)g_ring_h3_acc.high_watermark,  (unsigned long)g_ring_h3_acc.size,
          (unsigned long)g_ring_qma_acc.dropped, (unsigned long)g_ring_qma_acc.high_watermark, (unsigned long)g_ring_qma_acc.size,
          (unsigned long)g_ring_mic.dropped,     (unsigned long)g_ring_mic.high_watermark,     (unsigned long)g_ring_mic.size);
+
+  /* Route-2 real-ODR measurement: per-sensor session sample counts (the frame_id
+   * counters, reset to 0 at session start) + AppTime-measured session seconds.
+   * True ODR = samples / (MIC.WAV bytes / 192000) — the mic is the hardware
+   * reference clock. Compare AppTime seconds vs that to expose timestamp-clock
+   * drift; compare true ODR vs configured to expose ODR-label / FIFO-loss. */
+  uint64_t now_us = AppTime_GetEpochUs();
+  uint32_t apptime_ms = (s_session_start_us != 0ULL && now_us > s_session_start_us)
+                        ? (uint32_t)((now_us - s_session_start_us) / 1000ULL) : 0U;
+  printf("[ODR] lsm=%lu qma=%lu h3=%lu samples | apptime_session=%lu ms (true ODR = samples / MIC.WAV_seconds)\r\n",
+         (unsigned long)g_lsm_frame_id_counter,
+         (unsigned long)g_qma_frame_id_counter,
+         (unsigned long)g_h3_frame_id_counter,
+         (unsigned long)apptime_ms);
 }
 
 static void AppLoggerStopSdSession(uint8_t *sd_file_open, uint32_t *rows_since_sync)
@@ -2141,6 +2164,12 @@ void StartLsm6dsoxTask(void *argument)
        * same value for all ~256 samples. Avoids concurrent GetEpochUs()
        * calls from multiple tasks racing on s_dwt_prev / s_wrap_count. */
       uint32_t epoch_s_batch = (uint32_t)(AppTime_GetEpochUs() / 1000000ULL);
+      /* Format the datetime ONCE per FIFO batch — the epoch is 1-second
+       * resolution so it is identical for every row in the batch, and the
+       * epoch→Y/M/D/H/M/S conversion is the heaviest per-row op at 6664 Hz.
+       * AppFmtDateTime12 always writes exactly 12 chars (YYMMDDHHMMSS). */
+      char dt_batch[12];
+      (void)AppFmtDateTime12(dt_batch, epoch_s_batch);
 
       char rowbuf[160];
       for (uint16_t i = 0; i < to_read; i++)
@@ -2157,13 +2186,12 @@ void StartLsm6dsoxTask(void *argument)
         if (cur_has_acc && cur_has_gyr)
         {
           lsm_ts_us += s_lsm_odr_interval_us;
-          uint32_t epoch_s_i = epoch_s_batch;
           uint32_t fid = ++g_lsm_frame_id_counter;
 
           uint32_t off = 0;
           off += AppU32ToDec(&rowbuf[off], fid);
           rowbuf[off++] = ',';
-          off += AppFmtDateTime12(&rowbuf[off], epoch_s_i);
+          memcpy(&rowbuf[off], dt_batch, 12U); off += 12U;
           rowbuf[off++] = ',';
           off += AppF1ToDec(&rowbuf[off], (float)cur_acc[0] * xl_s);
           rowbuf[off++] = ',';
@@ -2464,9 +2492,12 @@ void StartQma6100pTask(void *argument)
       continue;
     }
 
-    /* Wait for the watermark EXTI, with a short timeout for self-healing.
-     * In STREAM mode the FIFO is circular and re-triggers automatically,
-     * so 2ms timeout keeps recovery fast without busy-spinning. */
+    /* Wait for the watermark EXTI, 2ms timeout for self-healing. NOTE: this
+     * captures the full 1600 Hz of REAL frames (unique ≈ 1600) but the QMA6100P
+     * FIFO_CNT over-reports, so ~31% of emitted rows are stale tail copies of
+     * the last frame. Lengthening the timeout to read less often loses real
+     * frames (unique dropped to ~1075 at 10ms) — worse. So keep the fast poll;
+     * the duplicate tail is a QMA6100P quirk, filtered/ignored downstream. */
     if (s_qma_fifo_sem != NULL)
     {
       (void)osSemaphoreAcquire(s_qma_fifo_sem, 2U);
@@ -2515,6 +2546,9 @@ void StartQma6100pTask(void *argument)
     }
     float qma_scale = 1000.0f / (float)qma_lsb1g;
     uint32_t epoch_s_batch_qma = (uint32_t)(AppTime_GetEpochUs() / 1000000ULL);
+    /* Datetime formatted once per batch (1-second resolution) — see LSM. */
+    char dt_batch_qma[12];
+    (void)AppFmtDateTime12(dt_batch_qma, epoch_s_batch_qma);
 
     char rowbuf[96];
     for (uint8_t i = 0; i < fifo_level; i++)
@@ -2524,14 +2558,26 @@ void StartQma6100pTask(void *argument)
       int16_t ry = (int16_t)(((int16_t)((uint16_t)p[3] << 8 | p[2])) >> 2);
       int16_t rz = (int16_t)(((int16_t)((uint16_t)p[5] << 8 | p[4])) >> 2);
 
+      /* Drop FIFO over-read duplicates: the QMA6100P FIFO read does not advance
+       * its read pointer correctly, so each read re-returns the last frame(s)
+       * verbatim (~35-44% byte-identical stale rows, confirmed by before/after
+       * FIFO_CNT diag). They cost CPU/SD/storage and drag LSM. Under vibration
+       * the real samples always differ (0.625ms @ ±4g), so a byte-identical
+       * frame is a stale repeat → skip it before formatting. Cost: during true
+       * standstill (no vibration = no signal) the stream becomes change-only. */
+      if (s_qma_prev_valid && rx == s_qma_prev_x && ry == s_qma_prev_y && rz == s_qma_prev_z)
+      {
+        continue;
+      }
+      s_qma_prev_x = rx; s_qma_prev_y = ry; s_qma_prev_z = rz; s_qma_prev_valid = 1U;
+
       qma_ts_us += s_qma_odr_interval_us;
-      uint32_t epoch_s_i = epoch_s_batch_qma;
       uint32_t fid = ++g_qma_frame_id_counter;
 
       uint32_t off = 0;
       off += AppU32ToDec(&rowbuf[off], fid);
       rowbuf[off++] = ',';
-      off += AppFmtDateTime12(&rowbuf[off], epoch_s_i);
+      memcpy(&rowbuf[off], dt_batch_qma, 12U); off += 12U;
       rowbuf[off++] = ',';
       off += AppF1ToDec(&rowbuf[off], (float)rx * qma_scale);
       rowbuf[off++] = ',';
@@ -2738,6 +2784,8 @@ void StartLoggerTask(void *argument)
         sd_file_open = 1U;
         rows_since_sync = 0U;
         SD_ResetWriteStats();   /* route-2: count SDMMC write events per session */
+        s_session_start_us = AppTime_GetEpochUs();  /* route-2: real-ODR measurement base */
+        s_qma_prev_valid = 0U;  /* reset QMA dedup state for the new session */
         AppAcqResetSessionTimer();
         AppFlowStatsSetMode(0U, 1U);
         printf("[Logger] SD logging resumed\r\n");
@@ -2805,6 +2853,17 @@ void StartLoggerTask(void *argument)
         }
         if (dr > 0) did_work = 1;
       }
+    }
+
+    /* Periodic metadata flush: commit FAT + directory entries every ~1 MB of
+     * payload so an extreme-load write-integrity failure (the 6664+96k FAT/dir
+     * loss — empty session dir) can't orphan the whole session. rows_since_sync
+     * accumulates drained bytes (LoggerDrainRing += n); ~1 MB ≈ 2.3 s at full
+     * load, rare enough not to add meaningful write overhead. */
+    if ((sd_file_open != 0U) && (rows_since_sync >= (1024U * 1024U)))
+    {
+      (void)FatFs_SD_LoggerSync();
+      rows_since_sync = 0U;
     }
 
     while ((sd_file_open != 0U) && (AppAcqIsSdSessionActive() != 0U) && (AppFrameBufferPop(&frame) != 0U))
