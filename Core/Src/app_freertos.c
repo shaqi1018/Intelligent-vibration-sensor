@@ -192,7 +192,11 @@ static const osMutexAttr_t acq_ctrl_mutex_attr = {
 osThreadId_t lsm6dsoxTaskHandle;
 const osThreadAttr_t lsm6dsoxTask_attributes = {
   .name = "lsm6dsoxTask",
-  .priority = (osPriority_t)osPriorityAboveNormal,
+  /* High（> logger 的 AboveNormal）：6664Hz 硬件 FIFO 仅 ~38ms 余量，必须能抢占
+   * logger 排空 FIFO，否则 FIFO 层丢 ~2.5%。早期单独提优先级失败(ring 溢出)是因
+   * 当时 ring 小;现在 192KB ring + 攒批写、ring 峰值才 19%，足以兜住 logger 被
+   * 抢占后的 drain 延迟。LSM 仅 ~7% CPU，不会饿死 logger。 */
+  .priority = (osPriority_t)osPriorityHigh,
   .stack_size = 2048 * 4  /* 8KB — holds fifo_buf (1.8KB) + locals */
 };
 
@@ -249,6 +253,8 @@ static uint32_t RingBuf_Available(const AppRingBuffer_t *rb);
 static uint32_t RingBuf_Write(AppRingBuffer_t *rb, const uint8_t *src, uint32_t len);
 static uint32_t RingBuf_PeekContiguous(AppRingBuffer_t *rb, const uint8_t **out_ptr, uint32_t *out_len);
 static void     RingBuf_Consume(AppRingBuffer_t *rb, uint32_t len);
+static int      LoggerDrainRing(AppRingBuffer_t *rb, uint8_t file_idx, uint32_t min_flush,
+                                uint32_t *rows_since_sync, FRESULT *out_res);
 static inline uint32_t AppU32ToDec(char *out, uint32_t v);
 static inline uint32_t AppI32ToDec(char *out, int32_t v);
 static inline uint32_t AppU64ToDec(char *out, uint64_t v);
@@ -744,6 +750,21 @@ static void AppLoggerStopSdSession(uint8_t *sd_file_open, uint32_t *rows_since_s
 
   if (*sd_file_open != 0U)
   {
+    /* Batching (LoggerDrainRing min_flush) can leave up to ~half a ring of
+     * sub-threshold tail data unwritten. Force-flush every ring (min_flush=0)
+     * before closing files, else the session tail is lost. */
+    {
+      uint32_t dummy_rss = 0U;
+      FRESULT fr;
+      int any;
+      do {
+        any = 0;
+        if (LoggerDrainRing(&g_ring_lsm_imu, 0U, 0U, &dummy_rss, &fr) > 0) { any = 1; }
+        if (LoggerDrainRing(&g_ring_qma_acc, 3U, 0U, &dummy_rss, &fr) > 0) { any = 1; }
+        if (LoggerDrainRing(&g_ring_h3_acc,  2U, 0U, &dummy_rss, &fr) > 0) { any = 1; }
+        if (LoggerDrainRing(&g_ring_mic, FATFS_SD_FILE_MIC_WAV, 0U, &dummy_rss, &fr) > 0) { any = 1; }
+      } while (any != 0);
+    }
     (void)DeviceCfg_WriteCurrentToSD();
     FatFs_SD_LoggerStop();
     SD_PrintWriteStats();   /* route-2: per-session SDMMC write-path health */
@@ -1277,13 +1298,29 @@ static void RingBuf_Consume(AppRingBuffer_t *rb, uint32_t len)
 static uint8_t s_sd_bounce[APP_RING_FLUSH_CHUNK];
 
 /* Drain one contiguous chunk from a ring to its file via s_sd_bounce.
+ * min_flush = batching threshold: if fewer than min_flush bytes are buffered AND
+ * the ring is below half full, skip the write so data accumulates into a large
+ * block first. Each SD write carries a big fixed cost (command + card
+ * PROGRAMMING + IRQ-off entry/exit); the old greedy drain emitted ~1.5KB writes
+ * at ~446/s, so that fixed cost dominated. Accumulating to ~FLUSH_CHUNK cuts the
+ * write count ~10x → far higher effective throughput and far less total IRQ-off
+ * time, all in polling mode (zero corruption). Pass min_flush = 0 to force a
+ * flush regardless (session stop). The half-full override still bounds latency
+ * and guarantees no ring overflow.
  * Returns:  1 = wrote a chunk (caller keeps looping),
- *           0 = nothing to do / audio dropped with no WAV sink (no progress),
+ *           0 = nothing to do / accumulating / audio dropped (no progress),
  *          -1 = write error (caller breaks; *out_res holds the FRESULT). */
-static int LoggerDrainRing(AppRingBuffer_t *rb, uint8_t file_idx,
+static int LoggerDrainRing(AppRingBuffer_t *rb, uint8_t file_idx, uint32_t min_flush,
                            uint32_t *rows_since_sync, FRESULT *out_res)
 {
   const uint8_t *p; uint32_t n;
+  /* Batching gate: hold back small writes unless the ring is past half full
+   * (then drain to bound latency / prevent overflow). min_flush==0 bypasses. */
+  if (min_flush != 0U)
+  {
+    uint32_t avail = RingBuf_Available(rb);
+    if (avail < min_flush && avail < (rb->size / 2U)) return 0;
+  }
   if (RingBuf_PeekContiguous(rb, &p, &n) == 0U) return 0;
 
   memcpy(s_sd_bounce, p, n);
@@ -2813,7 +2850,7 @@ void StartLoggerTask(void *argument)
         int dr;
         did_work = 0;
 
-        dr = LoggerDrainRing(&g_ring_lsm_imu, 0U, &rows_since_sync, &result);
+        dr = LoggerDrainRing(&g_ring_lsm_imu, 0U, APP_RING_FLUSH_CHUNK, &rows_since_sync, &result);
         if (dr < 0)
         {
           printf("[Logger] LSM_IMU write fail %s (%d)\r\n",
@@ -2823,7 +2860,7 @@ void StartLoggerTask(void *argument)
         }
         if (dr > 0) did_work = 1;
 
-        dr = LoggerDrainRing(&g_ring_qma_acc, 3U, &rows_since_sync, &result);
+        dr = LoggerDrainRing(&g_ring_qma_acc, 3U, APP_RING_FLUSH_CHUNK, &rows_since_sync, &result);
         if (dr < 0)
         {
           printf("[Logger] QMA_ACC write fail %s (%d)\r\n",
@@ -2833,7 +2870,7 @@ void StartLoggerTask(void *argument)
         }
         if (dr > 0) did_work = 1;
 
-        dr = LoggerDrainRing(&g_ring_h3_acc, 2U, &rows_since_sync, &result);
+        dr = LoggerDrainRing(&g_ring_h3_acc, 2U, APP_RING_FLUSH_CHUNK, &rows_since_sync, &result);
         if (dr < 0)
         {
           printf("[Logger] H3_ACC write fail %s (%d)\r\n",
@@ -2843,7 +2880,7 @@ void StartLoggerTask(void *argument)
         }
         if (dr > 0) did_work = 1;
 
-        dr = LoggerDrainRing(&g_ring_mic, FATFS_SD_FILE_MIC_WAV, &rows_since_sync, &result);
+        dr = LoggerDrainRing(&g_ring_mic, FATFS_SD_FILE_MIC_WAV, APP_RING_FLUSH_CHUNK, &rows_since_sync, &result);
         if (dr < 0)
         {
           printf("[Logger] MIC.WAV write fail %s (%d)\r\n",
@@ -2852,6 +2889,15 @@ void StartLoggerTask(void *argument)
           break;
         }
         if (dr > 0) did_work = 1;
+      }
+
+      /* 攒批节奏：本轮已把所有达阈值(或半满)的 ring 写完，其余在攒批。让出 CPU 并
+       * 给 ring 时间积累成大块，把每次写的固定开销(命令+PROGRAMMING+关中断)摊薄；
+       * 同时避免 logger 空转占满自己的时间片。数轮 2ms 即可攒到 ~16KB，ring 半满
+       * override 保证不溢出。会话停止时由 AppLoggerStopSdSession 强制 flush 尾部。 */
+      if ((sd_file_open != 0U) && (AppAcqIsSdSessionActive() != 0U))
+      {
+        osDelay(2U);
       }
     }
 
