@@ -164,6 +164,9 @@ AppRingBuffer_t g_ring_mic;                     /* 非 static：mic_capture.c ex
 static volatile uint32_t g_lsm_frame_id_counter;
 static volatile uint32_t g_qma_frame_id_counter;
 static volatile uint32_t g_h3_frame_id_counter;
+/* H3 DRDY 中断测试统计：中断触发 vs 超时(中断没来)次数，判断 PA1/EXTI1 DRDY 是否可靠。 */
+static volatile uint32_t g_h3_irq_count;
+static volatile uint32_t g_h3_timeout_count;
 static uint64_t s_session_start_us;   /* AppTime µs at SD-session start (route-2 real-ODR diag) */
 /* QMA FIFO over-read dedup: last emitted raw sample, to drop byte-identical stale repeats. */
 static int16_t s_qma_prev_x, s_qma_prev_y, s_qma_prev_z;
@@ -741,6 +744,8 @@ static void AppPrintRuntimeDiag(void)
          (unsigned long)g_qma_frame_id_counter,
          (unsigned long)g_h3_frame_id_counter,
          (unsigned long)apptime_ms);
+  printf("[H3diag] drdy_irq=%lu timeout=%lu (irq 占比高=DRDY中断可靠)\r\n",
+         (unsigned long)g_h3_irq_count, (unsigned long)g_h3_timeout_count);
 }
 
 static void AppLoggerStopSdSession(uint8_t *sd_file_open, uint32_t *rows_since_sync)
@@ -2409,26 +2414,34 @@ void StartH3lis100dlTask(void *argument)
     }
   }
 
-  /* Polling mode. EXTI-driven mode (DRDY routed to PA1 on HW-v2) was unreliable on
-   * this board. Polling at the configured ODR period delivers the same
-   * throughput without depending on the INT pin behaviour. */
+  /* DRDY-interrupt mode (test): DRDY routed to PA1/EXTI1 (CTRL_REG3=0x02), s_h3_drdy_sem
+   * released by HAL_GPIO_EXTI_Rising_Callback. Was unreliable on the old board → polling;
+   * HW reportedly fixed, re-testing. Timeout = period+10ms fallback so a missed/absent IRQ
+   * still reads (data stays continuous); irq vs timeout counts tell if DRDY is reliable. */
   {
     AcqConfig_t acfg;
     AcqConfig_GetCopy(&acfg);
     uint32_t h3_odr = (acfg.h3lis100dl.odr_hz > 0U) ? (uint32_t)acfg.h3lis100dl.odr_hz : 400U;
     s_h3_odr_interval_us = 1000000U / h3_odr;
-    printf("[H3LIS100DL] ODR config: %lu Hz (interval=%lu us)\r\n",
+    printf("[H3LIS100DL] DRDY-IRQ mode (PA1/EXTI1), ODR %lu Hz (interval=%lu us)\r\n",
            (unsigned long)h3_odr, (unsigned long)s_h3_odr_interval_us);
   }
-  uint32_t next_wake = osKernelGetTickCount();
   for (;;)
   {
     AppAcqCheckAutoStop();
     if (AppAcqIsRunning() == 0U)
     {
       osDelay(APP_ACQ_IDLE_DELAY_MS);
-      next_wake = osKernelGetTickCount();
       continue;
+    }
+
+    /* Wait for DRDY interrupt; fall back after period+10ms if the IRQ doesn't arrive. */
+    {
+      uint32_t h3_to = (s_h3_odr_interval_us / 1000U) + 10U;
+      if (h3_to < 2U) { h3_to = 2U; }
+      if ((s_h3_drdy_sem != NULL) && (osSemaphoreAcquire(s_h3_drdy_sem, h3_to) == osOK))
+      { g_h3_irq_count++; }
+      else { g_h3_timeout_count++; }
     }
 
     H3LIS100DL_Data_t data;
@@ -2487,11 +2500,7 @@ void StartH3lis100dlTask(void *argument)
       }
     }
 
-    /* Pace the loop at the configured ODR. osDelayUntil bounds cumulative drift
-     * even when an iteration stalls behind a higher-priority task. 1ms tick
-     * limits real granularity; H3 high-g shock detection tolerates this. */
-    next_wake += s_h3_odr_interval_us / 1000U;
-    osDelayUntil(next_wake);
+    /* No pacing delay — loop is paced by the DRDY interrupt (or its timeout fallback). */
   }
 #endif
 }
@@ -2866,6 +2875,8 @@ void StartLoggerTask(void *argument)
         g_lsm_frame_id_counter = 0U;
         g_qma_frame_id_counter = 0U;
         g_h3_frame_id_counter  = 0U;
+        g_h3_irq_count = 0U;        /* H3 DRDY 中断测试统计，按会话清零 */
+        g_h3_timeout_count = 0U;
 
         sd_file_open = 1U;
         rows_since_sync = 0U;
