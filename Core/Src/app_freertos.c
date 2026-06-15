@@ -108,6 +108,8 @@ typedef struct
   uint32_t start_tick_ms;
   uint32_t stop_tick_ms;
   uint32_t last_stop_tick_ms;
+  uint64_t start_us;     /* auto-stop 计时基准用 apptime（真实时钟）：RTOS tick 比真实
+                          * 时间慢 ~19%（44000 tick=52.5s 实测），不能用 tick 计采集时长 */
 } AppAcqControl_t;
 
 typedef struct
@@ -830,8 +832,21 @@ static void AppAcqCheckAutoStop(void)
     return;
   }
 
-  if ((now_ms - ctrl.start_tick_ms) >= ctrl.duration_ms)
+  /* auto-stop 计时必须用真实时钟(apptime)——RTOS tick 比真实时间慢 ~19%（实测 44000
+   * tick=52.5s），用 tick 会让 44s 跑成 ~52s。但 AppTime_GetEpochUs 带 __disable_irq +
+   * DWT wrap 维护，被各采集任务高频调用会拖垮 SD 吞吐（实测 ring 大量溢出 CKBX0304）。
+   * 故 tick 限流：每 ~250 tick 才真正取一次 apptime（auto-stop 不需要 ms 精度）。 */
+  static uint32_t s_autostop_last_tick = 0U;
+  if ((now_ms - s_autostop_last_tick) < 250U) { return; }
+  s_autostop_last_tick = now_ms;
+
+  uint64_t now_us = AppTime_GetEpochUs();
+  uint32_t elapsed_ms = (now_us > ctrl.start_us) ? (uint32_t)((now_us - ctrl.start_us) / 1000ULL) : 0U;
+  if (elapsed_ms >= ctrl.duration_ms)
   {
+    printf("[Acq] auto-stop: elapsed_apptime=%lu ms dur=%lu ms (tick_elapsed=%lu)\r\n",
+           (unsigned long)elapsed_ms, (unsigned long)ctrl.duration_ms,
+           (unsigned long)(now_ms - ctrl.start_tick_ms));
     AppAcqStopInternal(now_ms);
   }
 }
@@ -850,8 +865,14 @@ static void AppAcqResetSessionTimer(void)
     g_acq_ctrl.stop_pending  = 0U;
     g_acq_ctrl.timer_armed   = 1U;
     g_acq_ctrl.start_tick_ms = osKernelGetTickCount();
+    g_acq_ctrl.start_us      = AppTime_GetEpochUs();  /* 真实时钟基准（tick 慢 19% 不可用） */
   }
+  uint8_t  dbg_armed = g_acq_ctrl.timer_armed;
+  uint32_t dbg_start = g_acq_ctrl.start_tick_ms;
+  uint32_t dbg_dur   = g_acq_ctrl.duration_ms;
   osMutexRelease(acq_ctrl_mutex);
+  printf("[Acq] timer armed=%u start_tick=%lu duration_ms=%lu\r\n",
+         (unsigned)dbg_armed, (unsigned long)dbg_start, (unsigned long)dbg_dur);
 }
 
 /* Apply current AcqConfig to all three sensors. Called on each acq_start so
@@ -1027,17 +1048,32 @@ static void UsbCmd_AcqStatus(void)
 
 static void UsbCmd_AcqStart(const char *cmd)
 {
-  char sink_text[8];
+  char sink_text[8] = {0};
   unsigned long duration_ms = 0UL;
   uint8_t sink = 0U;
 
-  int n = sscanf(cmd, "acq_start %7s %lu", sink_text, &duration_ms);
-  if (n < 1)
+  /* 手动解析 —— 不能用 sscanf 的 %lu：本工程用 Keil microLIB，其精简版 sscanf
+   * 不支持 %lu，会把 "acq_start sd 44000" 的 44000 丢掉、duration_ms 恒为 0，
+   * 导致定时采集失效（变成无限手动停）。改用 token 切分 + strtoul（microLIB 支持）。
+   * 调用前已 strncmp("acq_start ",10) 命中，故 cmd+10 起为参数。 */
+  {
+    const char *p = cmd + 10;                 /* 跳过 "acq_start " */
+    int i = 0;
+    while (*p == ' ') { p++; }                /* 跳过前导空格 */
+    while ((*p != '\0') && (*p != ' ') && (i < 7)) { sink_text[i++] = *p++; }  /* sink */
+    sink_text[i] = '\0';
+    while (*p == ' ') { p++; }                /* 跳到 duration */
+    if ((*p >= '0') && (*p <= '9')) { duration_ms = strtoul(p, NULL, 10); }
+  }
+
+  if (sink_text[0] == '\0')
   {
     const char *msg = "Usage: acq_start <usb|sd> [duration_ms]\r\n";
     UsbCdcService_Write((const uint8_t *)msg, strlen(msg));
     return;
   }
+
+  printf("[Acq] acq_start sink=%s duration_ms=%lu\r\n", sink_text, duration_ms);
 
   if (AppAcqParseSink(sink_text, &sink) == 0U)
   {
@@ -1488,19 +1524,32 @@ static void UsbCmd_Help(void)
 
 static void UsbCmd_SetSensor(const char *cmd)
 {
-  char sensor[8];
-  char param[8];
-  unsigned long val;
+  char sensor[8] = {0};
+  char param[8]  = {0};
+  unsigned long val = 0UL;
   char line[80];
   int len;
   int updated = 0;
 
-  if (sscanf(cmd, "s %7s %7s %lu", sensor, param, &val) != 3)
+  /* 手动解析 —— microLIB 的 sscanf 不支持 %lu(同 acq_start 的坑)：原 sscanf 会把
+   * value 丢掉、val 为乱值/0，导致 s 命令实际改不动配置。格式 "s <sensor> <param> <value>"。 */
   {
-    const char *msg = "Usage: s <lsm|h3|qma> <odr|range|en> <value>\r\n";
-    UsbCdcService_Write((const uint8_t *)msg, strlen(msg));
-    return;
+    const char *p = cmd + 1;                  /* 跳过 's' */
+    int i;
+    while (*p == ' ') { p++; }
+    i = 0; while ((*p != '\0') && (*p != ' ') && (i < 7)) { sensor[i++] = *p++; } sensor[i] = '\0';
+    while (*p == ' ') { p++; }
+    i = 0; while ((*p != '\0') && (*p != ' ') && (i < 7)) { param[i++] = *p++; } param[i] = '\0';
+    while (*p == ' ') { p++; }
+    if ((sensor[0] == '\0') || (param[0] == '\0') || (*p < '0') || (*p > '9'))
+    {
+      const char *msg = "Usage: s <lsm|h3|qma> <odr|range|en> <value>\r\n";
+      UsbCdcService_Write((const uint8_t *)msg, strlen(msg));
+      return;
+    }
+    val = strtoul(p, NULL, 10);
   }
+  printf("[Acq] set sensor=%s param=%s val=%lu\r\n", sensor, param, val);
 
   uint8_t which;
   if      (strcmp(sensor, "lsm") == 0) which = 0U;
