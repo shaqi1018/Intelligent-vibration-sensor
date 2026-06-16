@@ -215,7 +215,7 @@ const osThreadAttr_t qma6100pTask_attributes = {
 osThreadId_t h3lis100dlTaskHandle;
 const osThreadAttr_t h3lis100dlTask_attributes = {
   .name = "h3lis100dlTask",
-  .priority = (osPriority_t)osPriorityAboveNormal,
+  .priority = (osPriority_t)osPriorityHigh,   /* 提优先级：无FIFO+不锁存DRDY，满速时被LSM抢占会丢边沿；与LSM同High抢SPI2读 */
   .stack_size = 2048 * 4  /* 8KB — 与QMA同步扩容，防止低概率栈溢出 */
 };
 
