@@ -515,23 +515,27 @@ static void AppSnapshotReset(void)
   }
 }
 
-/* The QMA6100P register-0x10 "BW_xxxx" value IS the output data rate in Hz
- * (verified: BW_1600 → 1523 Hz unique ≈ 1600 Hz; an earlier "ODR = 2x BW"
- * assumption was wrong — the apparent over-sampling was just natural duplicate
- * frames from a stationary sensor inflating the row count). So map directly. */
+/* QMA6100P register-0x10 BW code -> nominal ODR, using the QST datasheet
+ * working points (low-power 80/200/400/800, low-noise 12.5/25/50, + 1600).
+ * The datasheet's BW<4:0>->ODR table itself is missing, but the 2026-06-16
+ * calibration sweep confirmed these labels: code 0x00 measured ~81Hz = the
+ * datasheet's 80Hz point (NOT 100 as the old firmware mislabelled it), 0x03
+ * ~803=800, 0x04 ~1601=1600. The actual rate has a small chip offset on some
+ * codes (ODR = f(MCLK_SEL,BW); ~10-20% on the low/mid steps) — acceptable, like
+ * the LSM/H3 nameplate-vs-real offsets. Thresholds are nearest-boundary. */
 static QMA6100P_Bandwidth_t AppQmaBwToEnum(uint32_t odr_hz)
 {
-  if (odr_hz >= 1600U) return QMA6100P_BW_1600;
-  if (odr_hz >= 800U)  return QMA6100P_BW_800;
-  if (odr_hz >= 400U)  return QMA6100P_BW_400;
-  if (odr_hz >= 200U)  return QMA6100P_BW_200;
-  if (odr_hz >= 100U)  return QMA6100P_BW_100;
-  if (odr_hz >= 50U)   return QMA6100P_BW_50;
-  if (odr_hz >= 25U)   return QMA6100P_BW_25;
-  return QMA6100P_BW_12_5;
+  if (odr_hz >= 1200U) return QMA6100P_BW_1600;  /* 1600 */
+  if (odr_hz >= 600U)  return QMA6100P_BW_800;   /* 800  */
+  if (odr_hz >= 300U)  return QMA6100P_BW_400;   /* 400  */
+  if (odr_hz >= 140U)  return QMA6100P_BW_200;   /* 200  */
+  if (odr_hz >= 65U)   return QMA6100P_BW_100;   /* 80   */
+  if (odr_hz >= 37U)   return QMA6100P_BW_50;    /* 50   */
+  if (odr_hz >= 18U)   return QMA6100P_BW_25;    /* 25   */
+  return QMA6100P_BW_12_5;                        /* 12.5 */
 }
 
-/* QMA6100P "BW_xxxx" register value = ODR in Hz directly (see AppQmaBwToEnum). */
+/* Nominal ODR (Hz) for a BW code — datasheet working points (see AppQmaBwToEnum). */
 static uint32_t AppQmaBwToOdrHz(QMA6100P_Bandwidth_t bw)
 {
   switch (bw)
@@ -540,10 +544,10 @@ static uint32_t AppQmaBwToOdrHz(QMA6100P_Bandwidth_t bw)
     case QMA6100P_BW_800:  return 800U;
     case QMA6100P_BW_400:  return 400U;
     case QMA6100P_BW_200:  return 200U;
-    case QMA6100P_BW_100:  return 100U;
+    case QMA6100P_BW_100:  return 80U;   /* datasheet low-power point (was mislabelled 100) */
     case QMA6100P_BW_50:   return 50U;
     case QMA6100P_BW_25:   return 25U;
-    default:               return 12U;
+    default:               return 12U;   /* 12.5 Hz */
   }
 }
 
@@ -919,10 +923,18 @@ static void AppApplySensorConfig(void)
     printf("[QMA6100P] disabled, skip reconfig\r\n");
   }
 
-  /* H3 polling interval */
+  /* H3: write CTRL_REG1 DR bits (else odr_hz is ignored) + update fallback
+   * interval. Same per-apply path as LSM/QMA above, so "s h3 odr N" takes
+   * effect immediately without a reboot. spi2_mutex already held here.
+   * Datasheet Table 20: DR 00/01/10 = 50/100/400 Hz. */
   if (cfg.h3lis100dl.enabled != 0U)
   {
     uint32_t h3_odr = (cfg.h3lis100dl.odr_hz > 0U) ? (uint32_t)cfg.h3lis100dl.odr_hz : 400U;
+    H3LIS100DL_Config_t h3_cfg;
+    if (h3_odr <= 75U)       { h3_cfg.odr = H3LIS100DL_ODR_50HZ;  h3_odr = 50U;  }
+    else if (h3_odr <= 250U) { h3_cfg.odr = H3LIS100DL_ODR_100HZ; h3_odr = 100U; }
+    else                     { h3_cfg.odr = H3LIS100DL_ODR_400HZ; h3_odr = 400U; }
+    (void)H3LIS100DL_Configure(&h3_cfg);
     s_h3_odr_interval_us = 1000000U / h3_odr;
   }
   else
@@ -1595,7 +1607,8 @@ static void UsbCmd_SetSensor(const char *cmd)
         break;
       }
       case 2U: {
-        static const uint16_t qma_odrs[] = {100,200,400,800,1600};
+        /* QST datasheet working points (12=12.5Hz); all 8 BW codes 0x00-0x07. */
+        static const uint16_t qma_odrs[] = {12,25,50,80,200,400,800,1600};
         snapped = qma_odrs[0];
         for (unsigned i = 1; i < sizeof(qma_odrs)/sizeof(qma_odrs[0]); i++)
           if (abs((int)val - (int)qma_odrs[i]) < abs((int)val - (int)snapped))
@@ -2371,6 +2384,28 @@ void StartLsm6dsoxTask(void *argument)
 #endif
 }
 
+/* Apply the configured H3 ODR to the chip's CTRL_REG1 DR bits and update the
+ * DRDY-fallback interval. Init() hard-codes 400Hz, so without this the odr_hz
+ * config was ignored entirely. Called once at boot, same as LSM/QMA configure
+ * their chips at task start (ODR change needs a reboot to take effect).
+ * Datasheet Table 20: DR 00/01/10 = 50/100/400 Hz. */
+static void AppH3ApplyOdr(void)
+{
+  AcqConfig_t acfg;
+  AcqConfig_GetCopy(&acfg);
+  uint32_t h3_odr = (acfg.h3lis100dl.odr_hz > 0U) ? (uint32_t)acfg.h3lis100dl.odr_hz : 400U;
+  H3LIS100DL_Config_t h3_cfg;
+  if (h3_odr <= 75U)       { h3_cfg.odr = H3LIS100DL_ODR_50HZ;  h3_odr = 50U;  }
+  else if (h3_odr <= 250U) { h3_cfg.odr = H3LIS100DL_ODR_100HZ; h3_odr = 100U; }
+  else                     { h3_cfg.odr = H3LIS100DL_ODR_400HZ; h3_odr = 400U; }
+  osMutexAcquire(spi2_mutex, osWaitForever);
+  int h3_cfg_ret = H3LIS100DL_Configure(&h3_cfg);
+  osMutexRelease(spi2_mutex);
+  s_h3_odr_interval_us = 1000000U / h3_odr;
+  printf("[H3LIS100DL] DRDY-IRQ mode (PA1/EXTI1), ODR %lu Hz (interval=%lu us, cfg_ret=%d)\r\n",
+         (unsigned long)h3_odr, (unsigned long)s_h3_odr_interval_us, h3_cfg_ret);
+}
+
 void StartH3lis100dlTask(void *argument)
 {
   (void)argument;
@@ -2418,14 +2453,7 @@ void StartH3lis100dlTask(void *argument)
    * released by HAL_GPIO_EXTI_Rising_Callback. Was unreliable on the old board → polling;
    * HW reportedly fixed, re-testing. Timeout = period+10ms fallback so a missed/absent IRQ
    * still reads (data stays continuous); irq vs timeout counts tell if DRDY is reliable. */
-  {
-    AcqConfig_t acfg;
-    AcqConfig_GetCopy(&acfg);
-    uint32_t h3_odr = (acfg.h3lis100dl.odr_hz > 0U) ? (uint32_t)acfg.h3lis100dl.odr_hz : 400U;
-    s_h3_odr_interval_us = 1000000U / h3_odr;
-    printf("[H3LIS100DL] DRDY-IRQ mode (PA1/EXTI1), ODR %lu Hz (interval=%lu us)\r\n",
-           (unsigned long)h3_odr, (unsigned long)s_h3_odr_interval_us);
-  }
+  AppH3ApplyOdr();   /* boot-time apply, same as LSM/QMA (ODR change needs a reboot) */
   for (;;)
   {
     AppAcqCheckAutoStop();
