@@ -975,10 +975,21 @@ uint32_t AppAcqStart(uint8_t sink, uint32_t duration_ms)
   g_acq_ctrl.duration_ms = duration_ms;
   g_acq_ctrl.start_tick_ms = now_ms;
   g_acq_ctrl.stop_pending = 0U;
-  /* SD session: timer starts only after SD files are open (logger arms it).
-   * USB session: no init delay, arm immediately. */
+  /* SD session: timer starts only after SD files are open (logger arms it via
+   * AppAcqResetSessionTimer, which also sets start_us). USB session: no init
+   * delay — arm immediately AND set the apptime base here, otherwise start_us
+   * stays stale/0 and the auto-stop computes a huge elapsed → instant stop. */
   g_acq_ctrl.timer_armed = (sink == APP_ACQ_SINK_USB) ? 1U : 0U;
+  if (sink == APP_ACQ_SINK_USB)
+  {
+    g_acq_ctrl.start_us = AppTime_GetEpochUs();  /* real-clock base (tick is 19% slow) */
+  }
   osMutexRelease(acq_ctrl_mutex);
+
+  /* 按 sink 选 LSM FIFO 读法:USB→每字节(碎读不丢 USB 帧),SD→7字节(快读满采)。
+   * 二分实测确诊:7字节读 SD满采但USB丢~6%;每字节读 USB好但SD欠采~13%。两者需求
+   * 相反,按 sink 动态切才两全。配合 USB sink 时 LSM 不被高优先级抢占。 */
+  LSM6DSOX_SetFifoReadPerByte((sink == APP_ACQ_SINK_USB) ? 1U : 0U);
 
   AppFlowStatsSetMode((uint8_t)((sink == APP_ACQ_SINK_USB) ? 1U : 0U),
                       (uint8_t)((sink == APP_ACQ_SINK_SD) ? 1U : 0U));
@@ -1011,6 +1022,19 @@ uint32_t AppAcqStop(void)
 
   AppAcqStopInternal(osKernelGetTickCount());
   AppFlowStatsSetMode(0U, 0U);
+
+  /* Print final LSM USB diagnostics if it was a USB session */
+  if (ctrl.sink == APP_ACQ_SINK_USB)
+  {
+    extern volatile uint32_t g_lsm_usb_overrun;
+    extern volatile uint32_t g_lsm_usb_sof_send;
+    extern volatile uint32_t g_lsm_usb_datain_complete;
+    printf("[LSM-USB] FINAL overrun=%lu sof_send=%lu datain_complete=%lu delta=%ld\r\n",
+           (unsigned long)g_lsm_usb_overrun, (unsigned long)g_lsm_usb_sof_send,
+           (unsigned long)g_lsm_usb_datain_complete,
+           (long)(g_lsm_usb_sof_send - g_lsm_usb_datain_complete));
+  }
+
   return 1U;
 }
 
@@ -1535,7 +1559,7 @@ static void UsbCmd_Ping(void)
 
 static void UsbCmd_Help(void)
 {
-  const char *msg = "Commands: ping, help, status, acq_start, acq_stop, s <lsm|h3|qma> <odr|range|en> <val>, set_time YYYY-MM-DDTHH:MM:SS, boot_msc\r\n";
+  const char *msg = "Commands: ping, help, status, acq_start, acq_stop, s <lsm|h3|qma> <odr|range|en> <val>, s mic <gain|sr|en> <val>, set_time YYYY-MM-DDTHH:MM:SS, boot_msc\r\n";
   UsbCdcService_Write((const uint8_t *)msg, strlen(msg));
 }
 
@@ -1560,13 +1584,51 @@ static void UsbCmd_SetSensor(const char *cmd)
     while (*p == ' ') { p++; }
     if ((sensor[0] == '\0') || (param[0] == '\0') || (*p < '0') || (*p > '9'))
     {
-      const char *msg = "Usage: s <lsm|h3|qma> <odr|range|en> <value>\r\n";
+      const char *msg = "Usage: s <lsm|h3|qma> <odr|range|en> <value> | s mic <gain|sr|en> <value>\r\n";
       UsbCdcService_Write((const uint8_t *)msg, strlen(msg));
       return;
     }
     val = strtoul(p, NULL, 10);
   }
   printf("[Acq] set sensor=%s param=%s val=%lu\r\n", sensor, param, val);
+
+  /* 麦克风(ES8311)配置：s mic <gain|sr|en> <val>。参数与传感器的 odr/range/en 不同，
+   * 单独处理后提前返回。AcqConfig_SetMic 一次写全部三项，故先读当前值、只改目标项；
+   * sr 传 0 表示保持当前采样率。配置在下次会话 Mic_Start 时生效（与 acq_start 配合）。 */
+  if (strcmp(sensor, "mic") == 0)
+  {
+    AcqConfig_t mcfg;
+    AcqConfig_GetCopy(&mcfg);
+    uint8_t  m_en   = mcfg.es8311.enabled;
+    uint32_t m_sr   = 0U;                 /* 0 = 保持当前采样率 */
+    uint16_t m_gain = mcfg.es8311.gain_db;
+    int ok = 1;
+
+    if      (strcmp(param, "gain") == 0) { m_gain = (uint16_t)val; }       /* 0..42 */
+    else if (strcmp(param, "sr")   == 0) { m_sr   = (uint32_t)val; }       /* 8000/16000/48000/96000 */
+    else if (strcmp(param, "en")   == 0) { m_en   = (val != 0U) ? 1U : 0U; }
+    else                                 { ok = 0; }
+
+    if (!ok)
+    {
+      len = snprintf(line, sizeof(line), "ERR: use gain, sr, or en\r\n");
+    }
+    else if (AcqConfig_SetMic(m_en, m_sr, m_gain) == 0)
+    {
+      AcqConfig_GetCopy(&mcfg);          /* 读回实际生效值 */
+      len = snprintf(line, sizeof(line), "OK mic en=%u sr=%lu gain=%u\r\n",
+                     (unsigned)mcfg.es8311.enabled,
+                     (unsigned long)mcfg.es8311.sample_rate_hz,
+                     (unsigned)mcfg.es8311.gain_db);
+      (void)DeviceCfg_WriteCurrentToSD();
+    }
+    else
+    {
+      len = snprintf(line, sizeof(line), "ERR: sr=8000/16000/48000/96000, gain<=42\r\n");
+    }
+    UsbCdcService_Write((const uint8_t *)line, (uint32_t)len);
+    return;
+  }
 
   uint8_t which;
   if      (strcmp(sensor, "lsm") == 0) which = 0U;
@@ -1696,6 +1758,10 @@ static void UsbCmd_Status(void)
   STATUS_LINE("qma  odr=%uHz  range=+-%ug\r\n",
               (unsigned)cfg.qma6100p.odr_hz,
               (unsigned)cfg.qma6100p.range);
+  STATUS_LINE("mic  en=%u  sr=%luHz  gain=%udB\r\n",
+              (unsigned)cfg.es8311.enabled,
+              (unsigned long)cfg.es8311.sample_rate_hz,
+              (unsigned)cfg.es8311.gain_db);
 
 #undef STATUS_LINE
 }
@@ -1841,7 +1907,7 @@ void StartUsbCdcTask(void *argument)
         printf("[WCID] USBD_Start returned %d\r\n", (int)st);
         if (st == USBD_OK)
         {
-          printf("[WCID] init ok — 3 IN endpoints (LSM/H3/QMA) + 1 OUT (cmd)\r\n");
+          printf("[WCID] init ok — 4 data IN (LSM/H3/MIC/QMA) + resp IN + 1 OUT (cmd)\r\n");
         }
         else { printf("[WCID] USBD_Start FAIL\r\n"); }
       }
@@ -1923,9 +1989,25 @@ void StartUsbCdcTask(void *argument)
 void StartUsbUploadTask(void *argument)
 {
   /* CDC removed — in WCID mode sensors write directly via UsbWcidApp_SendCsv.
-   * This task is no longer needed. Idle forever. */
+   * Repurpose this task for periodic LSM USB diagnostics printing. */
   (void)argument;
-  for (;;) { osDelay(1000U); }
+  extern volatile uint32_t g_lsm_usb_overrun;
+  extern volatile uint32_t g_lsm_usb_sof_send;
+  extern volatile uint32_t g_lsm_usb_datain_complete;
+
+  for (;;)
+  {
+    osDelay(5000U);  /* Print every 5 seconds */
+    if (AppAcqIsUsbSinkActive() != 0U)
+    {
+      uint32_t over = g_lsm_usb_overrun;
+      uint32_t send = g_lsm_usb_sof_send;
+      uint32_t comp = g_lsm_usb_datain_complete;
+      printf("[LSM-USB] overrun=%lu sof_send=%lu datain_complete=%lu delta=%ld\r\n",
+             (unsigned long)over, (unsigned long)send, (unsigned long)comp,
+             (long)(send - comp));
+    }
+  }
 }
 
 #if APP_SENSOR_TEST_TARGET == APP_SENSOR_TEST_LSM6DSOX
@@ -2800,7 +2882,30 @@ void StartMicTask(void *argument)
       running = 0U;
       printf("[Mic] stopped (dropped=%lu)\r\n", (unsigned long)Mic_GetDropped());
     }
-    osDelay(20U);
+
+    /* USB streaming mode: pump raw PCM from g_ring_mic into the USB MIC channel
+     * (EP3). In SD mode the logger drains the ring to MIC.WAV instead, so we only
+     * consume here when the USB sink is active — keeps the ring single-consumer.
+     * Feed in small chunks (<= the SOF half) and poll fast so the 2x2048 double-
+     * buffer never overruns the in-flight half; the 64KB ring absorbs jitter. */
+    if (running && (AppAcqIsUsbSinkActive() != 0U))
+    {
+      uint32_t fed = 0U;
+      const uint8_t *p;
+      uint32_t n;
+      while ((fed < 1024U) && (RingBuf_PeekContiguous(&g_ring_mic, &p, &n) != 0U))
+      {
+        uint32_t chunk = (n > 512U) ? 512U : n;
+        if (UsbWcidApp_SendRaw(WCID_CH_MIC, p, chunk) != 0U) { break; }
+        RingBuf_Consume(&g_ring_mic, chunk);
+        fed += chunk;
+      }
+      osDelay(1U);
+    }
+    else
+    {
+      osDelay(20U);
+    }
   }
 }
 

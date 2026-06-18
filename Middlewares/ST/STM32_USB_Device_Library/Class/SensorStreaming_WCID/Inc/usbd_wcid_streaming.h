@@ -40,13 +40,14 @@ extern "C" {
 /** @defgroup USBD_WCID_STREAMING_Exported_Defines
   * @{
   */
-#define N_CHANNELS_MAX                                3U   /* LSM IMU, H3 Accel, QMA Accel */
+#define N_CHANNELS_MAX                                4U   /* LSM IMU, H3 Accel, QMA Accel, MIC PCM */
 
-#define N_IN_ENDPOINTS                                3U
-#define DATA_IN_EP1                                   0x81  /* EP1 for LSM6DSOX IMU */
-#define DATA_IN_EP2                                   0x82  /* EP2 for H3LIS100DL Accel */
-#define DATA_IN_EP3                                   0x83  /* EP3 for QMA6100P Accel */
-#define DATA_IN_EP_RESP                               0x84  /* EP4 for command responses */
+#define N_IN_ENDPOINTS                                4U
+#define DATA_IN_EP1                                   0x81  /* EP1 for LSM6DSOX IMU (clean) */
+#define DATA_IN_EP2                                   0x82  /* EP2 for H3LIS100DL Accel (clean) */
+#define DATA_IN_EP3                                   0x83  /* EP3 for QMA6100P Accel (clean) */
+#define DATA_IN_EP4                                   0x84  /* EP4 for ES8311 MIC raw PCM (clean, appended) */
+#define DATA_IN_EP_RESP                               0x85  /* EP5 for command responses (moved from 0x84) */
 #define DATA_OUT_EP1                                  0x01  /* EP1 for command OUT */
 
 #define SS_WCID_DATA_FS_MAX_PACKET_SIZE               64U  /* Endpoint IN & OUT Packet size */

@@ -32,16 +32,21 @@ USBD_StatusTypeDef USBD_LL_Init(USBD_HandleTypeDef *pdev)
    * Total USB OTG FS FIFO = 320 words (1280 bytes). */
   if (g_boot_mode == BOOT_MODE_WCID_BULK)
   {
-    /* WCID Bulk: 4 IN + 1 OUT endpoints.
-     * RX = 64 words (256B), TX0 = EP0, TX1-3 = sensor IN (56 words each),
-     * TX4 = EP4 cmd response (16 words = 64B, one FS packet).
-     * Total = 64+64+56*3+16 = 312 <= 320 words available. */
-    HAL_PCDEx_SetRxFiFo(&hpcd_USB_OTG_FS, 0x40U);    /* 64 words = 256 bytes */
+    /* WCID Bulk: 5 IN + 1 OUT endpoints (LSM/H3/QMA/MIC data + cmd-resp + cmd-OUT).
+     * RX MUST stay >= 64 words — enumeration runs on EP0 control and SETUP/OUT
+     * packets are received via the shared RX FIFO; shrinking it starves EP0 and
+     * the device fails to enumerate.
+     * LSM (6664Hz CSV, ~320KB/s) and MIC (96k PCM, ~192KB/s) are the high-rate
+     * channels → 56 words each for max drain headroom. H3/QMA are low-rate
+     * (19/77 KB/s) → 24 words each is plenty (were clean even at 36).
+     * Total = 64+64+56+24+24+56+16 = 304 <= 320 words available. */
+    HAL_PCDEx_SetRxFiFo(&hpcd_USB_OTG_FS, 0x40U);    /* 64 words = 256 bytes RX (EP0 ctrl + cmd OUT) */
     HAL_PCDEx_SetTxFiFo(&hpcd_USB_OTG_FS, 0U, 0x40U); /* 64 words = 256 bytes EP0 */
-    HAL_PCDEx_SetTxFiFo(&hpcd_USB_OTG_FS, 1U, 0x38U); /* 56 words = 224 bytes EP1 IN */
-    HAL_PCDEx_SetTxFiFo(&hpcd_USB_OTG_FS, 2U, 0x38U); /* 56 words = 224 bytes EP2 IN */
-    HAL_PCDEx_SetTxFiFo(&hpcd_USB_OTG_FS, 3U, 0x38U); /* 56 words = 224 bytes EP3 IN */
-    HAL_PCDEx_SetTxFiFo(&hpcd_USB_OTG_FS, 4U, 0x10U); /* 16 words =  64 bytes EP4 IN (cmd resp) */
+    HAL_PCDEx_SetTxFiFo(&hpcd_USB_OTG_FS, 1U, 0x38U); /* 56 words = 224 bytes EP1 IN (LSM) */
+    HAL_PCDEx_SetTxFiFo(&hpcd_USB_OTG_FS, 2U, 0x18U); /* 24 words =  96 bytes EP2 IN (H3)  */
+    HAL_PCDEx_SetTxFiFo(&hpcd_USB_OTG_FS, 3U, 0x18U); /* 24 words =  96 bytes EP3 IN (QMA) */
+    HAL_PCDEx_SetTxFiFo(&hpcd_USB_OTG_FS, 4U, 0x38U); /* 56 words = 224 bytes EP4 IN (MIC) */
+    HAL_PCDEx_SetTxFiFo(&hpcd_USB_OTG_FS, 5U, 0x10U); /* 16 words =  64 bytes EP5 IN (cmd resp) */
   }
   else
   {

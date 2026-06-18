@@ -6,14 +6,25 @@
 static USBD_HandleTypeDef *s_pdev;
 static UsbWcidApp_CmdHandler s_cmd_handler;
 
-/* 静态双缓冲：3 通道 × (WCID_TX_HALF_SIZE × 2 + 2)。
- * 多出的 "+2" 用于 tag 通道（QMA = N_IN_ENDPOINTS-1）的每半通道标记字节：
+/* LSM USB 发送诊断计数器(用于定位 6664Hz 丢帧根因) */
+volatile uint32_t g_lsm_usb_overrun = 0U;        /* 生产者写入冲突次数(主机读太慢) */
+volatile uint32_t g_lsm_usb_sof_send = 0U;       /* SOF 发送 LSM 的次数 */
+volatile uint32_t g_lsm_usb_datain_complete = 0U;/* DataIn 完成 LSM 的次数 */
+
+/* 静态双缓冲：4 通道 × (WCID_TX_HALF_SIZE × 2 + 2)。
+ * 多出的 "+2" 用于 tag 通道（最后通道 = MIC = N_IN_ENDPOINTS-1）的每半通道标记字节：
  * 中间件以 (size*2+2) 取模索引缓冲，若只声明 size*2 会越界 2 字节。
- * 为安全起见 LSM/H3（非 tag 通道）也统一声明为 size*2+2。 */
+ * 为安全起见 LSM/H3/QMA（非 tag 通道）也统一声明为 size*2+2。 */
 static uint8_t s_tx_buf_lsm[WCID_TX_HALF_SIZE * 2 + 2];
 static uint8_t s_tx_buf_h3[WCID_TX_HALF_SIZE * 2 + 2];
 static uint8_t s_tx_buf_qma[WCID_TX_HALF_SIZE * 2 + 2];
+static uint8_t s_tx_buf_mic[WCID_TX_HALF_SIZE * 2 + 2]; /* ES8311 raw PCM (ch3 = last EP) */
 static uint8_t s_rx_buf[64U]; /* OUT EP1 command receive buffer */
+
+/* MIC half-buffer (bytes): 96kHz/16-bit PCM is rate-based not row-based, so use a
+ * fixed half. 2048B ≈ 10.6ms audio/half; one FS bulk transfer of 2048B (~1.7ms)
+ * sustains >1MB/s/EP, far above the 192KB/s the mic produces. */
+#define WCID_MIC_HALF_SIZE  2048U
 
 /* WCID class interface callbacks — minimal stubs. */
 static int8_t WcidApp_Init(void)
@@ -25,6 +36,7 @@ static int8_t WcidApp_Init(void)
   USBD_WCID_STREAMING_SetTxDataBuffer(s_pdev, WCID_CH_LSM_IMU,   s_tx_buf_lsm, WCID_TX_HALF_SIZE);
   USBD_WCID_STREAMING_SetTxDataBuffer(s_pdev, WCID_CH_H3_ACCEL,  s_tx_buf_h3,  WCID_TX_HALF_SIZE);
   USBD_WCID_STREAMING_SetTxDataBuffer(s_pdev, WCID_CH_QMA_ACCEL, s_tx_buf_qma, WCID_TX_HALF_SIZE);
+  USBD_WCID_STREAMING_SetTxDataBuffer(s_pdev, WCID_CH_MIC,       s_tx_buf_mic, WCID_MIC_HALF_SIZE);
   return 0;
 }
 static int8_t WcidApp_DeInit(void) { return 0; }
@@ -83,10 +95,19 @@ void UsbWcidApp_StartStreaming(uint32_t lsm_odr_hz, uint32_t h3_odr_hz, uint32_t
                                       WcidComputeHalfSize(h3_odr_hz, WCID_ROW_BYTES_H3));
   USBD_WCID_STREAMING_SetTxDataBuffer(s_pdev, WCID_CH_QMA_ACCEL, s_tx_buf_qma,
                                       WcidComputeHalfSize(qma_odr_hz, WCID_ROW_BYTES_QMA));
+  /* MIC: fixed half-buffer (rate-based PCM, not row-based). */
+  USBD_WCID_STREAMING_SetTxDataBuffer(s_pdev, WCID_CH_MIC, s_tx_buf_mic, WCID_MIC_HALF_SIZE);
 
   USBD_WCID_STREAMING_CleanTxDataBuffer(s_pdev, WCID_CH_LSM_IMU);
   USBD_WCID_STREAMING_CleanTxDataBuffer(s_pdev, WCID_CH_H3_ACCEL);
   USBD_WCID_STREAMING_CleanTxDataBuffer(s_pdev, WCID_CH_QMA_ACCEL);
+  USBD_WCID_STREAMING_CleanTxDataBuffer(s_pdev, WCID_CH_MIC);
+
+  /* Reset LSM USB diagnostics counters for this new streaming session */
+  g_lsm_usb_overrun = 0U;
+  g_lsm_usb_sof_send = 0U;
+  g_lsm_usb_datain_complete = 0U;
+
   USBD_WCID_STREAMING_StartStreaming(s_pdev);
 }
 

@@ -3,10 +3,15 @@
 
 #include "usbd_core.h"
 
-/* Channel indices — map to DATA_IN_EP1..3 */
-#define WCID_CH_LSM_IMU   0U
-#define WCID_CH_H3_ACCEL  1U
-#define WCID_CH_QMA_ACCEL 2U
+/* Channel indices — map to DATA_IN_EP(i+1). Natural order, all channels clean:
+ * the middleware's per-half channel-tag byte is now gated to only fire when an
+ * endpoint actually carries >1 channel (N_CHANNELS_MAX > N_IN_ENDPOINTS). Here
+ * it is 1:1 (4 channels / 4 data EPs) so NO channel gets a tag → MIC streams as
+ * pure 16-bit PCM and the sensors keep their original endpoints. */
+#define WCID_CH_LSM_IMU   0U   /* EP1 0x81, clean */
+#define WCID_CH_H3_ACCEL  1U   /* EP2 0x82, clean */
+#define WCID_CH_QMA_ACCEL 2U   /* EP3 0x83, clean (tag removed; was tagged when 3-ch) */
+#define WCID_CH_MIC       3U   /* EP4 0x84, clean raw PCM (appended) */
 
 /* 每通道半缓冲大小（字节）。
  *
@@ -27,6 +32,10 @@ void UsbWcidApp_Init(USBD_HandleTypeDef *pdev);
  * 上限 WCID_TX_HALF_SIZE），确保高 ODR 通道 FIFO 批次不会覆盖正在发送的
  * 半缓冲，同时低 ODR 通道在短采集内也能填满并发出。禁用通道传 0（使用下限）。 */
 void UsbWcidApp_StartStreaming(uint32_t lsm_odr_hz, uint32_t h3_odr_hz, uint32_t qma_odr_hz);
+
+/* Push raw bytes into a channel's double-buffer (alias of SendCsv; byte-transparent,
+ * used by the MIC channel for binary PCM). */
+#define UsbWcidApp_SendRaw(ch, buf, len)  UsbWcidApp_SendCsv((ch), (const char *)(buf), (len))
 void UsbWcidApp_StopStreaming(void);
 
 /* Sensor tasks call this to push a CSV row into the USB double-buffer.
