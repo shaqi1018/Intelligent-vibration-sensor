@@ -119,6 +119,11 @@ int main(void)
   BoardIO_Init();          /* HW-v2: init LED/buttons/POWER_CTL (starts LOW) */
   BoardIO_StartupLatch();  /* 电源键按住 2s → 锁存电池；否则不锁存 */
 
+  /* RTC 供电修复:PCF85063 RTC 的 VDD/I2C 上拉与 ES8311 codec 共用 PAVCC 这路电,
+   * 由 PA_EN(PB15)门控。开机默认 PA_EN=HIGH 会关断 PAVCC → RTC 掉电 → I2C 不应答
+   * (set_time fail、时间戳 F6)。这里开机即拉低 PA_EN 给 PAVCC 供电,保证 RTC 常在线。 */
+  PaEn_Set(1);
+
   /* Boot mode is decided by a TAMP backup register written by the previous session.
    * MSC mode = bare-metal U-disk (SD as block device), exits via USB unplug.
    * WCID mode = RTOS path with WCID Bulk USB.

@@ -48,10 +48,7 @@
   * @{
   */
 
-/* LSM USB 诊断计数器(定义在 usbd_wcid_app.c) */
-extern volatile uint32_t g_lsm_usb_overrun;
-extern volatile uint32_t g_lsm_usb_sof_send;
-extern volatile uint32_t g_lsm_usb_datain_complete;
+/* LSM USB 诊断计数器已移除(USB 丢帧/倒退问题已修复) */
 
 /**
   * @}
@@ -647,7 +644,6 @@ static uint8_t  USBD_WCID_STREAMING_SOF(USBD_HandleTypeDef *pdev)
           {
             return 1;     /* USBD_FAIL */
           }
-          if (i == 0U) { g_lsm_usb_sof_send++; }  /* LSM ch0: count successful sends */
         }
         else if (TxBuffStatus[i] == 2U)
         {
@@ -660,7 +656,6 @@ static uint8_t  USBD_WCID_STREAMING_SOF(USBD_HandleTypeDef *pdev)
           {
             return 1;     /* USBD_FAIL */
           }
-          if (i == 0U) { g_lsm_usb_sof_send++; }  /* LSM ch0: count successful sends */
         }
         else
         {
@@ -843,9 +838,7 @@ static uint8_t  USBD_WCID_STREAMING_DataIn(USBD_HandleTypeDef *pdev, uint8_t epn
     return 0;
   }
   USBD_WCID_STREAMING_HandleTypeDef   *hwcid = (USBD_WCID_STREAMING_HandleTypeDef *) pdev->pClassData;
-  uint8_t ch_idx = (epnum & 0x7FU) - 1U;
-  hwcid->TXStates[ch_idx] = 0;
-  if (ch_idx == 0U) { g_lsm_usb_datain_complete++; }  /* LSM ch0: count DataIn completions */
+  hwcid->TXStates[(epnum & 0x7FU) - 1U] = 0;
   return 0;
 }
 
@@ -1175,12 +1168,6 @@ uint8_t USBD_WCID_STREAMING_FillTxDataBuffer(USBD_HandleTypeDef *pdev, uint8_t c
 
   __disable_irq();
   __IO uint8_t *TxBuffStatus = hwcid->TxBuffStatus;
-  /* LSM overrun detection: 生产者试图写入还在发送中的半缓冲(TxBuffStatus != 0)
-   * → 主机读取太慢,设备双缓冲被追上、即将覆盖 → 计数为证据 */
-  if ((ch_number == 0U) && (TxBuffStatus[0] != 0U))
-  {
-    g_lsm_usb_overrun++;
-  }
   __enable_irq();
 
   uint32_t *TxBuffIdx = hwcid->TxBuffIdx;

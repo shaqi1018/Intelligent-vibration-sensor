@@ -1024,18 +1024,6 @@ uint32_t AppAcqStop(void)
   AppAcqStopInternal(osKernelGetTickCount());
   AppFlowStatsSetMode(0U, 0U);
 
-  /* Print final LSM USB diagnostics if it was a USB session */
-  if (ctrl.sink == APP_ACQ_SINK_USB)
-  {
-    extern volatile uint32_t g_lsm_usb_overrun;
-    extern volatile uint32_t g_lsm_usb_sof_send;
-    extern volatile uint32_t g_lsm_usb_datain_complete;
-    printf("[LSM-USB] FINAL overrun=%lu sof_send=%lu datain_complete=%lu delta=%ld\r\n",
-           (unsigned long)g_lsm_usb_overrun, (unsigned long)g_lsm_usb_sof_send,
-           (unsigned long)g_lsm_usb_datain_complete,
-           (long)(g_lsm_usb_sof_send - g_lsm_usb_datain_complete));
-  }
-
   return 1U;
 }
 
@@ -1844,13 +1832,7 @@ static void UsbCmd_Process(const char *cmd)
         }
         else
         {
-          /* 诊断:探测 RTC 是否在 I2C2 上应答,区分硬件无应答 vs 写失败 */
-          uint8_t ready = I2C2_ProbeRtc();
-          char _dl[64];
-          int _dn = snprintf(_dl, sizeof(_dl),
-                             "ERR set_time: I2C fail (RTC probe=%s)\r\n",
-                             ready ? "ACK-但写失败" : "无应答=硬件/链路");
-          UsbCdcService_Write((const uint8_t *)_dl, (uint32_t)_dn);
+          UsbCdcService_Write((const uint8_t *)"ERR set_time: RTC write fail\r\n", 30U);
         }
       }
       else { UsbCdcService_Write((const uint8_t *)"ERR set_time: parse fail\r\n", 26U); }
@@ -1998,26 +1980,9 @@ void StartUsbCdcTask(void *argument)
 
 void StartUsbUploadTask(void *argument)
 {
-  /* CDC removed — in WCID mode sensors write directly via UsbWcidApp_SendCsv.
-   * Repurpose this task for periodic LSM USB diagnostics printing. */
+  /* CDC removed — in WCID mode sensors write directly via UsbWcidApp_SendCsv. */
   (void)argument;
-  extern volatile uint32_t g_lsm_usb_overrun;
-  extern volatile uint32_t g_lsm_usb_sof_send;
-  extern volatile uint32_t g_lsm_usb_datain_complete;
-
-  for (;;)
-  {
-    osDelay(5000U);  /* Print every 5 seconds */
-    if (AppAcqIsUsbSinkActive() != 0U)
-    {
-      uint32_t over = g_lsm_usb_overrun;
-      uint32_t send = g_lsm_usb_sof_send;
-      uint32_t comp = g_lsm_usb_datain_complete;
-      printf("[LSM-USB] overrun=%lu sof_send=%lu datain_complete=%lu delta=%ld\r\n",
-             (unsigned long)over, (unsigned long)send, (unsigned long)comp,
-             (long)(send - comp));
-    }
-  }
+  for (;;) { osDelay(10000U); }
 }
 
 #if APP_SENSOR_TEST_TARGET == APP_SENSOR_TEST_LSM6DSOX

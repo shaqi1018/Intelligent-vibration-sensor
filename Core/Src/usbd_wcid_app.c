@@ -6,11 +6,6 @@
 static USBD_HandleTypeDef *s_pdev;
 static UsbWcidApp_CmdHandler s_cmd_handler;
 
-/* LSM USB 发送诊断计数器(用于定位 6664Hz 丢帧根因) */
-volatile uint32_t g_lsm_usb_overrun = 0U;        /* 生产者写入冲突次数(主机读太慢) */
-volatile uint32_t g_lsm_usb_sof_send = 0U;       /* SOF 发送 LSM 的次数 */
-volatile uint32_t g_lsm_usb_datain_complete = 0U;/* DataIn 完成 LSM 的次数 */
-
 /* 静态双缓冲：4 通道 × (WCID_TX_HALF_SIZE × 2 + 2)。
  * 多出的 "+2" 用于 tag 通道（最后通道 = MIC = N_IN_ENDPOINTS-1）的每半通道标记字节：
  * 中间件以 (size*2+2) 取模索引缓冲，若只声明 size*2 会越界 2 字节。
@@ -102,11 +97,6 @@ void UsbWcidApp_StartStreaming(uint32_t lsm_odr_hz, uint32_t h3_odr_hz, uint32_t
   USBD_WCID_STREAMING_CleanTxDataBuffer(s_pdev, WCID_CH_H3_ACCEL);
   USBD_WCID_STREAMING_CleanTxDataBuffer(s_pdev, WCID_CH_QMA_ACCEL);
   USBD_WCID_STREAMING_CleanTxDataBuffer(s_pdev, WCID_CH_MIC);
-
-  /* Reset LSM USB diagnostics counters for this new streaming session */
-  g_lsm_usb_overrun = 0U;
-  g_lsm_usb_sof_send = 0U;
-  g_lsm_usb_datain_complete = 0U;
 
   USBD_WCID_STREAMING_StartStreaming(s_pdev);
 }

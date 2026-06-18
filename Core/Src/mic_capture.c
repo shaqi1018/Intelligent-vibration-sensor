@@ -49,9 +49,10 @@ int Mic_Start(uint32_t sample_rate_hz, uint16_t gain_db)
 {
   PaEn_Set(1);
   osDelay(50);                              /* 等 codec 供电稳定 */
-  if (ES8311_Probe() != 0) { PaEn_Set(0); return -1; }
-  if (ES8311_InitAdc(sample_rate_hz, gain_db) != 0) { PaEn_Set(0); return -2; }
-  if (MX_SAI1_Init(sample_rate_hz) != HAL_OK) { ES8311_PowerDown(); PaEn_Set(0); return -3; }
+  /* 失败回滚里不再 PaEn_Set(0):PAVCC 与 RTC 共用,关它会断 RTC 供电(I2C fail)。 */
+  if (ES8311_Probe() != 0) { return -1; }
+  if (ES8311_InitAdc(sample_rate_hz, gain_db) != 0) { return -2; }
+  if (MX_SAI1_Init(sample_rate_hz) != HAL_OK) { ES8311_PowerDown(); return -3; }
   s_dropped = 0U;
   /* ⚠️ 台架第一要务（Task 7 / 见计划风险）：确认 HAL_SAI_Receive_DMA 的 size 单位。
    *   - 经典 HAL：size = 数据项个数 → 整个缓冲 = MIC_DMA_HALF_SAMPLES*2 = 2048 项（当前值，
@@ -62,7 +63,7 @@ int Mic_Start(uint32_t sample_rate_hz, uint16_t gain_db)
    * 用 1kHz 已知音验证：频谱峰在 1kHz 且无周期性断点即为正确。 */
   if (HAL_SAI_Receive_DMA(&hsai_BlockA1, (uint8_t *)s_dma_buf,
                           MIC_DMA_HALF_SAMPLES * 2U) != HAL_OK) {
-    MX_SAI1_DeInit(); ES8311_PowerDown(); PaEn_Set(0); return -4;
+    MX_SAI1_DeInit(); ES8311_PowerDown(); return -4;
   }
   return 0;
 }
@@ -72,7 +73,9 @@ void Mic_Stop(void)
   HAL_SAI_DMAStop(&hsai_BlockA1);
   MX_SAI1_DeInit();
   ES8311_PowerDown();
-  PaEn_Set(0);
+  /* 不再 PaEn_Set(0):RTC(PCF85063)的 VDD/I2C 上拉与 ES8311 共用 PAVCC(PA_EN 门控),
+   * 关 PA_EN 会连带把 RTC 断电 → I2C fail / 时间戳 F6。ES8311_PowerDown 已让 codec
+   * 进低功耗,PAVCC 保持供电只多一点静态电流,换 RTC 始终在线,值得。 */
 }
 
 uint32_t Mic_GetDropped(void) { return s_dropped; }
