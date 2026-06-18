@@ -1725,7 +1725,7 @@ static void UsbCmd_SetSensor(const char *cmd)
 
 static void UsbCmd_Status(void)
 {
-  char line[96];
+  char line[128];
   int len;
   AcqConfig_t cfg;
   AcqConfig_GetCopy(&cfg);
@@ -1737,14 +1737,17 @@ static void UsbCmd_Status(void)
       UsbCdcService_Write((const uint8_t *)line, (uint32_t)len); \
   } while (0)
 
-  STATUS_LINE("lsm  odr=%uHz  xl=+-%ug  gyro=+-%udps\r\n",
+  STATUS_LINE("lsm  en=%u  odr=%uHz  xl=+-%ug  gyro=+-%udps\r\n",
+              (unsigned)cfg.lsm6dsox.enabled,
               (unsigned)cfg.lsm6dsox.odr_hz,
               (unsigned)cfg.lsm6dsox.range,
               (unsigned)cfg.lsm6dsox.range2);
-  STATUS_LINE("h3   odr=%uHz  range=+-%ug\r\n",
+  STATUS_LINE("h3   en=%u  odr=%uHz  range=+-%ug\r\n",
+              (unsigned)cfg.h3lis100dl.enabled,
               (unsigned)cfg.h3lis100dl.odr_hz,
               (unsigned)cfg.h3lis100dl.range);
-  STATUS_LINE("qma  odr=%uHz  range=+-%ug\r\n",
+  STATUS_LINE("qma  en=%u  odr=%uHz  range=+-%ug\r\n",
+              (unsigned)cfg.qma6100p.enabled,
               (unsigned)cfg.qma6100p.odr_hz,
               (unsigned)cfg.qma6100p.range);
   STATUS_LINE("mic  en=%u  sr=%luHz  gain=%udB\r\n",
