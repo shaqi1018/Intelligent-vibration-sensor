@@ -15,7 +15,7 @@ volatile uint32_t g_lsm_usb_datain_complete = 0U;/* DataIn 完成 LSM 的次数 
  * 多出的 "+2" 用于 tag 通道（最后通道 = MIC = N_IN_ENDPOINTS-1）的每半通道标记字节：
  * 中间件以 (size*2+2) 取模索引缓冲，若只声明 size*2 会越界 2 字节。
  * 为安全起见 LSM/H3/QMA（非 tag 通道）也统一声明为 size*2+2。 */
-static uint8_t s_tx_buf_lsm[WCID_TX_HALF_SIZE * 2 + 2];
+static uint8_t s_tx_buf_lsm[WCID_TX_HALF_SIZE_LSM * 2 + 2]; /* LSM 6664Hz 用更大半缓冲防覆盖 */
 static uint8_t s_tx_buf_h3[WCID_TX_HALF_SIZE * 2 + 2];
 static uint8_t s_tx_buf_qma[WCID_TX_HALF_SIZE * 2 + 2];
 static uint8_t s_tx_buf_mic[WCID_TX_HALF_SIZE * 2 + 2]; /* ES8311 raw PCM (ch3 = last EP) */
@@ -33,7 +33,7 @@ static int8_t WcidApp_Init(void)
    * Set up TX buffers here (not in UsbWcidApp_Init) because pClassData
    * is NULL until the class Init runs. */
   USBD_WCID_STREAMING_SetRxDataBuffer(s_pdev, s_rx_buf);
-  USBD_WCID_STREAMING_SetTxDataBuffer(s_pdev, WCID_CH_LSM_IMU,   s_tx_buf_lsm, WCID_TX_HALF_SIZE);
+  USBD_WCID_STREAMING_SetTxDataBuffer(s_pdev, WCID_CH_LSM_IMU,   s_tx_buf_lsm, WCID_TX_HALF_SIZE_LSM);
   USBD_WCID_STREAMING_SetTxDataBuffer(s_pdev, WCID_CH_H3_ACCEL,  s_tx_buf_h3,  WCID_TX_HALF_SIZE);
   USBD_WCID_STREAMING_SetTxDataBuffer(s_pdev, WCID_CH_QMA_ACCEL, s_tx_buf_qma, WCID_TX_HALF_SIZE);
   USBD_WCID_STREAMING_SetTxDataBuffer(s_pdev, WCID_CH_MIC,       s_tx_buf_mic, WCID_MIC_HALF_SIZE);
@@ -75,12 +75,12 @@ void UsbWcidApp_Init(USBD_HandleTypeDef *pdev)
 #define WCID_ROW_BYTES_H3   48U  /* 5 字段：id,tick,3轴加速 */
 #define WCID_ROW_BYTES_QMA  48U  /* 5 字段：id,tick,3轴加速 */
 
-/* 参考 DATALOG1 的大小计算：每半 ≈ 500ms 数据量，上限 WCID_TX_HALF_SIZE，
- * 下限保证至少能放一行数据 + 余量。 */
-static uint16_t WcidComputeHalfSize(uint32_t odr_hz, uint16_t bytes_per_row)
+/* 参考 DATALOG1 的大小计算：每半 ≈ 500ms 数据量，上限 max_half，
+ * 下限保证至少能放一行数据 + 余量。LSM 用大上限(防覆盖),其它用 4096。 */
+static uint16_t WcidComputeHalfSize(uint32_t odr_hz, uint16_t bytes_per_row, uint16_t max_half)
 {
   uint32_t sz = (odr_hz * (uint32_t)bytes_per_row) / 2U;
-  if (sz > WCID_TX_HALF_SIZE) { sz = WCID_TX_HALF_SIZE; }
+  if (sz > max_half) { sz = max_half; }
   if (sz < (uint32_t)(bytes_per_row + 8U)) { sz = (uint32_t)bytes_per_row + 8U; }
   return (uint16_t)sz;
 }
@@ -90,11 +90,11 @@ void UsbWcidApp_StartStreaming(uint32_t lsm_odr_hz, uint32_t h3_odr_hz, uint32_t
   /* 启动前按当前 ODR 重新设置各通道半缓冲大小。
    * 静态缓冲已按 WCID_TX_HALF_SIZE 上限分配，所有计算结果都在范围内。 */
   USBD_WCID_STREAMING_SetTxDataBuffer(s_pdev, WCID_CH_LSM_IMU,   s_tx_buf_lsm,
-                                      WcidComputeHalfSize(lsm_odr_hz, WCID_ROW_BYTES_LSM));
+                                      WcidComputeHalfSize(lsm_odr_hz, WCID_ROW_BYTES_LSM, WCID_TX_HALF_SIZE_LSM));
   USBD_WCID_STREAMING_SetTxDataBuffer(s_pdev, WCID_CH_H3_ACCEL,  s_tx_buf_h3,
-                                      WcidComputeHalfSize(h3_odr_hz, WCID_ROW_BYTES_H3));
+                                      WcidComputeHalfSize(h3_odr_hz, WCID_ROW_BYTES_H3, WCID_TX_HALF_SIZE));
   USBD_WCID_STREAMING_SetTxDataBuffer(s_pdev, WCID_CH_QMA_ACCEL, s_tx_buf_qma,
-                                      WcidComputeHalfSize(qma_odr_hz, WCID_ROW_BYTES_QMA));
+                                      WcidComputeHalfSize(qma_odr_hz, WCID_ROW_BYTES_QMA, WCID_TX_HALF_SIZE));
   /* MIC: fixed half-buffer (rate-based PCM, not row-based). */
   USBD_WCID_STREAMING_SetTxDataBuffer(s_pdev, WCID_CH_MIC, s_tx_buf_mic, WCID_MIC_HALF_SIZE);
 

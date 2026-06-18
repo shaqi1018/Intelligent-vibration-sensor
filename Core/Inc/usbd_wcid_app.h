@@ -26,6 +26,12 @@
  * RAM 占用：3 通道 × (4096×2 + 2) ≈ 24.6KB（剩余空间充裕）。 */
 #define WCID_TX_HALF_SIZE  4096U
 
+/* LSM 专用更大半缓冲:LSM 6664Hz≈386KB/s,4096B 半缓冲只 ~10.6ms 就被生产者填满,
+ * 4 端点(+MIC SAI/DMA 干扰)下 SOF 发完一个半缓冲可能 >10.6ms → 生产者追上、覆盖
+ * 正在发的半缓冲 → 整块~140帧倒退+半行劈开(上位机 raw.bin 实证)。加大到 16KB(~42ms)
+ * 给 SOF 充足时间发完,生产者不再追上。仅 LSM 用,其它通道仍 4096。 */
+#define WCID_TX_HALF_SIZE_LSM  16384U
+
 void UsbWcidApp_Init(USBD_HandleTypeDef *pdev);
 
 /* 启动 USB 流式传输。按各通道 ODR 动态计算半缓冲大小（约 500ms 数据量，
