@@ -18,6 +18,17 @@ static float xl_sensitivity = LSM6DSOX_XL_SENSITIVITY_4G;
 static float g_sensitivity  = LSM6DSOX_G_SENSITIVITY_2000;
 static volatile uint32_t dma_call_count = 0;
 
+/* FIFO 读模式:0=每7字节一次 HAL 调用(快,SD 模式满采,256次/批),
+ *             1=每字节一次(碎,USB 模式用,1792次/批)。
+ * 矛盾根因:7字节连续读在 USB 满速下累积延迟 SOF 中断 → ~6% USB 丢帧;
+ * 每字节读有间隙让 USB 中断及时响应(USB 好),但 SD 模式太慢只采 ~55%。
+ * 故按 sink 动态切:USB→每字节、SD→7字节。app 层在 acq_start 时设。默认 0(SD)。 */
+static volatile uint8_t s_lsm_fifo_read_per_byte = 0U;
+void LSM6DSOX_SetFifoReadPerByte(uint8_t per_byte)
+{
+  s_lsm_fifo_read_per_byte = (per_byte != 0U) ? 1U : 0U;
+}
+
 /* ======================== 微秒级延时(粗略) ============================== */
 static void LSM6DSOX_DelayUs(volatile uint32_t us)
 {
@@ -288,11 +299,28 @@ HAL_StatusTypeDef LSM6DSOX_FIFO_ReadBlock(uint8_t *buf, uint16_t n_words)
   ret = HAL_SPI_Transmit(&hspi1, &tx_cmd, 1, LSM_SPI_TIMEOUT_MS);
   if (ret == HAL_OK)
   {
-    for (uint16_t w = 0U; w < n_words; w++)
+    if (s_lsm_fifo_read_per_byte == 0U)
     {
-      ret = HAL_SPI_TransmitReceive(&hspi1, (uint8_t *)dummy7, &buf[w * 7U], 7U,
-                                    LSM_SPI_TIMEOUT_MS);
-      if (ret != HAL_OK) break;
+      /* SD 模式:每 7 字节一次 HAL 调用(256 次/批,快)。inter-call 间隙落在
+       * word 边界让 FIFO 前进。满采 6664Hz 必需(每字节读太慢→只 ~55%)。 */
+      for (uint16_t w = 0U; w < n_words; w++)
+      {
+        ret = HAL_SPI_TransmitReceive(&hspi1, (uint8_t *)dummy7, &buf[w * 7U], 7U,
+                                      LSM_SPI_TIMEOUT_MS);
+        if (ret != HAL_OK) break;
+      }
+    }
+    else
+    {
+      /* USB 模式:每字节一次(1792 次/批,碎)。每次之间的间隙让 USB SOF/传输
+       * 中断及时响应,避免连续忙等累积延迟 → 消除 ~6% USB 丢帧。二分实测确诊。 */
+      uint8_t dummy = 0x00U;
+      uint16_t total = (uint16_t)(n_words * 7U);
+      for (uint16_t i = 0; i < total; i++)
+      {
+        ret = HAL_SPI_TransmitReceive(&hspi1, &dummy, &buf[i], 1, LSM_SPI_TIMEOUT_MS);
+        if (ret != HAL_OK) break;
+      }
     }
   }
   LSM_SPI_CS_HIGH();

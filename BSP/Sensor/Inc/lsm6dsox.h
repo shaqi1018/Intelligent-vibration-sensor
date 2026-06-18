@@ -174,6 +174,10 @@ HAL_StatusTypeDef LSM6DSOX_FIFO_GetLevel(uint16_t *level);
 
 HAL_StatusTypeDef LSM6DSOX_FIFO_ReadBlock(uint8_t *buf, uint16_t n_words);
 
+/* Select FIFO read granularity per sink: 0 = 7-byte/call (fast, SD full-capture),
+ * 1 = per-byte (USB-friendly, avoids ~6% USB frame loss). Set at acq_start. */
+void LSM6DSOX_SetFifoReadPerByte(uint8_t per_byte);
+
 #ifdef __cplusplus
 }
 #endif
