@@ -51,9 +51,17 @@ uint8_t Pcf85063_SetTime(const Pcf85063_Time_t *t)
   raw[4] = 0U;  /* weekday 不使用 */
   raw[5] = DecToBcd(t->month);
   raw[6] = DecToBcd(t->year);
-  return (HAL_I2C_Mem_Write(&hi2c2, PCF85063_ADDR, PCF85063_REG_SECONDS,
-                              I2C_MEMADD_SIZE_8BIT, raw, 7U, 50U) == HAL_OK)
-         ? PCF85063_OK : PCF85063_ERR;
+  /* 重试 + 总线恢复(同 GetTime):前序 I2C2 失败可能污染总线,单次写易 fail。 */
+  for (uint8_t attempt = 0U; attempt < 3U; attempt++)
+  {
+    if (HAL_I2C_Mem_Write(&hi2c2, PCF85063_ADDR, PCF85063_REG_SECONDS,
+                          I2C_MEMADD_SIZE_8BIT, raw, 7U, 50U) == HAL_OK)
+    {
+      return PCF85063_OK;
+    }
+    I2C2_BusRecover();
+  }
+  return PCF85063_ERR;
 }
 
 static const uint8_t s_days_per_month[12] = {31,28,31,30,31,30,31,31,30,31,30,31};

@@ -50,6 +50,7 @@
 #include "board_io.h"
 #include "app_time.h"
 #include "rtc_pcf85063.h"
+#include "i2c.h"
 #include "mic_capture.h"
 /* USER CODE END Includes */
 
@@ -1841,7 +1842,16 @@ static void UsbCmd_Process(const char *cmd)
                             2000U + yr, mo, dy, hr, mn, sc);
           UsbCdcService_Write((const uint8_t *)_line, (uint32_t)_n);
         }
-        else { UsbCdcService_Write((const uint8_t *)"ERR set_time: I2C fail\r\n", 24U); }
+        else
+        {
+          /* 诊断:探测 RTC 是否在 I2C2 上应答,区分硬件无应答 vs 写失败 */
+          uint8_t ready = I2C2_ProbeRtc();
+          char _dl[64];
+          int _dn = snprintf(_dl, sizeof(_dl),
+                             "ERR set_time: I2C fail (RTC probe=%s)\r\n",
+                             ready ? "ACK-但写失败" : "无应答=硬件/链路");
+          UsbCdcService_Write((const uint8_t *)_dl, (uint32_t)_dn);
+        }
       }
       else { UsbCdcService_Write((const uint8_t *)"ERR set_time: parse fail\r\n", 26U); }
     }

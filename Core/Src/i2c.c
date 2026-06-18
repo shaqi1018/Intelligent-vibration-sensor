@@ -35,6 +35,14 @@ void MX_I2C2_Init(void)
 
 void I2C2_BusRecover(void)
 {
+  /* 简单恢复:DeInit + Init,重置 MCU I2C 外设与句柄。
+   * (曾试过手动翻转 SCL/SDA 发脉冲的强力恢复,但那个反而可能干扰总线,已移除。) */
   HAL_I2C_DeInit(&hi2c2);
   MX_I2C2_Init();
+}
+
+/* 探测 RTC(0x51) 是否在 I2C2 上应答。返回 1=应答(硬件OK),0=无应答。 */
+uint8_t I2C2_ProbeRtc(void)
+{
+  return (HAL_I2C_IsDeviceReady(&hi2c2, (0x51U << 1U), 3U, 100U) == HAL_OK) ? 1U : 0U;
 }
