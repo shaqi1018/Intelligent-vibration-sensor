@@ -2992,15 +2992,27 @@ void StartLis2mdlTask(void *argument)
     if (AppAcqIsRunning() == 0U) { dt_valid = 0U; osDelay(APP_ACQ_IDLE_DELAY_MS); continue; }
 
     /* DRDY 硬件节拍（不靠 tick 计时）；20ms 超时自愈。 */
+    osStatus_t sem_st = osOK;
     if (s_mag_drdy_sem != NULL)
     {
-      (void)osSemaphoreAcquire(s_mag_drdy_sem, 20U);
+      sem_st = osSemaphoreAcquire(s_mag_drdy_sem, 20U);
     }
 
     int16_t raw[3]; float mg[3];
+    HAL_StatusTypeDef rr;
     osMutexAcquire(i2c1_mutex, osWaitForever);
-    uint8_t ready = LIS2MDL_DataReady();
-    HAL_StatusTypeDef rr = ready ? LIS2MDL_ReadMag(raw, mg) : HAL_BUSY;
+    if (sem_st == osOK)
+    {
+      /* DRDY 中断已确保新数据就绪：跳过冗余的 STATUS 读，直接读 6 字节，
+       * 每周期省一次 I2C 往返(~0.3ms)，降低满载下错过 10ms 窗口的概率。
+       * (BDU 已置位，保证 H/L 一致，无需再查 Zyxda。) */
+      rr = LIS2MDL_ReadMag(raw, mg);
+    }
+    else
+    {
+      /* 超时回退(无 DRDY)：先查就绪再读，避免读到陈旧/重复数据。 */
+      rr = LIS2MDL_DataReady() ? LIS2MDL_ReadMag(raw, mg) : HAL_BUSY;
+    }
     osMutexRelease(i2c1_mutex);
     if (rr != HAL_OK) { continue; }
 
