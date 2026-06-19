@@ -703,6 +703,11 @@ static void AppAcqGetCopy(AppAcqControl_t *ctrl)
   osMutexRelease(acq_ctrl_mutex);
 }
 
+/* 由 StartMicTask 在 ES8311 SAI DMA 真正开始采集后置 1、停采时清 0。
+ * 让"诚实采集灯"在麦克风真的开录后才亮，使用户"灯亮=在录"的判断不会
+ * 早于真实音频 → 不再切掉开头那句话。 */
+static volatile uint8_t s_mic_capturing = 0U;
+
 uint32_t AppAcqIsRunning(void)
 {
   uint32_t running = 0U;
@@ -716,6 +721,19 @@ uint32_t AppAcqIsRunning(void)
   running = g_acq_ctrl.running;
   osMutexRelease(acq_ctrl_mutex);
   return running;
+}
+
+/* 诚实采集指示（供采集灯用）：仅当采集在运行、且(麦克风未启用 或 麦克风已开录)
+ * 时返回 1。灯亮 ⟹ 所有启用的源(传感器+麦克风)都已在采，用户一见灯亮即可开口，
+ * 不会切掉录音开头。注意:若麦克风启用但启动失败,本函数持续返回 0(灯不亮),
+ * 这本身就是"麦克风没起来"的提示。 */
+uint8_t AppCaptureActive(void)
+{
+  if (AppAcqIsRunning() == 0U) { return 0U; }
+  AcqConfig_t c;
+  AcqConfig_GetCopy(&c);
+  if ((c.es8311.enabled != 0U) && (s_mic_capturing == 0U)) { return 0U; }
+  return 1U;
 }
 
 static uint32_t AppAcqCurrentPeriodMs(void)
@@ -3080,6 +3098,7 @@ void StartMicTask(void *argument)
       if (Mic_Start(cfg.es8311.sample_rate_hz, cfg.es8311.gain_db) == 0)
       {
         running = 1U;
+        s_mic_capturing = 1U;   /* SAI DMA 已开录 → 诚实采集灯此刻才可亮 */
         printf("[Mic] started %luHz gain%u\r\n",
                (unsigned long)cfg.es8311.sample_rate_hz, (unsigned)cfg.es8311.gain_db);
       }
@@ -3093,6 +3112,7 @@ void StartMicTask(void *argument)
     {
       Mic_Stop();
       running = 0U;
+      s_mic_capturing = 0U;
       printf("[Mic] stopped (dropped=%lu)\r\n", (unsigned long)Mic_GetDropped());
     }
 

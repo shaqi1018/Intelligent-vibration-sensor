@@ -124,8 +124,10 @@ void StartUserCtrlTask(void *argument)
       }
     }
 
-    /* ── LED 闪烁（采集中随机间隔） ── */
-    if (AppAcqIsRunning() != 0U)
+    /* ── LED 闪烁（采集中随机间隔） ──
+     * 用 AppCaptureActive 而非 AppAcqIsRunning:麦克风启用时,灯要等 SAI DMA 真正
+     * 开录后才闪,这样"灯亮=麦克风和传感器都在采",用户见灯再开口不会被切开头。 */
+    if (AppCaptureActive() != 0U)
     {
       if ((int32_t)(now - s_led_next) >= 0)
       {
