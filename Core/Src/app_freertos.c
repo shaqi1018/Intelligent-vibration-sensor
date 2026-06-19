@@ -1005,6 +1005,22 @@ static void AppApplySensorConfig(void)
   }
 
   osMutexRelease(spi2_mutex);
+
+  /* --- LIS2MDL 磁力计 (I2C1, 需 mutex) ---
+   * 与 LSM/QMA/H3 一样每次 acq_start 重配,使 "s mag odr N" 改了即生效(原先 odr 只在
+   * LIS2MDL 任务开机时锁定一次,必须重启才生效)。仅在使能时重配;禁用时不动(与其它
+   * 传感器一致:停一个已在跑的传感器仍需重启)。AHT20 无需重配——它是命令触发、固定
+   * ~1Hz、无 ODR 寄存器,改不了采样率。 */
+  if (cfg.lis2mdl.enabled != 0U)
+  {
+    osMutexAcquire(i2c1_mutex, osWaitForever);
+    (void)LIS2MDL_Init(cfg.lis2mdl.odr_hz);
+    osMutexRelease(i2c1_mutex);
+  }
+  else
+  {
+    printf("[LIS2MDL] disabled, skip reconfig\r\n");
+  }
 }
 
 uint32_t AppAcqStart(uint8_t sink, uint32_t duration_ms)
