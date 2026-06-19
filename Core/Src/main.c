@@ -234,11 +234,13 @@ int main(void)
   printf("  串口: PA9/PA10 115200bps\r\n");
   printf("  说明: 已跳过 LSM6DSOX、H3LIS100DL 与其它线程\r\n");
 #else
-  printf("  STM32U575 FreeRTOS 三传感器平台\r\n");
-  printf("  SPI1: PA5/PA6/PA7 + PC4(CS) (LSM6DSOX)\r\n");
-  printf("  SPI2: PB10/PC2/PC1 + PC5(CS) (H3LIS100DL)\r\n");
-  printf("  SPI2: PB10/PC2/PC1 + PA4(CS) (QMA6100P)\r\n");
-  printf("  SDMMC1: PC8/PC9/PC10/PC11/PC12 + PD2, DET=PC13\r\n");
+  printf("  STM32U575 FreeRTOS 多传感器平台\r\n");
+  printf("  SPI1: PA5/PA6/PA7 + PB1(CS)  LSM6DSOX (INT PB0)\r\n");
+  printf("  SPI2: PB10/PC2/PC1 + PA4(CS) H3LIS100DL (DRDY PA1)\r\n");
+  printf("  SPI2: PB10/PC2/PC1 + PC5(CS) QMA6100P (INT PC4)\r\n");
+  printf("  I2C1: PB3/PB6  AHT20(0x38) + LIS2MDL(0x1E, INT PC13)\r\n");
+  printf("  I2C2: PB13/PB14  ES8311 mic(SAI1) + RTC PCF85063\r\n");
+  printf("  SDMMC1: PC8/PC9/PC10/PC11/PC12 + PD2 (无DET)\r\n");
   printf("  USB FS: PA11(D-) PA12(D+)\r\n");
   printf("  串口: PA9/PA10 115200bps\r\n");
 #endif
