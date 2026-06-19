@@ -34,6 +34,8 @@
 #include "lsm6dsox.h"
 #include "h3lis100dl.h"
 #include "qma6100p.h"
+#include "aht20.h"
+#include "lis2mdl.h"
 #include "acq_config.h"
 #include "device_config.h"
 #include "boot_mode.h"
@@ -94,6 +96,8 @@ SemaphoreHandle_t s_sdmmc_dma_sem;  /* signaled by HAL SD DMA completion ISR */
 static osSemaphoreId_t s_lsm_fifo_sem;  /* released by EXTI0 ISR on PB0 rising edge (HW-v2) */
 static osSemaphoreId_t s_qma_fifo_sem;  /* released by EXTI4 ISR on PC4 rising edge (HW-v2) */
 static osSemaphoreId_t s_h3_drdy_sem;   /* released by EXTI1 ISR on PA1 rising edge (HW-v2) */
+static osSemaphoreId_t s_mag_drdy_sem;  /* released by EXTI13 ISR on PC13 rising edge (LIS2MDL DRDY) */
+static osMutexId_t     i2c1_mutex;      /* AHT20 + LIS2MDL 共享 I2C1 互斥 */
 static AppSensorSnapshot_t g_sensor_snapshot;
 
 typedef struct
@@ -157,14 +161,20 @@ static AppSensorFrame_t g_composite_frame;  /* shared composite for USB upload *
 static uint8_t s_lsm_imu_ringbuf[APP_RING_LSM_IMU_SIZE];
 static uint8_t s_qma_acc_ringbuf[APP_RING_QMA_ACC_SIZE];
 static uint8_t s_h3_acc_ringbuf[APP_RING_H3_ACC_SIZE];
+static uint8_t s_aht_env_ringbuf[APP_RING_AHT_ENV_SIZE];
+static uint8_t s_mag_ringbuf[APP_RING_MAG_SIZE];
 static AppRingBuffer_t g_ring_lsm_imu;
 static AppRingBuffer_t g_ring_qma_acc;
 static AppRingBuffer_t g_ring_h3_acc;
+static AppRingBuffer_t g_ring_aht_env;
+static AppRingBuffer_t g_ring_mag;
 static uint8_t s_mic_ringbuf[APP_RING_MIC_SIZE];
 AppRingBuffer_t g_ring_mic;                     /* 非 static：mic_capture.c extern 引用 */
 static volatile uint32_t g_lsm_frame_id_counter;
 static volatile uint32_t g_qma_frame_id_counter;
 static volatile uint32_t g_h3_frame_id_counter;
+static volatile uint32_t g_aht_frame_id_counter;
+static volatile uint32_t g_mag_frame_id_counter;
 /* H3 DRDY 中断测试统计：中断触发 vs 超时(中断没来)次数，判断 PA1/EXTI1 DRDY 是否可靠。 */
 static volatile uint32_t g_h3_irq_count;
 static volatile uint32_t g_h3_timeout_count;
@@ -189,6 +199,10 @@ static const osMutexAttr_t frame_buffer_mutex_attr = {
 };
 static const osMutexAttr_t acq_ctrl_mutex_attr = {
   .name      = "acqCtrlMutex",
+  .attr_bits = osMutexPrioInherit,
+};
+static const osMutexAttr_t i2c1_mutex_attr = {
+  .name      = "i2c1Mutex",
   .attr_bits = osMutexPrioInherit,
 };
 
@@ -232,6 +246,20 @@ const osThreadAttr_t micTask_attributes = {
   .name = "micTask",
   .priority = (osPriority_t)osPriorityAboveNormal,
   .stack_size = 1024 * 1  /* 1KB — codec/SAI start-stop supervisor + small locals */
+};
+
+osThreadId_t aht20TaskHandle;
+const osThreadAttr_t aht20Task_attributes = {
+  .name = "aht20Task",
+  .priority = (osPriority_t)osPriorityLow,    /* 1Hz 慢传感器 */
+  .stack_size = 1024 * 2  /* 2KB */
+};
+
+osThreadId_t lis2mdlTaskHandle;
+const osThreadAttr_t lis2mdlTask_attributes = {
+  .name = "lis2mdlTask",
+  .priority = (osPriority_t)osPriorityAboveNormal,  /* 100Hz DRDY 驱动 */
+  .stack_size = 1024 * 2  /* 2KB */
 };
 
 osThreadId_t usbCdcTaskHandle;
@@ -296,6 +324,8 @@ void StartQma6100pTask(void *argument);
 void StartH3lis100dlTask(void *argument);
 void StartLoggerTask(void *argument);
 void StartMicTask(void *argument);
+void StartAht20Task(void *argument);
+void StartLis2mdlTask(void *argument);
 void StartUsbCdcTask(void *argument);
 void StartUsbUploadTask(void *argument);
 
@@ -338,6 +368,7 @@ void MX_FREERTOS_Init(void)
   snapshot_mutex = osMutexNew(&snapshot_mutex_attr);
   frame_buffer_mutex = osMutexNew(&frame_buffer_mutex_attr);
   acq_ctrl_mutex = osMutexNew(&acq_ctrl_mutex_attr);
+  i2c1_mutex     = osMutexNew(&i2c1_mutex_attr);
 #if (APP_SENSOR_TEST_TARGET == APP_SENSOR_TEST_NONE) || \
     (APP_SENSOR_TEST_TARGET == APP_SENSOR_TEST_H3LIS100DL) || \
     (APP_SENSOR_TEST_TARGET == APP_SENSOR_TEST_QMA6100P)
@@ -349,6 +380,7 @@ void MX_FREERTOS_Init(void)
   s_lsm_fifo_sem = osSemaphoreNew(1, 0, NULL);  /* binary semaphore, init=0 */
   s_qma_fifo_sem = osSemaphoreNew(1, 0, NULL);
   s_h3_drdy_sem  = osSemaphoreNew(1, 0, NULL);
+  s_mag_drdy_sem = osSemaphoreNew(1, 0, NULL);
   s_sdmmc_dma_sem = xSemaphoreCreateBinary();
   /* USER CODE END RTOS_SEMAPHORES */
 
@@ -361,6 +393,8 @@ void MX_FREERTOS_Init(void)
   RingBuf_Init(&g_ring_qma_acc, s_qma_acc_ringbuf, APP_RING_QMA_ACC_SIZE);
   RingBuf_Init(&g_ring_h3_acc,  s_h3_acc_ringbuf,  APP_RING_H3_ACC_SIZE);
   RingBuf_Init(&g_ring_mic,     s_mic_ringbuf,     APP_RING_MIC_SIZE);
+  RingBuf_Init(&g_ring_aht_env, s_aht_env_ringbuf, APP_RING_AHT_ENV_SIZE);
+  RingBuf_Init(&g_ring_mag,     s_mag_ringbuf,     APP_RING_MAG_SIZE);
 
   /* USER CODE BEGIN RTOS_TIMERS */
   /* USER CODE END RTOS_TIMERS */
@@ -382,6 +416,8 @@ void MX_FREERTOS_Init(void)
   qma6100pTaskHandle  = osThreadNew(StartQma6100pTask,  NULL, &qma6100pTask_attributes);
   loggerTaskHandle    = osThreadNew(StartLoggerTask,    NULL, &loggerTask_attributes);
   micTaskHandle       = osThreadNew(StartMicTask,       NULL, &micTask_attributes);
+  aht20TaskHandle   = osThreadNew(StartAht20Task,   NULL, &aht20Task_attributes);
+  lis2mdlTaskHandle = osThreadNew(StartLis2mdlTask, NULL, &lis2mdlTask_attributes);
   usbCdcTaskHandle = osThreadNew(StartUsbCdcTask, NULL, &usbCdcTask_attributes);
   usbUploadTaskHandle = osThreadNew(StartUsbUploadTask, NULL, &usbUploadTask_attributes);
   printf("[RTOS] lsm6dsoxTask created: %s\r\n", (lsm6dsoxTaskHandle != NULL) ? "ok" : "FAILED");
@@ -429,6 +465,10 @@ void HAL_GPIO_EXTI_Rising_Callback(uint16_t GPIO_Pin)
   else if (GPIO_Pin == GPIO_PIN_4)  /* QMA6100P INT1 → PC4 */
   {
     if (s_qma_fifo_sem != NULL) { osSemaphoreRelease(s_qma_fifo_sem); }
+  }
+  else if (GPIO_Pin == GPIO_PIN_13) /* LIS2MDL DRDY → PC13 */
+  {
+    if (s_mag_drdy_sem != NULL) { osSemaphoreRelease(s_mag_drdy_sem); }
   }
 }
 
@@ -775,6 +815,8 @@ static void AppLoggerStopSdSession(uint8_t *sd_file_open, uint32_t *rows_since_s
         if (LoggerDrainRing(&g_ring_qma_acc, 3U, 0U, &dummy_rss, &fr) > 0) { any = 1; }
         if (LoggerDrainRing(&g_ring_h3_acc,  2U, 0U, &dummy_rss, &fr) > 0) { any = 1; }
         if (LoggerDrainRing(&g_ring_mic, FATFS_SD_FILE_MIC_WAV, 0U, &dummy_rss, &fr) > 0) { any = 1; }
+        if (LoggerDrainRing(&g_ring_aht_env, 4U, 0U, &dummy_rss, &fr) > 0) { any = 1; }
+        if (LoggerDrainRing(&g_ring_mag,     5U, 0U, &dummy_rss, &fr) > 0) { any = 1; }
       } while (any != 0);
     }
     (void)DeviceCfg_WriteCurrentToSD();
@@ -1573,7 +1615,7 @@ static void UsbCmd_SetSensor(const char *cmd)
     while (*p == ' ') { p++; }
     if ((sensor[0] == '\0') || (param[0] == '\0') || (*p < '0') || (*p > '9'))
     {
-      const char *msg = "Usage: s <lsm|h3|qma> <odr|range|en> <value> | s mic <gain|sr|en> <value>\r\n";
+      const char *msg = "Usage: s <lsm|h3|qma|aht|mag> <odr|range|en> <value> | s mic <gain|sr|en> <value>\r\n";
       UsbCdcService_Write((const uint8_t *)msg, strlen(msg));
       return;
     }
@@ -1623,9 +1665,11 @@ static void UsbCmd_SetSensor(const char *cmd)
   if      (strcmp(sensor, "lsm") == 0) which = 0U;
   else if (strcmp(sensor, "h3")  == 0) which = 1U;
   else if (strcmp(sensor, "qma") == 0) which = 2U;
+  else if (strcmp(sensor, "aht") == 0) which = 3U;
+  else if (strcmp(sensor, "mag") == 0) which = 4U;
   else
   {
-    len = snprintf(line, sizeof(line), "ERR: use lsm/h3/qma\r\n");
+    len = snprintf(line, sizeof(line), "ERR: use lsm/h3/qma/aht/mag\r\n");
     UsbCdcService_Write((const uint8_t *)line, (uint32_t)len);
     return;
   }
@@ -1667,6 +1711,20 @@ static void UsbCmd_SetSensor(const char *cmd)
         cfg.qma6100p.odr_hz = snapped;
         break;
       }
+      case 3U: {
+        cfg.aht20.odr_hz = 1U;   /* AHT20 固定 1Hz */
+        snapped = 1U;
+        break;
+      }
+      case 4U: {
+        static const uint16_t mag_odrs[] = {10,20,50,100};
+        snapped = mag_odrs[0];
+        for (unsigned i = 1; i < sizeof(mag_odrs)/sizeof(mag_odrs[0]); i++)
+          if (abs((int)val - (int)mag_odrs[i]) < abs((int)val - (int)snapped))
+            snapped = mag_odrs[i];
+        cfg.lis2mdl.odr_hz = snapped;
+        break;
+      }
     }
     if (AcqConfig_Set(&cfg) == 0)
     {
@@ -1700,6 +1758,8 @@ static void UsbCmd_SetSensor(const char *cmd)
       case 0U: cfg.lsm6dsox.enabled   = en; break;
       case 1U: cfg.h3lis100dl.enabled = en; break;
       case 2U: cfg.qma6100p.enabled   = en; break;
+      case 3U: cfg.aht20.enabled      = en; break;
+      case 4U: cfg.lis2mdl.enabled    = en; break;
     }
     if (AcqConfig_Set(&cfg) == 0)
     {
@@ -1754,6 +1814,13 @@ static void UsbCmd_Status(void)
               (unsigned)cfg.es8311.enabled,
               (unsigned long)cfg.es8311.sample_rate_hz,
               (unsigned)cfg.es8311.gain_db);
+  STATUS_LINE("aht  en=%u  odr=%uHz\r\n",
+              (unsigned)cfg.aht20.enabled,
+              (unsigned)cfg.aht20.odr_hz);
+  STATUS_LINE("mag  en=%u  odr=%uHz  range=+-%ugauss\r\n",
+              (unsigned)cfg.lis2mdl.enabled,
+              (unsigned)cfg.lis2mdl.odr_hz,
+              (unsigned)cfg.lis2mdl.range);
 
 #undef STATUS_LINE
 }
@@ -2826,6 +2893,140 @@ void StartQma6100pTask(void *argument)
 #endif
 }
 
+/* ===== AHT20 温湿度任务（I2C1，~1Hz，仅 SD ring） ===== */
+void StartAht20Task(void *argument)
+{
+  (void)argument;
+
+  {
+    AcqConfig_t acfg;
+    AcqConfig_GetCopy(&acfg);
+    if (acfg.aht20.enabled == 0U)
+    {
+      printf("[AHT20] disabled by config, task idle\r\n");
+      for (;;) { osDelay(1000U); }
+    }
+  }
+
+  osMutexAcquire(i2c1_mutex, osWaitForever);
+  HAL_StatusTypeDef ir = AHT20_Init();
+  osMutexRelease(i2c1_mutex);
+  if (ir != HAL_OK)
+  {
+    printf("[AHT20] init failed, task idle\r\n");
+    for (;;) { osDelay(1000U); }
+  }
+
+  char rowbuf[48];
+  for (;;)
+  {
+    AppAcqCheckAutoStop();
+    if (AppAcqIsRunning() == 0U) { osDelay(APP_ACQ_IDLE_DELAY_MS); continue; }
+
+    osMutexAcquire(i2c1_mutex, osWaitForever);
+    HAL_StatusTypeDef tr = AHT20_TriggerMeasure();
+    osMutexRelease(i2c1_mutex);
+    if (tr != HAL_OK) { osDelay(1000U); continue; }
+
+    osDelay(80U);   /* 手册要求测量等待 ≥80ms */
+
+    float temp_c = 0.0f, hum = 0.0f;
+    osMutexAcquire(i2c1_mutex, osWaitForever);
+    HAL_StatusTypeDef rr = AHT20_ReadResult(&temp_c, &hum);
+    osMutexRelease(i2c1_mutex);
+    if (rr != HAL_OK) { osDelay(1000U); continue; }
+
+    uint32_t epoch_s = (uint32_t)(AppTime_GetEpochUs() / 1000000ULL);
+    char dt[12];
+    (void)AppFmtDateTime12(dt, epoch_s);
+    uint32_t fid = ++g_aht_frame_id_counter;
+
+    uint32_t off = 0;
+    off += AppU32ToDec(&rowbuf[off], fid);          rowbuf[off++] = ',';
+    memcpy(&rowbuf[off], dt, 12U); off += 12U;       rowbuf[off++] = ',';
+    off += AppF1ToDec(&rowbuf[off], temp_c);         rowbuf[off++] = ',';
+    off += AppF1ToDec(&rowbuf[off], hum);
+    rowbuf[off++] = '\r'; rowbuf[off++] = '\n';
+    RingBuf_Write(&g_ring_aht_env, (const uint8_t *)rowbuf, off);
+
+    osDelay(1000U);   /* ~1Hz（手册要求采集周期≥1s） */
+  }
+}
+
+/* ===== LIS2MDL 三轴磁力任务（I2C1，100Hz，DRDY/EXTI13 节拍，仅 SD ring） ===== */
+void StartLis2mdlTask(void *argument)
+{
+  (void)argument;
+
+  uint16_t odr;
+  {
+    AcqConfig_t acfg;
+    AcqConfig_GetCopy(&acfg);
+    if (acfg.lis2mdl.enabled == 0U)
+    {
+      printf("[LIS2MDL] disabled by config, task idle\r\n");
+      for (;;) { osDelay(1000U); }
+    }
+    odr = acfg.lis2mdl.odr_hz;
+  }
+
+  osMutexAcquire(i2c1_mutex, osWaitForever);
+  HAL_StatusTypeDef ir = LIS2MDL_Init(odr);
+  osMutexRelease(i2c1_mutex);
+  if (ir != HAL_OK)
+  {
+    printf("[LIS2MDL] init failed, task idle\r\n");
+    for (;;) { osDelay(1000U); }
+  }
+
+  /* rowbuf 容量：fid(≤10) + ',' + dt(12) + ',' + 3×mg(±50000mG→≤8 "-50000.0") + 2×','
+   * + "\r\n" = 最坏 52 字节，取 64 留余量（QMA 同类用 96）。 */
+  char rowbuf[64];
+  char dt[12];
+  uint8_t  dt_valid = 0U;
+  uint32_t dt_last_tick = 0U;
+
+  for (;;)
+  {
+    AppAcqCheckAutoStop();
+    if (AppAcqIsRunning() == 0U) { dt_valid = 0U; osDelay(APP_ACQ_IDLE_DELAY_MS); continue; }
+
+    /* DRDY 硬件节拍（不靠 tick 计时）；20ms 超时自愈。 */
+    if (s_mag_drdy_sem != NULL)
+    {
+      (void)osSemaphoreAcquire(s_mag_drdy_sem, 20U);
+    }
+
+    int16_t raw[3]; float mg[3];
+    osMutexAcquire(i2c1_mutex, osWaitForever);
+    uint8_t ready = LIS2MDL_DataReady();
+    HAL_StatusTypeDef rr = ready ? LIS2MDL_ReadMag(raw, mg) : HAL_BUSY;
+    osMutexRelease(i2c1_mutex);
+    if (rr != HAL_OK) { continue; }
+
+    /* datetime 限流：AppTime_GetEpochUs 不宜 100Hz 调用；分辨率本就 1s，
+     * 每 ~0.5s（500 tick）刷新一次，期间复用缓存字符串。 */
+    uint32_t now_tick = osKernelGetTickCount();
+    if (dt_valid == 0U || (now_tick - dt_last_tick) >= 500U)
+    {
+      uint32_t epoch_s = (uint32_t)(AppTime_GetEpochUs() / 1000000ULL);
+      (void)AppFmtDateTime12(dt, epoch_s);
+      dt_last_tick = now_tick;
+      dt_valid = 1U;
+    }
+
+    uint32_t fid = ++g_mag_frame_id_counter;
+    uint32_t off = 0;
+    off += AppU32ToDec(&rowbuf[off], fid);     rowbuf[off++] = ',';
+    memcpy(&rowbuf[off], dt, 12U); off += 12U;  rowbuf[off++] = ',';
+    off += AppF1ToDec(&rowbuf[off], mg[0]);    rowbuf[off++] = ',';
+    off += AppF1ToDec(&rowbuf[off], mg[1]);    rowbuf[off++] = ',';
+    off += AppF1ToDec(&rowbuf[off], mg[2]);
+    rowbuf[off++] = '\r'; rowbuf[off++] = '\n';
+    RingBuf_Write(&g_ring_mag, (const uint8_t *)rowbuf, off);
+  }
+}
+
 /* Mic supervisor: starts/stops the ES8311 + SAI DMA capture in lock-step with
  * the global acquisition state when the codec is enabled in config. Audio data
  * itself is pushed to g_ring_mic by the SAI DMA ISR; this task only handles the
@@ -2983,9 +3184,13 @@ void StartLoggerTask(void *argument)
         RingBuf_Reset(&g_ring_qma_acc);
         RingBuf_Reset(&g_ring_h3_acc);
         RingBuf_Reset(&g_ring_mic);
+        RingBuf_Reset(&g_ring_aht_env);
+        RingBuf_Reset(&g_ring_mag);
         g_lsm_frame_id_counter = 0U;
         g_qma_frame_id_counter = 0U;
         g_h3_frame_id_counter  = 0U;
+        g_aht_frame_id_counter = 0U;
+        g_mag_frame_id_counter = 0U;
         g_h3_irq_count = 0U;        /* H3 DRDY 中断测试统计，按会话清零 */
         g_h3_timeout_count = 0U;
 
@@ -3055,6 +3260,26 @@ void StartLoggerTask(void *argument)
         if (dr < 0)
         {
           printf("[Logger] MIC.WAV write fail %s (%d)\r\n",
+                 FatFs_SD_ResultToString(result), (int)result);
+          AppFlowStatsRecordWriteFailure();
+          break;
+        }
+        if (dr > 0) did_work = 1;
+
+        dr = LoggerDrainRing(&g_ring_aht_env, 4U, APP_RING_FLUSH_CHUNK, &rows_since_sync, &result);
+        if (dr < 0)
+        {
+          printf("[Logger] AHT_ENV write fail %s (%d)\r\n",
+                 FatFs_SD_ResultToString(result), (int)result);
+          AppFlowStatsRecordWriteFailure();
+          break;
+        }
+        if (dr > 0) did_work = 1;
+
+        dr = LoggerDrainRing(&g_ring_mag, 5U, APP_RING_FLUSH_CHUNK, &rows_since_sync, &result);
+        if (dr < 0)
+        {
+          printf("[Logger] MAG write fail %s (%d)\r\n",
                  FatFs_SD_ResultToString(result), (int)result);
           AppFlowStatsRecordWriteFailure();
           break;

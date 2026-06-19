@@ -11,4 +11,13 @@ void I2C2_BusRecover(void);
 
 /* 探测 RTC(PCF85063, 0x51) 是否在 I2C2 上应答。1=应答(硬件OK), 0=无应答(硬件/链路问题)。 */
 uint8_t I2C2_ProbeRtc(void);
+
+/* ---- I2C1: AHT20(0x38) + LIS2MDL(0x1E) 专用总线 ---- */
+extern I2C_HandleTypeDef hi2c1;
+
+void    MX_I2C1_Init(void);
+void    I2C1_BusRecover(void);
+/* 串口探测 I2C1 上的 AHT20(0x38) 与 LIS2MDL(0x1E)；仅打印到串口，不发上位机。
+ * 返回 bit0=AHT20 应答, bit1=LIS2MDL 应答。 */
+uint8_t I2C1_ProbeBus(void);
 #endif

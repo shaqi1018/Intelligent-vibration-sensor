@@ -1,6 +1,8 @@
 #include "i2c.h"
+#include <stdio.h>
 
 I2C_HandleTypeDef hi2c2;
+I2C_HandleTypeDef hi2c1;
 
 /* PB13 = I2C2_SCL (AF4), PB14 = I2C2_SDA (AF4) —— 对应原理图 MCU pin 34/35。
  * 注意：PB10 已被 SPI2_SCK 占用（见 bsp_spi.c），不可用于 I2C2。
@@ -45,4 +47,50 @@ void I2C2_BusRecover(void)
 uint8_t I2C2_ProbeRtc(void)
 {
   return (HAL_I2C_IsDeviceReady(&hi2c2, (0x51U << 1U), 3U, 100U) == HAL_OK) ? 1U : 0U;
+}
+
+/* PB6 = I2C1_SCL (AF4), PB3 = I2C1_SDA (AF4) —— 对应原理图 MCU pin 58/55。
+ * I2C1 为 AHT20(0x38) 与 LIS2MDL(0x1E) 专用总线，与 I2C2(ES8311/RTC) 物理隔离。
+ * 板载已有 4.7K 外部上拉(R13/R14)；内部上拉作保险，并联无害。
+ * 默认内核时钟 PCLK1=160MHz，复用 I2C2 的 0x30A2A0FF ≈ 100kHz 时序。 */
+void MX_I2C1_Init(void)
+{
+  __HAL_RCC_I2C1_CLK_ENABLE();
+  __HAL_RCC_GPIOB_CLK_ENABLE();
+
+  GPIO_InitTypeDef g = {0};
+  g.Pin       = GPIO_PIN_6 | GPIO_PIN_3;   /* PB6=SCL, PB3=SDA */
+  g.Mode      = GPIO_MODE_AF_OD;
+  g.Pull      = GPIO_PULLUP;
+  g.Speed     = GPIO_SPEED_FREQ_LOW;
+  g.Alternate = GPIO_AF4_I2C1;
+  HAL_GPIO_Init(GPIOB, &g);
+
+  hi2c1.Instance              = I2C1;
+  hi2c1.Init.Timing           = 0x30A2A0FFU;   /* ~100kHz @ PCLK1=160MHz */
+  hi2c1.Init.OwnAddress1      = 0U;
+  hi2c1.Init.AddressingMode   = I2C_ADDRESSINGMODE_7BIT;
+  hi2c1.Init.DualAddressMode  = I2C_DUALADDRESS_DISABLE;
+  hi2c1.Init.OwnAddress2      = 0U;
+  hi2c1.Init.OwnAddress2Masks = I2C_OA2_NOMASK;
+  hi2c1.Init.GeneralCallMode  = I2C_GENERALCALL_DISABLE;
+  hi2c1.Init.NoStretchMode    = I2C_NOSTRETCH_DISABLE;
+  HAL_I2C_Init(&hi2c1);
+}
+
+void I2C1_BusRecover(void)
+{
+  HAL_I2C_DeInit(&hi2c1);
+  MX_I2C1_Init();
+}
+
+uint8_t I2C1_ProbeBus(void)
+{
+  uint8_t mask = 0U;
+  if (HAL_I2C_IsDeviceReady(&hi2c1, (0x38U << 1U), 3U, 100U) == HAL_OK) { mask |= 0x01U; }
+  if (HAL_I2C_IsDeviceReady(&hi2c1, (0x1EU << 1U), 3U, 100U) == HAL_OK) { mask |= 0x02U; }
+  printf("[I2C1] probe: AHT20(0x38)=%s  LIS2MDL(0x1E)=%s\r\n",
+         (mask & 0x01U) ? "ACK" : "----",
+         (mask & 0x02U) ? "ACK" : "----");
+  return mask;
 }

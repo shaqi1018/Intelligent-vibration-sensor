@@ -114,9 +114,11 @@ int main(void)
   /* Initialize all configured peripherals */
   MX_GPIO_Init();
   MX_I2C2_Init();
+  MX_I2C1_Init();          /* 新增：AHT20 + LIS2MDL 专用 I2C1 总线 */
   MX_ICACHE_Init();
   MX_USART1_UART_Init();
   BoardIO_Init();          /* HW-v2: init LED/buttons/POWER_CTL (starts LOW) */
+  (void)I2C1_ProbeBus();   /* 仅串口打印，确认两颗新传感器在线 */
   BoardIO_StartupLatch();  /* 电源键按住 2s → 锁存电池；否则不锁存 */
 
   /* RTC 供电修复:PCF85063 RTC 的 VDD/I2C 上拉与 ES8311 codec 共用 PAVCC 这路电,

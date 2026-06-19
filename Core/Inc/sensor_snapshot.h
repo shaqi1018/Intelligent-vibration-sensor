@@ -105,6 +105,8 @@ typedef struct {
 #define APP_RING_H3_ACC_SIZE    (16U * 1024U)   /* 400Hz × 14B/row × 5s ≈ 28KB cap, 16KB enough with logger drain */
 /* 96kHz×2B = 192KB/s；攒批下 32KB 会偶尔溢出(CKBX0297 mic drop)，64KB≈0.33s 余量 */
 #define APP_RING_MIC_SIZE       (64U * 1024U)
+#define APP_RING_AHT_ENV_SIZE   (4U * 1024U)    /* 温湿度 1Hz，~32B/行 → 4KB≈2min */
+#define APP_RING_MAG_SIZE       (16U * 1024U)   /* 磁力 100Hz，~40B/行 → 16KB≈4s */
 /* Largest contiguous chunk handed to f_write per call. Bigger = fewer FAT
  * cluster traversals; smaller = lower latency. 16KB is a good trade-off. */
 #define APP_RING_FLUSH_CHUNK    (16U * 1024U)

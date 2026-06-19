@@ -87,6 +87,19 @@ static const char kCfgTemplate[] =
 "    \"bits\": 16,\r\n"
 "    \"gain_db\": 33,\r\n"
 "    \"_doc_gain_db\": \"mic PGA gain 0..42 dB (approx 3 dB steps)\"\r\n"
+"  },\r\n"
+"\r\n"
+"  \"aht20\": {\r\n"
+"    \"_doc\": \"ASAIR AHT20 temp/humidity on I2C1 (sample period >= 1s)\",\r\n"
+"    \"enabled\": 1,\r\n"
+"    \"odr_hz\": 1\r\n"
+"  },\r\n"
+"\r\n"
+"  \"lis2mdl\": {\r\n"
+"    \"_doc\": \"ST LIS2MDL 3-axis magnetometer (+/-50 gauss) on I2C1, DRDY on PC13\",\r\n"
+"    \"enabled\": 1,\r\n"
+"    \"odr_hz\": 100,\r\n"
+"    \"_options_odr_hz\": [10, 20, 50, 100]\r\n"
 "  }\r\n"
 "}\r\n";
 
@@ -365,6 +378,30 @@ static void DeviceCfg_ParseAndApply(const char *buf)
             cfg.es8311.gain_db = (uint16_t)v;
     }
 
+    /* ---- aht20 子对象 ---- */
+    if (json_extract_object(buf, "aht20", s_obj, sizeof(s_obj)))
+    {
+        p = json_find_value(s_obj, "enabled");
+        if (json_parse_uint(p, &v))
+            cfg.aht20.enabled = (uint8_t)(v != 0U ? 1U : 0U);
+
+        p = json_find_value(s_obj, "odr_hz");
+        if (json_parse_uint(p, &v))
+            cfg.aht20.odr_hz = (uint16_t)v;
+    }
+
+    /* ---- lis2mdl 子对象 ---- */
+    if (json_extract_object(buf, "lis2mdl", s_obj, sizeof(s_obj)))
+    {
+        p = json_find_value(s_obj, "enabled");
+        if (json_parse_uint(p, &v))
+            cfg.lis2mdl.enabled = (uint8_t)(v != 0U ? 1U : 0U);
+
+        p = json_find_value(s_obj, "odr_hz");
+        if (json_parse_uint(p, &v))
+            cfg.lis2mdl.odr_hz = (uint16_t)v;
+    }
+
     if (AcqConfig_Set(&cfg) == 0)
     {
         printf("[DevCfg] 配置已应用: %lu Hz, sink=0x%02X\r\n",
@@ -547,6 +584,17 @@ FRESULT DeviceCfg_WriteCurrentToSD(void)
         "    \"bits\": %u,\r\n"
         "    \"gain_db\": %u,\r\n"
         "    \"_doc_gain_db\": \"mic PGA gain 0..42 dB (approx 3 dB steps)\"\r\n"
+        "  },\r\n"
+        "\r\n"
+        "  \"aht20\": {\r\n"
+        "    \"enabled\": %u,\r\n"
+        "    \"odr_hz\": %u\r\n"
+        "  },\r\n"
+        "\r\n"
+        "  \"lis2mdl\": {\r\n"
+        "    \"enabled\": %u,\r\n"
+        "    \"odr_hz\": %u,\r\n"
+        "    \"_options_odr_hz\": [10, 20, 50, 100]\r\n"
         "  }\r\n"
         "}\r\n",
         (unsigned long)cfg.sample_rate_hz,
@@ -569,7 +617,11 @@ FRESULT DeviceCfg_WriteCurrentToSD(void)
         (unsigned int)cfg.es8311.enabled,
         (unsigned long)cfg.es8311.sample_rate_hz,
         (unsigned int)cfg.es8311.bits,
-        (unsigned int)cfg.es8311.gain_db);
+        (unsigned int)cfg.es8311.gain_db,
+        (unsigned int)cfg.aht20.enabled,
+        (unsigned int)cfg.aht20.odr_hz,
+        (unsigned int)cfg.lis2mdl.enabled,
+        (unsigned int)cfg.lis2mdl.odr_hz);
 
     if ((line_len < 0) || ((size_t)line_len >= sizeof(s_line)))
         return FR_INT_ERR;
@@ -604,7 +656,7 @@ FRESULT DeviceCfg_WriteConfigToDir(const char *dir)
     FIL         file;
     AcqConfig_t cfg;
     char        path[48];
-    static char s_line[768];
+    static char s_line[1024];
     int         line_len;
 
     if (dir == NULL) return FR_INVALID_PARAMETER;
@@ -635,6 +687,14 @@ FRESULT DeviceCfg_WriteConfigToDir(const char *dir)
         "    \"sample_rate_hz\": %lu,\r\n"
         "    \"bits\": %u,\r\n"
         "    \"gain_db\": %u\r\n"
+        "  },\r\n"
+        "  \"aht20\": {\r\n"
+        "    \"enabled\": %u,\r\n"
+        "    \"odr_hz\": %u\r\n"
+        "  },\r\n"
+        "  \"lis2mdl\": {\r\n"
+        "    \"enabled\": %u,\r\n"
+        "    \"odr_hz\": %u\r\n"
         "  }\r\n"
         "}\r\n",
         (unsigned int)cfg.lsm6dsox.enabled,
@@ -650,7 +710,11 @@ FRESULT DeviceCfg_WriteConfigToDir(const char *dir)
         (unsigned int)cfg.es8311.enabled,
         (unsigned long)cfg.es8311.sample_rate_hz,
         (unsigned int)cfg.es8311.bits,
-        (unsigned int)cfg.es8311.gain_db);
+        (unsigned int)cfg.es8311.gain_db,
+        (unsigned int)cfg.aht20.enabled,
+        (unsigned int)cfg.aht20.odr_hz,
+        (unsigned int)cfg.lis2mdl.enabled,
+        (unsigned int)cfg.lis2mdl.odr_hz);
 
     if ((line_len < 0) || ((size_t)line_len >= sizeof(s_line)))
         return FR_INT_ERR;

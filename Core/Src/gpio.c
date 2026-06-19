@@ -43,11 +43,15 @@ void MX_GPIO_Init(void)
   __HAL_RCC_GPIOB_CLK_ENABLE();
   __HAL_RCC_GPIOC_CLK_ENABLE();
 
-  /* SDMMC1 DET (PC13) — input pullup (new board has no DET; value only used for log) */
-  GPIO_InitStruct.Pin  = SDMMC1_DET_Pin;
-  GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
-  GPIO_InitStruct.Pull = GPIO_PULLUP;
-  HAL_GPIO_Init(SDMMC1_DET_GPIO_Port, &GPIO_InitStruct);
+  /* LIS2MDL DRDY → PC13, EXTI13, 上升沿（DRDY_on_PIN 推挽输出，故用下拉）。
+   * 注：原 SDMMC1_DET(PC13) 在新板上是无逻辑读取的遗留输入，此处重分配为磁力计 DRDY。 */
+  GPIO_InitStruct.Pin   = GPIO_PIN_13;
+  GPIO_InitStruct.Mode  = GPIO_MODE_IT_RISING;
+  GPIO_InitStruct.Pull  = GPIO_PULLDOWN;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_HIGH;
+  HAL_GPIO_Init(GPIOC, &GPIO_InitStruct);
+  HAL_NVIC_SetPriority(EXTI13_IRQn, 6, 0);   /* 与其他传感器 EXTI 同优先级 6 */
+  HAL_NVIC_EnableIRQ(EXTI13_IRQn);
 
   /* LSM6DSOX INT1 → PB0, EXTI0, active-high, pull-down */
   GPIO_InitStruct.Pin   = GPIO_PIN_0;

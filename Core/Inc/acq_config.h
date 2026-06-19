@@ -71,6 +71,8 @@ typedef struct {
   AcqSensorCfg_t h3lis100dl;
   AcqSensorCfg_t qma6100p;
   AcqMicCfg_t    es8311;
+  AcqSensorCfg_t aht20;     /* 温湿度：enabled + odr_hz(=1Hz)；range 未用 */
+  AcqSensorCfg_t lis2mdl;   /* 磁力计：enabled + odr_hz(10/20/50/100)；range=50(±gauss,信息性) */
 } AcqConfig_t;
 
 typedef enum {
@@ -105,7 +107,7 @@ int  AcqConfig_SetStorageMode(AcqStorageMode_t mode);
 int  AcqConfig_SetTrigger(AcqTriggerMode_t mode, uint32_t arg_ms);
 int  AcqConfig_SetDuration(uint32_t duration_ms);
 int  AcqConfig_SetRingSize(uint32_t bytes);
-int  AcqConfig_SetSensor(uint8_t which /*0=lsm,1=h3,2=qma*/, uint8_t enabled, uint16_t range, uint16_t odr_hz);
+int  AcqConfig_SetSensor(uint8_t which /*0=lsm,1=h3,2=qma,3=aht20,4=lis2mdl*/, uint8_t enabled, uint16_t range, uint16_t odr_hz);
 
 /**
  * @brief 设置麦克风（ES8311）配置：使能 / 采样率 / 增益。

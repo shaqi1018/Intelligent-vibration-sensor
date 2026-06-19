@@ -13,13 +13,15 @@
 #define FATFS_SD_DIR_PATH_MAX     24U   /* "0:/CKBOX0001" = 13 + NUL */
 #define FATFS_SD_FILE_PATH_MAX    32U   /* "0:/CKBOX0001/LSM_ACC.CSV" = 25 + NUL */
 
-/* 4 个 CSV 文件名（8.3 格式）.
+/* 6 个 CSV 文件名（8.3 格式）.
  * LSM_IMU merges accel+gyro at 6664Hz; LSM_TMP holds the slow temperature
- * channel; H3 and QMA are unchanged. */
+ * channel; H3 and QMA are unchanged; AHT_ENV and MAG are new. */
 #define FATFS_SD_FNAME_LSM_IMU   "LSM_IMU.CSV"
 #define FATFS_SD_FNAME_LSM_TMP   "LSM_TMP.CSV"
 #define FATFS_SD_FNAME_H3_ACC    "H3_ACC.CSV"
 #define FATFS_SD_FNAME_QMA_ACC   "QMA_ACC.CSV"
+#define FATFS_SD_FNAME_AHT_ENV   "AHT_ENV.CSV"   /* 新增：索引 4 */
+#define FATFS_SD_FNAME_MAG       "MAG.CSV"        /* 新增：索引 5 */
 #define FATFS_SD_FNAME_MIC_WAV   "MIC.WAV"
 
 #define FATFS_SD_FILE_LSM_IMU     0U
@@ -27,7 +29,7 @@
 #define FATFS_SD_FILE_H3_ACC      2U
 #define FATFS_SD_FILE_QMA_ACC     3U
 
-#define FATFS_SD_NUM_FILES        4U
+#define FATFS_SD_NUM_FILES        6U  /* 0..5 CSV; MIC_WAV 独立索引6 */
 
 static FATFS g_sd_fatfs;
 static FIL g_log_files[FATFS_SD_NUM_FILES];
@@ -219,13 +221,16 @@ FRESULT FatFs_SD_LoggerStart(void)
   static const char kHdrLsmTmp[] = "frame_id,tick_ms,temp_C\r\n";
   static const char kHdrH3Acc[]  = "frame_id,datetime,acc_x_mg,acc_y_mg,acc_z_mg\r\n";
   static const char kHdrQmaAcc[] = "frame_id,datetime,acc_x_mg,acc_y_mg,acc_z_mg\r\n";
+  static const char kHdrAhtEnv[] = "frame_id,datetime,temp_C,humidity_pct\r\n";
+  static const char kHdrMag[]    = "frame_id,datetime,mag_x_mG,mag_y_mG,mag_z_mG\r\n";
 
   static const char *headers[FATFS_SD_NUM_FILES] = {
-    kHdrLsmImu, kHdrLsmTmp, kHdrH3Acc, kHdrQmaAcc
+    kHdrLsmImu, kHdrLsmTmp, kHdrH3Acc, kHdrQmaAcc, kHdrAhtEnv, kHdrMag
   };
   static const char *fnames[FATFS_SD_NUM_FILES] = {
     FATFS_SD_FNAME_LSM_IMU, FATFS_SD_FNAME_LSM_TMP,
-    FATFS_SD_FNAME_H3_ACC,  FATFS_SD_FNAME_QMA_ACC
+    FATFS_SD_FNAME_H3_ACC,  FATFS_SD_FNAME_QMA_ACC,
+    FATFS_SD_FNAME_AHT_ENV, FATFS_SD_FNAME_MAG
   };
 
   if (g_logger_active != 0U)
@@ -263,7 +268,7 @@ FRESULT FatFs_SD_LoggerStart(void)
     return result;
   }
 
-  /* 打开 5 个 CSV 文件并写入表头 */
+  /* 打开 6 个 CSV 文件并写入表头 */
   for (uint32_t i = 0U; i < FATFS_SD_NUM_FILES; i++)
   {
     result = FatFs_SD_OpenCsvFile(&g_log_files[i], g_session_dir, fnames[i], headers[i]);
@@ -373,7 +378,7 @@ FRESULT FatFs_SD_WavCreate(uint32_t sample_rate_hz, uint16_t bits)
 
 /* Generic single-file log write — used by the ring buffer flush path
  * (LSM_IMU and QMA_ACC both come through here from the logger task).
- * idx==FATFS_SD_FILE_MIC_WAV(4) 路由到独立的 g_wav_file 并累加字节数。 */
+ * idx==FATFS_SD_FILE_MIC_WAV(6) 路由到独立的 g_wav_file 并累加字节数。 */
 FRESULT FatFs_SD_LoggerWriteFileIndex(uint8_t idx, const uint8_t *data, uint32_t len)
 {
   if (data == NULL || len == 0U) return FR_INVALID_PARAMETER;

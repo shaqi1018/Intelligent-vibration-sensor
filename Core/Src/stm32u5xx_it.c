@@ -275,6 +275,14 @@ void EXTI4_IRQHandler(void)   /* QMA6100P INT1 → PC4 */
 }
 
 /**
+  * @brief This function handles EXTI line 13 interrupt (PC13 = LIS2MDL DRDY).
+  */
+void EXTI13_IRQHandler(void)   /* LIS2MDL DRDY → PC13 */
+{
+  HAL_GPIO_EXTI_IRQHandler(GPIO_PIN_13);
+}
+
+/**
   * @brief This function handles GPDMA1 Channel 4 global interrupt
   *        (SAI1_A RX circular DMA feeding the ES8311 mic ring buffer).
   */

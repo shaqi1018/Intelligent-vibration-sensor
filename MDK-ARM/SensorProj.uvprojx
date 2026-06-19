@@ -1368,6 +1368,16 @@
               <FileType>1</FileType>
               <FilePath>..\BSP\Sensor\Src\h3lis100dl.c</FilePath>
             </File>
+            <File>
+              <FileName>lis2mdl.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\BSP\Sensor\Src\lis2mdl.c</FilePath>
+            </File>
+            <File>
+              <FileName>aht20.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\BSP\Sensor\Src\aht20.c</FilePath>
+            </File>
           </Files>
         </Group>
         <Group>

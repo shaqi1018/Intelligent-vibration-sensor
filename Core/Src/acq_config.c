@@ -65,6 +65,18 @@ static void AcqCfgLoadDefaults(void)
   s_cfg.es8311.sample_rate_hz = 16000U;
   s_cfg.es8311.bits           = 16U;
   s_cfg.es8311.gain_db        = 33U;
+
+  /* AHT20 温湿度：默认开启，1Hz（手册要求采集周期≥1s） */
+  s_cfg.aht20.enabled = 1U;
+  s_cfg.aht20.range   = 0U;
+  s_cfg.aht20.range2  = 0U;
+  s_cfg.aht20.odr_hz  = 1U;
+
+  /* LIS2MDL 三轴磁力：默认开启，100Hz，±50 gauss（固定量程，range 仅信息性） */
+  s_cfg.lis2mdl.enabled = 1U;
+  s_cfg.lis2mdl.range   = 50U;
+  s_cfg.lis2mdl.range2  = 0U;
+  s_cfg.lis2mdl.odr_hz  = 100U;
 }
 
 void AcqConfig_Init(void)
@@ -274,6 +286,8 @@ int AcqConfig_SetSensor(uint8_t which, uint8_t enabled, uint16_t range, uint16_t
     case 0U: target = &s_cfg.lsm6dsox;   break;
     case 1U: target = &s_cfg.h3lis100dl; break;
     case 2U: target = &s_cfg.qma6100p;   break;
+    case 3U: target = &s_cfg.aht20;      break;
+    case 4U: target = &s_cfg.lis2mdl;    break;
     default:
       AcqCfgUnlock();
       return -1;
