@@ -3047,6 +3047,17 @@ void StartLis2mdlTask(void *argument)
     off += AppF1ToDec(&rowbuf[off], mg[2]);
     rowbuf[off++] = '\r'; rowbuf[off++] = '\n';
     RingBuf_Write(&g_ring_mag, (const uint8_t *)rowbuf, off);
+
+    /* WCID Bulk: MAG 数据没有独立 IN 端点，复用命令响应端点 0x85，行首加 "mag,"
+     * 供上位机分流。整行 ≤56B，单次发出不截断。100Hz × ~56B ≈ 5.6KB/s，对 0x85
+     * 可忽略；与命令响应/AHT 的并发由 UsbWcidApp_Write 内的互斥锁串行化。 */
+    if (g_boot_mode == BOOT_MODE_WCID_BULK && AppAcqIsUsbSinkActive() != 0U)
+    {
+      char usbrow[72];
+      usbrow[0] = 'm'; usbrow[1] = 'a'; usbrow[2] = 'g'; usbrow[3] = ',';
+      memcpy(&usbrow[4], rowbuf, off);
+      (void)UsbWcidApp_Write((const uint8_t *)usbrow, off + 4U);
+    }
   }
 }
 
