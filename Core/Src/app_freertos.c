@@ -2950,6 +2950,16 @@ void StartAht20Task(void *argument)
     rowbuf[off++] = '\r'; rowbuf[off++] = '\n';
     RingBuf_Write(&g_ring_aht_env, (const uint8_t *)rowbuf, off);
 
+    /* WCID Bulk: AHT 数据没有独立 IN 端点，复用命令响应端点 0x85，行首加 "aht,"
+     * 供上位机在该端点上与命令响应文本分流。整行一次发出（≤64B，不截断）。 */
+    if (g_boot_mode == BOOT_MODE_WCID_BULK && AppAcqIsUsbSinkActive() != 0U)
+    {
+      char usbrow[56];
+      usbrow[0] = 'a'; usbrow[1] = 'h'; usbrow[2] = 't'; usbrow[3] = ',';
+      memcpy(&usbrow[4], rowbuf, off);
+      (void)UsbWcidApp_Write((const uint8_t *)usbrow, off + 4U);
+    }
+
     osDelay(1000U);   /* ~1Hz（手册要求采集周期≥1s） */
   }
 }
