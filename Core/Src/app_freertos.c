@@ -1591,7 +1591,7 @@ static void UsbCmd_Ping(void)
 
 static void UsbCmd_Help(void)
 {
-  const char *msg = "Commands: ping, help, status, acq_start, acq_stop, s <lsm|h3|qma> <odr|range|en> <val>, s mic <gain|sr|en> <val>, set_time YYYY-MM-DDTHH:MM:SS, boot_msc\r\n";
+  const char *msg = "Commands: ping, help, status, acq_start, acq_stop, s <lsm|h3|qma|aht|mag> <odr|range|en> <val>, s mic <gain|sr|en> <val>, set_time YYYY-MM-DDTHH:MM:SS, boot_msc\r\n";
   UsbCdcService_Write((const uint8_t *)msg, strlen(msg));
 }
 
