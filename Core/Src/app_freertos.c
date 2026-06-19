@@ -369,6 +369,7 @@ void MX_FREERTOS_Init(void)
   frame_buffer_mutex = osMutexNew(&frame_buffer_mutex_attr);
   acq_ctrl_mutex = osMutexNew(&acq_ctrl_mutex_attr);
   i2c1_mutex     = osMutexNew(&i2c1_mutex_attr);
+  UsbWcidApp_InitRtos();   /* 串行化 0x85 响应端点（命令响应 + AHT + MAG 共用） */
 #if (APP_SENSOR_TEST_TARGET == APP_SENSOR_TEST_NONE) || \
     (APP_SENSOR_TEST_TARGET == APP_SENSOR_TEST_H3LIS100DL) || \
     (APP_SENSOR_TEST_TARGET == APP_SENSOR_TEST_QMA6100P)

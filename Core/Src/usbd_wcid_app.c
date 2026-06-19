@@ -1,10 +1,16 @@
 #include "usbd_wcid_app.h"
 #include "usbd_wcid_streaming.h"
+#include "cmsis_os2.h"
 #include <string.h>
 #include <stdio.h>
 
 static USBD_HandleTypeDef *s_pdev;
 static UsbWcidApp_CmdHandler s_cmd_handler;
+static osMutexId_t s_resp_mutex;   /* serialize 0x85 writes: cmd resp + AHT + MAG */
+static const osMutexAttr_t s_resp_mutex_attr = {
+  .name      = "wcidRespMutex",
+  .attr_bits = osMutexPrioInherit,
+};
 
 /* 静态双缓冲：4 通道 × (WCID_TX_HALF_SIZE × 2 + 2)。
  * 多出的 "+2" 用于 tag 通道（最后通道 = MIC = N_IN_ENDPOINTS-1）的每半通道标记字节：
@@ -138,5 +144,23 @@ uint8_t UsbWcidApp_Write(const uint8_t *buf, uint32_t len)
   if (s_pdev == NULL) { return 1U; }
   if (len == 0U)      { return 0U; }
   if (len > 0xFFFFU)  { len = 0xFFFFU; }
-  return USBD_WCID_STREAMING_SendResponse(s_pdev, buf, (uint16_t)len);
+
+  /* Serialize all 0x85 writers (cmd task + AHT + MAG). The mutex is created in
+   * MX_FREERTOS_Init; before that (enumeration) it is NULL -> single-context,
+   * no-lock fallback. SendResponse busy-waits for the prior USB transfer with
+   * the lock held; the USB ISR (higher priority than any task) clears the busy
+   * flag regardless of the lock, so this cannot deadlock. */
+  uint8_t r;
+  if (s_resp_mutex != NULL) { (void)osMutexAcquire(s_resp_mutex, osWaitForever); }
+  r = USBD_WCID_STREAMING_SendResponse(s_pdev, buf, (uint16_t)len);
+  if (s_resp_mutex != NULL) { (void)osMutexRelease(s_resp_mutex); }
+  return r;
+}
+
+void UsbWcidApp_InitRtos(void)
+{
+  if (s_resp_mutex == NULL)
+  {
+    s_resp_mutex = osMutexNew(&s_resp_mutex_attr);
+  }
 }

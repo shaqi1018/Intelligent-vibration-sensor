@@ -56,7 +56,16 @@ void    UsbWcidApp_RespReset(void);
 void    UsbWcidApp_RespAppend(const uint8_t *buf, uint32_t len);
 uint8_t UsbWcidApp_RespSend(void);
 
-/* Send raw bytes back to host via EP4 IN (command response channel). */
+/* Send raw bytes back to host via the command-response IN endpoint (0x85).
+ * Serialized by an RTOS mutex (see UsbWcidApp_InitRtos) so the command task,
+ * the AHT20 task and the LIS2MDL task can all write 0x85 without racing the
+ * single response buffer inside USBD_WCID_STREAMING_SendResponse. */
 uint8_t UsbWcidApp_Write(const uint8_t *buf, uint32_t len);
+
+/* Create the mutex that serializes UsbWcidApp_Write (0x85). Call once from
+ * MX_FREERTOS_Init, in task/kernel-init context (osMutexNew needs the kernel).
+ * Before this runs (e.g. USB enumeration), Write falls back to no-lock, which
+ * is safe because only one context sends at that stage. */
+void UsbWcidApp_InitRtos(void);
 
 #endif
