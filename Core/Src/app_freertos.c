@@ -2318,16 +2318,9 @@ void StartLsm6dsoxTask(void *argument)
     osDelay(SAMPLE_PERIOD_MS);
   }
 #else
-  {
-    AcqConfig_t acfg_init;
-    AcqConfig_GetCopy(&acfg_init);
-    if (acfg_init.lsm6dsox.enabled == 0U)
-    {
-      printf("[LSM6DSOX] disabled by config, task idle\r\n");
-      for (;;) { osDelay(1000U); }
-    }
-  }
-
+  /* en 即时生效:芯片一律初始化(无论 enabled),使能与否由主循环每轮门控。禁用的传感器
+   * 开机也初始化(多一点功耗,可接受),这样停采时 "s lsm en 1" + acq_start 即可起采,不必
+   * 重启。FIFO 清空/ODR 重配由 acq_start 与 s 命令时的 AppApplySensorConfig 负责。 */
   if (LSM6DSOX_Init() != HAL_OK)
   {
     printf("[LSM6DSOX] init failed, task exit\r\n");
@@ -2360,10 +2353,15 @@ void StartLsm6dsoxTask(void *argument)
   for (;;)
   {
     AppAcqCheckAutoStop();
-    if (AppAcqIsRunning() == 0U)
+    /* 门控 = 采集运行中 && 本传感器使能。enabled 每批(约38ms一次水位)读一次,
+     * 不进 6664Hz 内层逐样本循环。改 en 停采时改、下次 acq_start 即生效。 */
     {
-      osDelay(APP_ACQ_IDLE_DELAY_MS);
-      continue;
+      AcqConfig_t cfg; AcqConfig_GetCopy(&cfg);
+      if ((AppAcqIsRunning() == 0U) || (cfg.lsm6dsox.enabled == 0U))
+      {
+        osDelay(APP_ACQ_IDLE_DELAY_MS);
+        continue;
+      }
     }
 
     /* Block on FIFO watermark interrupt (released by EXTI1 ISR on PB1).
@@ -2601,28 +2599,23 @@ void StartH3lis100dlTask(void *argument)
     osDelay(AppAcqCurrentPeriodMs());
   }
 #else
-  {
-    AcqConfig_t acfg_init;
-    AcqConfig_GetCopy(&acfg_init);
-    if (acfg_init.h3lis100dl.enabled == 0U)
-    {
-      printf("[H3LIS100DL] disabled by config, task idle\r\n");
-      for (;;) { osDelay(1000U); }
-    }
-  }
+  /* en 即时生效:H3 芯片已无条件 Init;不再因 disabled 永久 idle,使能由主循环每轮门控。 */
 
   /* DRDY-interrupt mode (test): DRDY routed to PA1/EXTI1 (CTRL_REG3=0x02), s_h3_drdy_sem
    * released by HAL_GPIO_EXTI_Rising_Callback. Was unreliable on the old board → polling;
    * HW reportedly fixed, re-testing. Timeout = period+10ms fallback so a missed/absent IRQ
    * still reads (data stays continuous); irq vs timeout counts tell if DRDY is reliable. */
-  AppH3ApplyOdr();   /* boot-time apply, same as LSM/QMA (ODR change needs a reboot) */
+  AppH3ApplyOdr();   /* 开机无条件应用 ODR(改 odr 在 acq_start 经 AppApplySensorConfig 重配) */
   for (;;)
   {
     AppAcqCheckAutoStop();
-    if (AppAcqIsRunning() == 0U)
     {
-      osDelay(APP_ACQ_IDLE_DELAY_MS);
-      continue;
+      AcqConfig_t cfg; AcqConfig_GetCopy(&cfg);
+      if ((AppAcqIsRunning() == 0U) || (cfg.h3lis100dl.enabled == 0U))
+      {
+        osDelay(APP_ACQ_IDLE_DELAY_MS);
+        continue;
+      }
     }
 
     /* Wait for DRDY interrupt; fall back after period+10ms if the IRQ doesn't arrive. */
@@ -2743,15 +2736,7 @@ void StartQma6100pTask(void *argument)
     osDelay(AppAcqCurrentPeriodMs());
   }
 #else
-  {
-    AcqConfig_t acfg_init;
-    AcqConfig_GetCopy(&acfg_init);
-    if (acfg_init.qma6100p.enabled == 0U)
-    {
-      printf("[QMA6100P] disabled by config, task idle\r\n");
-      for (;;) { osDelay(1000U); }
-    }
-  }
+  /* en 即时生效:QMA 芯片/ODR 已无条件 Init+Configure;FIFO 也无条件配置;使能由主循环每轮门控。 */
 
   /* FIFO + watermark 16 frames -> ~10ms cadence per IRQ. */
   osMutexAcquire(spi2_mutex, osWaitForever);
@@ -2771,10 +2756,13 @@ void StartQma6100pTask(void *argument)
   for (;;)
   {
     AppAcqCheckAutoStop();
-    if (AppAcqIsRunning() == 0U)
     {
-      osDelay(APP_ACQ_IDLE_DELAY_MS);
-      continue;
+      AcqConfig_t cfg; AcqConfig_GetCopy(&cfg);
+      if ((AppAcqIsRunning() == 0U) || (cfg.qma6100p.enabled == 0U))
+      {
+        osDelay(APP_ACQ_IDLE_DELAY_MS);
+        continue;
+      }
     }
 
     /* Wait for the watermark EXTI, 2ms timeout for self-healing. NOTE: this
@@ -2933,16 +2921,7 @@ void StartAht20Task(void *argument)
 {
   (void)argument;
 
-  {
-    AcqConfig_t acfg;
-    AcqConfig_GetCopy(&acfg);
-    if (acfg.aht20.enabled == 0U)
-    {
-      printf("[AHT20] disabled by config, task idle\r\n");
-      for (;;) { osDelay(1000U); }
-    }
-  }
-
+  /* en 即时生效:AHT20 一律初始化(无论 enabled);使能由主循环每轮门控。 */
   osMutexAcquire(i2c1_mutex, osWaitForever);
   HAL_StatusTypeDef ir = AHT20_Init();
   osMutexRelease(i2c1_mutex);
@@ -2956,7 +2935,10 @@ void StartAht20Task(void *argument)
   for (;;)
   {
     AppAcqCheckAutoStop();
-    if (AppAcqIsRunning() == 0U) { osDelay(APP_ACQ_IDLE_DELAY_MS); continue; }
+    {
+      AcqConfig_t cfg; AcqConfig_GetCopy(&cfg);
+      if ((AppAcqIsRunning() == 0U) || (cfg.aht20.enabled == 0U)) { osDelay(APP_ACQ_IDLE_DELAY_MS); continue; }
+    }
 
     osMutexAcquire(i2c1_mutex, osWaitForever);
     HAL_StatusTypeDef tr = AHT20_TriggerMeasure();
@@ -3003,15 +2985,12 @@ void StartLis2mdlTask(void *argument)
 {
   (void)argument;
 
+  /* en 即时生效:LIS2MDL 一律初始化(无论 enabled);使能由主循环每轮门控。开机按当前
+   * 配置 odr 初始化(改 odr 在 acq_start 经 AppApplySensorConfig 重配)。 */
   uint16_t odr;
   {
     AcqConfig_t acfg;
     AcqConfig_GetCopy(&acfg);
-    if (acfg.lis2mdl.enabled == 0U)
-    {
-      printf("[LIS2MDL] disabled by config, task idle\r\n");
-      for (;;) { osDelay(1000U); }
-    }
     odr = acfg.lis2mdl.odr_hz;
   }
 
@@ -3034,7 +3013,10 @@ void StartLis2mdlTask(void *argument)
   for (;;)
   {
     AppAcqCheckAutoStop();
-    if (AppAcqIsRunning() == 0U) { dt_valid = 0U; osDelay(APP_ACQ_IDLE_DELAY_MS); continue; }
+    {
+      AcqConfig_t cfg; AcqConfig_GetCopy(&cfg);
+      if ((AppAcqIsRunning() == 0U) || (cfg.lis2mdl.enabled == 0U)) { dt_valid = 0U; osDelay(APP_ACQ_IDLE_DELAY_MS); continue; }
+    }
 
     /* DRDY 硬件节拍（不靠 tick 计时）；20ms 超时自愈。 */
     osStatus_t sem_st = osOK;
