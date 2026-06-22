@@ -83,6 +83,7 @@ extern void AppAssertReset(void);
 #define configMINIMAL_STACK_SIZE                 ((uint16_t)128)
 #define configTOTAL_HEAP_SIZE                    ((size_t)65536)  /* 64KB：容纳各任务栈扩容后的总需求 */
 #define configCHECK_FOR_STACK_OVERFLOW           2               /* 任务切换时检查栈水位 */
+#define configUSE_MALLOC_FAILED_HOOK             1               /* heap 耗尽时回调 vApplicationMallocFailedHook(打印+复位) (M6) */
 #define configSTACK_ALLOCATION_FROM_SEPARATE_HEAP 0
 #define configMAX_TASK_NAME_LEN                  ( 16 )
 #define configGENERATE_RUN_TIME_STATS            1

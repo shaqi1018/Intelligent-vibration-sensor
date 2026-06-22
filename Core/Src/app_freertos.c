@@ -171,7 +171,12 @@ static AppRingBuffer_t g_ring_h3_acc;
 static AppRingBuffer_t g_ring_aht_env;
 static AppRingBuffer_t g_ring_mag;
 static uint8_t s_mic_ringbuf[APP_RING_MIC_SIZE];
-AppRingBuffer_t g_ring_mic;                     /* 非 static：mic_capture.c extern 引用 */
+/* SPSC ring: single producer = SAI DMA ISR (AppRing_WriteMic); single ACTIVE
+ * consumer at a time, guaranteed by sink mutual-exclusion (USB stream XOR SD
+ * logger drain — never both at once). Do NOT add a second concurrent consumer
+ * without a real lock: PeekContiguous/Consume vs LoggerDrainRing would race the
+ * SPSC indices and corrupt audio (L9). 非 static：mic_capture.c extern 引用。 */
+AppRingBuffer_t g_ring_mic;
 static volatile uint32_t g_lsm_frame_id_counter;
 static volatile uint32_t g_qma_frame_id_counter;
 static volatile uint32_t g_h3_frame_id_counter;
@@ -279,7 +284,7 @@ osThreadId_t usbUploadTaskHandle;
 const osThreadAttr_t usbUploadTask_attributes = {
   .name = "usbUploadTask",
   .priority = (osPriority_t)osPriorityNormal,
-  .stack_size = 1024 * 4
+  .stack_size = 256 * 4  /* 1KB — idle shell (only osDelay); shrunk from 4KB to free heap (L7) */
 };
 
 /* Private function prototypes -----------------------------------------------*/
@@ -377,11 +382,10 @@ void MX_FREERTOS_Init(void)
   i2c1_mutex     = osMutexNew(&i2c1_mutex_attr);
   i2c2_mutex     = osMutexNew(&i2c2_mutex_attr);
   UsbWcidApp_InitRtos();   /* 串行化 0x85 响应端点（命令响应 + AHT + MAG 共用） */
-#if (APP_SENSOR_TEST_TARGET == APP_SENSOR_TEST_NONE) || \
-    (APP_SENSOR_TEST_TARGET == APP_SENSOR_TEST_H3LIS100DL) || \
-    (APP_SENSOR_TEST_TARGET == APP_SENSOR_TEST_QMA6100P)
+  /* Always create spi2_mutex (was guarded by a test-target #if). The QMA/H3
+   * SPI2 acquire sites have no NULL guard, so unconditional creation avoids a
+   * silent osMutexAcquire(NULL) = no protection in any build (L3). */
   spi2_mutex = osMutexNew(&spi2_mutex_attr);
-#endif
   /* USER CODE END RTOS_MUTEX */
 
   /* USER CODE BEGIN RTOS_SEMAPHORES */
@@ -435,6 +439,8 @@ void MX_FREERTOS_Init(void)
   printf("[RTOS] micTask created: %s\r\n", (micTaskHandle != NULL) ? "ok" : "FAILED");
   printf("[RTOS] usbCdcTask created: %s\r\n", (usbCdcTaskHandle != NULL) ? "ok" : "FAILED");
   printf("[RTOS] usbUploadTask created: %s\r\n", (usbUploadTaskHandle != NULL) ? "ok" : "FAILED");
+  printf("[RTOS] aht20Task created: %s\r\n", (aht20TaskHandle != NULL) ? "ok" : "FAILED");
+  printf("[RTOS] lis2mdlTask created: %s\r\n", (lis2mdlTaskHandle != NULL) ? "ok" : "FAILED");
 #endif
   /* UserCtrl task: button polling + LED + power-off.
    * Priority AboveNormal (= sensor tasks) so the power button is still polled
@@ -446,7 +452,10 @@ void MX_FREERTOS_Init(void)
     .priority   = (osPriority_t)osPriorityAboveNormal,
     .stack_size = 512 * 4
   };
-  osThreadNew(StartUserCtrlTask, NULL, &userCtrlTask_attributes);
+  if (osThreadNew(StartUserCtrlTask, NULL, &userCtrlTask_attributes) == NULL)
+  {
+    printf("[RTOS] userCtrlTask created: FAILED\r\n");
+  }
   /* USER CODE END RTOS_THREADS */
 
   /* USER CODE BEGIN RTOS_EVENTS */
@@ -2093,11 +2102,18 @@ void StartUsbCdcTask(void *argument)
       }
     }
   }
+
+  /* Non-WCID boot modes skip the block above and fall through here. A FreeRTOS
+   * task must never return — it would hit prvTaskExitError → configASSERT →
+   * (with H2) a system reset / boot loop. Terminate this task cleanly (L6). */
+  osThreadExit();
 }
 
 void StartUsbUploadTask(void *argument)
 {
-  /* CDC removed — in WCID mode sensors write directly via UsbWcidApp_SendCsv. */
+  /* CDC removed — in WCID mode sensors write directly via UsbWcidApp_SendCsv.
+   * Idle shell kept only so the handle/diag stays valid; stack shrunk to 1KB
+   * (was 4KB) since it does nothing but sleep (L7). */
   (void)argument;
   for (;;) { osDelay(10000U); }
 }
@@ -3471,6 +3487,18 @@ void AppI2c2Lock(void)
 void AppI2c2Unlock(void)
 {
   if (i2c2_mutex != NULL) { (void)osMutexRelease(i2c2_mutex); }
+}
+
+/* FreeRTOS malloc-failed hook — called when pvPortMalloc (task/queue/mutex
+ * creation, or any heap_4 allocation) returns NULL because the 64KB heap is
+ * exhausted. Print then reset so an OOM self-recovers instead of silently
+ * leaving a half-initialised system (M6). */
+void vApplicationMallocFailedHook(void)
+{
+  printf("[FATAL] malloc failed (FreeRTOS heap exhausted)\r\n");
+  taskDISABLE_INTERRUPTS();
+  NVIC_SystemReset();
+  for (;;) {}
 }
 
 /* FreeRTOS stack-overflow hook — called when configCHECK_FOR_STACK_OVERFLOW≥1
