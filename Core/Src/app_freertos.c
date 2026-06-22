@@ -220,7 +220,7 @@ static const osMutexAttr_t i2c2_mutex_attr = {
 /* USER CODE END Variables */
 
 /* ======================== Sensor threads ================================== */
-osThreadId_t lsm6dsoxTaskHandle;
+volatile osThreadId_t lsm6dsoxTaskHandle;   /* volatile: nulled by the task on init-fail, read by diag (L1) */
 const osThreadAttr_t lsm6dsoxTask_attributes = {
   .name = "lsm6dsoxTask",
   /* High（> logger 的 AboveNormal）：6664Hz 硬件 FIFO 仅 ~38ms 余量，必须能抢占
@@ -231,14 +231,14 @@ const osThreadAttr_t lsm6dsoxTask_attributes = {
   .stack_size = 2048 * 4  /* 8KB — holds fifo_buf (1.8KB) + locals */
 };
 
-osThreadId_t qma6100pTaskHandle;
+volatile osThreadId_t qma6100pTaskHandle;   /* volatile: nulled by the task on init-fail, read by diag (L1) */
 const osThreadAttr_t qma6100pTask_attributes = {
   .name = "qma6100pTask",
   .priority = (osPriority_t)osPriorityAboveNormal,
   .stack_size = 2048 * 4  /* 8KB — fifo_buf(static)+rowbuf+局部变量；4KB曾导致栈溢出破坏frame_id计数器 */
 };
 
-osThreadId_t h3lis100dlTaskHandle;
+volatile osThreadId_t h3lis100dlTaskHandle;   /* volatile: nulled by the task on init-fail, read by diag (L1) */
 const osThreadAttr_t h3lis100dlTask_attributes = {
   .name = "h3lis100dlTask",
   .priority = (osPriority_t)osPriorityHigh,   /* 提优先级：无FIFO+不锁存DRDY，满速时被LSM抢占会丢边沿；与LSM同High抢SPI2读 */
@@ -2095,8 +2095,15 @@ void StartUsbCdcTask(void *argument)
       if (s_wcid_cmd_pending != 0U)
       {
         char local_cmd[64];
+        /* s_wcid_cmd_buf is written by WcidCmdCallback in the OTG_FS ISR. Mask
+         * that ISR across the snapshot so a newly-arrived command cannot overwrite
+         * the buffer mid-copy and tear the command (L2). 64-byte copy → µs-scale.
+         * Save/restore the enable state so we never wrongly enable it. */
+        uint32_t otg_was_enabled = NVIC_GetEnableIRQ(OTG_FS_IRQn);
+        HAL_NVIC_DisableIRQ(OTG_FS_IRQn);
         s_wcid_cmd_pending = 0U;
         memcpy(local_cmd, s_wcid_cmd_buf, sizeof(local_cmd));
+        if (otg_was_enabled != 0U) { HAL_NVIC_EnableIRQ(OTG_FS_IRQn); }
         printf("[WCID] cmd: %s\r\n", local_cmd);
         UsbCmd_Process(local_cmd);
       }
@@ -2352,6 +2359,9 @@ void StartLsm6dsoxTask(void *argument)
   if (LSM6DSOX_Init() != HAL_OK)
   {
     printf("[LSM6DSOX] init failed, task exit\r\n");
+    /* Null the handle before self-terminating so AppPrintRuntimeDiag's
+     * osThreadGetStackSpace() reads NULL (→0) instead of the freed TCB (L1). */
+    lsm6dsoxTaskHandle = NULL;
     osThreadTerminate(NULL);
     return;
   }
@@ -2370,6 +2380,7 @@ void StartLsm6dsoxTask(void *argument)
     if (LSM6DSOX_FIFO_Config(256U, bdr, bdr) != HAL_OK)
     {
       printf("[LSM6DSOX] FIFO config failed, task exit\r\n");
+      lsm6dsoxTaskHandle = NULL;   /* avoid dangling handle in diag (L1) */
       osThreadTerminate(NULL);
       return;
     }
@@ -2604,6 +2615,7 @@ void StartH3lis100dlTask(void *argument)
   if (init_ret != 0)
   {
     printf("[H3LIS100DL] init failed, task exit\r\n");
+    h3lis100dlTaskHandle = NULL;   /* avoid dangling handle in diag (L1) */
     osThreadTerminate(NULL);
     return;
   }
@@ -2725,6 +2737,7 @@ void StartQma6100pTask(void *argument)
   {
     osMutexRelease(spi2_mutex);
     printf("[QMA6100P] init failed, task exit\r\n");
+    qma6100pTaskHandle = NULL;   /* avoid dangling handle in diag (L1) */
     osThreadTerminate(NULL);
     return;
   }
@@ -2772,6 +2785,7 @@ void StartQma6100pTask(void *argument)
   {
     osMutexRelease(spi2_mutex);
     printf("[QMA6100P] FIFO config failed, task exit\r\n");
+    qma6100pTaskHandle = NULL;   /* avoid dangling handle in diag (L1) */
     osThreadTerminate(NULL);
     return;
   }
@@ -3118,6 +3132,20 @@ void StartMicTask(void *argument)
     uint8_t want = (uint8_t)(AppAcqIsRunning() != 0U);
     AcqConfig_t cfg; AcqConfig_GetCopy(&cfg);
     want = (uint8_t)(want && cfg.es8311.enabled);
+
+    /* SAI DMA error (FIFO over/underrun, bus error) silently kills capture —
+     * HAL_SAI_ErrorCallback flags it. Tear down so the branch below restarts
+     * from scratch this iteration; the 50ms backoff bounds an error storm (L5). */
+    if (running && (Mic_SaiErrorPending() != 0U))
+    {
+      printf("[Mic] SAI error 0x%lX — restarting capture\r\n",
+             (unsigned long)Mic_SaiErrorCode());
+      Mic_Stop();
+      running = 0U;
+      s_mic_capturing = 0U;
+      Mic_ClearSaiError();
+      osDelay(50U);
+    }
 
     if (want && !running)
     {

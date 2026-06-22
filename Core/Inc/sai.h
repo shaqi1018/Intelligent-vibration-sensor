@@ -8,10 +8,11 @@
  *
  * Pins (confirmed in plan Task0 Step1, reconfirm AF against the STM32U575
  * datasheet alternate-function table during bench bring-up):
- *   SAI1_MCLK_A = PB8  (AF3)   -> ES8311 MCLK
+ *   SAI1_MCLK_A = PB8  (AF13)  -> ES8311 MCLK
  *   SAI1_SCK_A  = PA8  (AF13)  -> ES8311 SCLK (BCLK)
- *   SAI1_FS_A   = PB9  (AF3)   -> ES8311 LRCK
+ *   SAI1_FS_A   = PB9  (AF13)  -> ES8311 LRCK
  *   SAI1_SD_A   = PC3  (AF13)  -> ES8311 ASDOUT (data in)
+ *   (all four are AF13 — the AF3 value here previously caused the silent-mic bug)
  */
 
 extern SAI_HandleTypeDef hsai_BlockA1;

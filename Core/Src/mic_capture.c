@@ -16,6 +16,8 @@
 static int16_t s_dma_buf[MIC_DMA_HALF_SAMPLES * 2U];
 static int16_t s_mono_buf[MIC_MONO_HALF];
 static volatile uint32_t s_dropped = 0U;
+static volatile uint8_t  s_sai_error = 0U;       /* 由 HAL_SAI_ErrorCallback 置位 (L5) */
+static volatile uint32_t s_sai_error_code = 0U;  /* 故障时的 HAL ErrorCode 快照 */
 
 /* 由 app_freertos.c 暴露（写 g_ring_mic，SPSC 生产者侧）。
  * Task 6 之前为未解析 extern —— 这是文档化的跨任务接口，不是占位。 */
@@ -45,6 +47,23 @@ void HAL_SAI_RxCpltCallback(SAI_HandleTypeDef *hsai)
   (void)hsai;
   mic_push(&s_dma_buf[MIC_DMA_HALF_SAMPLES], MIC_DMA_HALF_SAMPLES);
 }
+
+/* SAI DMA 错误(FIFO 上/下溢、传输错误)回调。HAL 默认是 __weak 空实现，会让采集静默
+ * 死掉。这里记录 ErrorCode 并置标志，由 StartMicTask 轮询 Mic_SaiErrorPending() 后
+ * 停采+重启(L5)。运行于 GPDMA1_Channel4 / SAI ISR 上下文，只做置位，不碰总线。 */
+void HAL_SAI_ErrorCallback(SAI_HandleTypeDef *hsai)
+{
+  s_sai_error_code = hsai->ErrorCode;
+  s_sai_error = 1U;
+  /* OVRUDR is not cleared by HAL and DMA keeps running, so the flag would
+   * re-assert ~per-sample until StartMicTask reacts. Mask SAI1_IRQn now to avoid
+   * an interrupt storm in that window; Mic_Start→MspInit re-enables it (L5). */
+  HAL_NVIC_DisableIRQ(SAI1_IRQn);
+}
+
+uint8_t  Mic_SaiErrorPending(void) { return s_sai_error; }
+uint32_t Mic_SaiErrorCode(void)    { return s_sai_error_code; }
+void     Mic_ClearSaiError(void)   { s_sai_error = 0U; }
 
 int Mic_Start(uint32_t sample_rate_hz, uint16_t gain_db)
 {

@@ -19,4 +19,11 @@ void     Mic_Stop(void);
 /* ring 溢出累计字节数（诊断用）。 */
 uint32_t Mic_GetDropped(void);
 
+/* SAI DMA 错误自恢复(L5)：HAL_SAI_ErrorCallback 置位，StartMicTask 轮询后停采+重启。
+ * Mic_SaiErrorPending 返回是否有未处理错误；Mic_SaiErrorCode 取 HAL ErrorCode 快照；
+ * Mic_ClearSaiError 在重启后清除标志。 */
+uint8_t  Mic_SaiErrorPending(void);
+uint32_t Mic_SaiErrorCode(void);
+void     Mic_ClearSaiError(void);
+
 #endif /* MIC_CAPTURE_H */

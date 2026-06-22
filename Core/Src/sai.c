@@ -160,6 +160,14 @@ void HAL_SAI_MspInit(SAI_HandleTypeDef *hsai)
   /* Priority 6: below SDMMC, leaves headroom for higher-priority IRQs. */
   HAL_NVIC_SetPriority(GPDMA1_Channel4_IRQn, 6, 0);
   HAL_NVIC_EnableIRQ(GPDMA1_Channel4_IRQn);
+
+  /* SAI1 peripheral IRQ: services SAI-side faults (FIFO over/underrun OVRUDR,
+   * wrong-clock config) so they reach HAL_SAI_ErrorCallback. The GPDMA channel
+   * IRQ above only catches DMA bus errors — without this, a SAI FIFO overrun
+   * would silently stall capture (L5). Same priority band as the SAI DMA
+   * channel; SAI1_IRQHandler only flags, it calls no RTOS API. */
+  HAL_NVIC_SetPriority(SAI1_IRQn, 6, 0);
+  HAL_NVIC_EnableIRQ(SAI1_IRQn);
 }
 
 void HAL_SAI_MspDeInit(SAI_HandleTypeDef *hsai)
@@ -170,6 +178,7 @@ void HAL_SAI_MspDeInit(SAI_HandleTypeDef *hsai)
   }
 
   HAL_NVIC_DisableIRQ(GPDMA1_Channel4_IRQn);
+  HAL_NVIC_DisableIRQ(SAI1_IRQn);
   if (hsai->hdmarx != NULL)
   {
     (void)HAL_DMA_DeInit(hsai->hdmarx);

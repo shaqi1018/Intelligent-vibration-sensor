@@ -303,6 +303,15 @@ void GPDMA1_Channel4_IRQHandler(void)
   HAL_DMA_IRQHandler(&handle_GPDMA1_Channel_SAI);
 }
 
+/**
+  * @brief This function handles SAI1 global interrupt — SAI-side faults
+  *        (FIFO over/underrun) reach HAL_SAI_ErrorCallback for mic self-recovery.
+  */
+void SAI1_IRQHandler(void)
+{
+  HAL_SAI_IRQHandler(&hsai_BlockA1);
+}
+
 /* USER CODE BEGIN 1 */
 
 /* USER CODE END 1 */
