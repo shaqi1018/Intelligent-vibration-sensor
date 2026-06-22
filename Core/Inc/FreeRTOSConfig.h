@@ -54,6 +54,12 @@ extern uint32_t SystemCoreClock;
 /* USER CODE BEGIN 0 */
 extern void configureTimerForRunTimeStats(void);
 extern unsigned long getRunTimeCounterValue(void);
+/* configASSERT() failure handler — defined in app_freertos.c. Declared here in
+ * the compiler-only block so it is visible at every configASSERT expansion site,
+ * including the FreeRTOS kernel sources (tasks.c / queue.c / timers.c / ...)
+ * which do NOT include the CMSIS core header and therefore cannot see the
+ * __STATIC_INLINE NVIC_SystemReset() directly. */
+extern void AppAssertReset(void);
 /* USER CODE END 0 */
 #endif
 #ifndef CMSIS_device_header
@@ -162,7 +168,12 @@ See http://www.FreeRTOS.org/RTOS-Cortex-M3-M4.html. */
 /* Normal assert() semantics without relying on the provision of an assert.h
 header file. */
 /* USER CODE BEGIN 1 */
-#define configASSERT( x ) if ((x) == 0) {taskDISABLE_INTERRUPTS(); for( ;; );}
+/* Self-recover on assertion failure instead of freezing forever (for(;;)).
+ * Routes to AppAssertReset() (defined in app_freertos.c) rather than calling
+ * NVIC_SystemReset() directly: the kernel translation units that expand
+ * configASSERT do not include the CMSIS core header, so NVIC_SystemReset() is
+ * not in scope here. Pairs with the planned IWDG watchdog. */
+#define configASSERT( x ) if ((x) == 0) {taskDISABLE_INTERRUPTS(); AppAssertReset();}
 /* USER CODE END 1 */
 
 #define SysTick_Handler xPortSysTickHandler

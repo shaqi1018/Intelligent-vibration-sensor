@@ -377,6 +377,10 @@ void Error_Handler(void)
   /* USER CODE BEGIN Error_Handler_Debug */
   /* User can add his own implementation to report the HAL error return state */
   __disable_irq();
+  /* Self-recover instead of freezing forever. Error_Handler can fire very early
+   * (clock / HAL init failure) when USART1 is not yet up, so reset without
+   * printing to avoid blocking on an unconfigured UART. */
+  NVIC_SystemReset();
   while (1)
   {
   }

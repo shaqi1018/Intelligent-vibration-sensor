@@ -620,6 +620,10 @@ static uint8_t  USBD_WCID_STREAMING_DeInit(USBD_HandleTypeDef *pdev, uint8_t cfg
 static uint8_t  USBD_WCID_STREAMING_SOF(USBD_HandleTypeDef *pdev)
 {
   uint8_t i;
+  /* pClassData is NULL until the host configures the device (battery boot), or
+   * a SOF can arrive mid-unplug after DeInit nulls it. Nothing to stream then —
+   * return OK (not an error) instead of dereferencing a NULL handle. */
+  if ((pdev == NULL) || (pdev->pClassData == NULL)) { return 0U; }
   __IO uint32_t *TX_States = ((USBD_WCID_STREAMING_HandleTypeDef *)(pdev->pClassData))->TXStates;
   __IO uint8_t *TxBuffStatus = ((USBD_WCID_STREAMING_HandleTypeDef *)(pdev->pClassData))->TxBuffStatus;
   uint8_t **TxBuffer = ((USBD_WCID_STREAMING_HandleTypeDef *)(pdev->pClassData))->TxBuffer;
@@ -851,19 +855,16 @@ static uint8_t  USBD_WCID_STREAMING_DataIn(USBD_HandleTypeDef *pdev, uint8_t epn
   */
 static uint8_t  USBD_WCID_STREAMING_DataOut(USBD_HandleTypeDef *pdev, uint8_t epnum)
 {
+  /* Guard before any dereference: pClassData is NULL on an OUT completion that
+   * races device DeInit (host close / cable unplug). The original code read
+   * hwcid->RxLength before this NULL check — moved the guard ahead of it. */
+  if ((pdev == NULL) || (pdev->pClassData == NULL)) { return 1U; }
   USBD_WCID_STREAMING_HandleTypeDef   *hwcid = (USBD_WCID_STREAMING_HandleTypeDef *) pdev->pClassData;
   /* Get the received data length */
   hwcid->RxLength = USBD_LL_GetRxDataSize(pdev, epnum);
-  if (pdev->pClassData != NULL)
-  {
-    ((USBD_WCID_STREAMING_ItfTypeDef *)pdev->pUserData[0])->Receive(hwcid->RxBuffer, hwcid->RxLength);
-    (void)USBD_WCID_STREAMING_ReceivePacket(pdev);
-    return 0;   /* USBD_OK */
-  }
-  else
-  {
-    return 1;   /* USBD_FAIL */
-  }
+  ((USBD_WCID_STREAMING_ItfTypeDef *)pdev->pUserData[0])->Receive(hwcid->RxBuffer, hwcid->RxLength);
+  (void)USBD_WCID_STREAMING_ReceivePacket(pdev);
+  return 0;   /* USBD_OK */
 }
 
 /**
@@ -1242,6 +1243,7 @@ uint8_t USBD_WCID_STREAMING_FillTxDataBuffer(USBD_HandleTypeDef *pdev, uint8_t c
   */
 uint8_t USBD_WCID_STREAMING_CleanTxDataBuffer(USBD_HandleTypeDef *pdev, uint8_t ch_number)
 {
+  if ((pdev == NULL) || (pdev->pClassData == NULL)) { return 1U; }
   USBD_WCID_STREAMING_HandleTypeDef *hwcid = (USBD_WCID_STREAMING_HandleTypeDef *) pdev->pClassData;
   __IO uint8_t *TxBuffReset = hwcid->TxBuffReset;
   TxBuffReset[ch_number] = 1;
@@ -1260,6 +1262,7 @@ uint8_t USBD_WCID_STREAMING_CleanTxDataBuffer(USBD_HandleTypeDef *pdev, uint8_t 
   */
 uint8_t USBD_WCID_STREAMING_SetTxDataBuffer(USBD_HandleTypeDef *pdev, uint8_t ch_number, uint8_t *ptr, uint16_t size)
 {
+  if ((pdev == NULL) || (pdev->pClassData == NULL)) { return 1U; }
   USBD_WCID_STREAMING_HandleTypeDef *hwcid = (USBD_WCID_STREAMING_HandleTypeDef *) pdev->pClassData;
   uint8_t **TxBuffer = hwcid->TxBuffer;
   uint32_t *TxBuffIdx = hwcid->TxBuffIdx;

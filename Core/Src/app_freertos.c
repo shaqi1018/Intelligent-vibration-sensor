@@ -3438,6 +3438,16 @@ void StartLoggerTask(void *argument)
     osDelay(10U);
   }
 }
+/* configASSERT() failure handler (declared extern in FreeRTOSConfig.h). The
+ * macro has already disabled interrupts; reset the MCU so a failed assertion
+ * self-recovers instead of freezing forever. Kept tiny and printf-free because
+ * it may run from any context with interrupts masked. */
+void AppAssertReset(void)
+{
+  NVIC_SystemReset();
+  for (;;) {}
+}
+
 /* FreeRTOS stack-overflow hook — called when configCHECK_FOR_STACK_OVERFLOW≥1
  * detects a task has overrun its stack. Prints the offending task name and
  * halts so the fault is visible on the debug console. */
@@ -3446,6 +3456,9 @@ void vApplicationStackOverflowHook(TaskHandle_t xTask, char *pcTaskName)
   (void)xTask;
   printf("[FATAL] stack overflow in task: %s\r\n", pcTaskName);
   taskDISABLE_INTERRUPTS();
+  /* Self-recover instead of freezing forever — restart the system after the
+   * offending task name has been emitted. Pairs with the planned IWDG watchdog. */
+  NVIC_SystemReset();
   for (;;) {}
 }
 /* USER CODE END Application */

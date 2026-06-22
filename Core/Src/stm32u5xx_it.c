@@ -74,10 +74,16 @@ static void FaultPrintHex(const char *label, uint32_t v)
 }
 
 /* Decode the exception stack frame of the faulting task (FreeRTOS tasks run on
- * PSP). sp[6] = PC of the faulting instruction — look it up in SensorProj.map. */
-void HardFault_ReportC(uint32_t *sp)
+ * PSP). sp[6] = PC of the faulting instruction — look it up in SensorProj.map.
+ * After the forensic dump is flushed we issue a system reset so a fault no
+ * longer freezes the device forever (self-recovery; will pair with the planned
+ * IWDG watchdog). HAL_UART_Transmit polls to TC, so every byte is shifted out
+ * before NVIC_SystemReset() takes effect. */
+static void FaultDumpAndReset(uint32_t *sp, const char *title)
 {
-  FaultPrint("\r\n*** HARDFAULT ***\r\n");
+  FaultPrint("\r\n*** ");
+  FaultPrint(title);
+  FaultPrint(" ***\r\n");
   FaultPrintHex("R0  =0x", sp[0]);
   FaultPrintHex("R1  =0x", sp[1]);
   FaultPrintHex("R2  =0x", sp[2]);
@@ -89,7 +95,13 @@ void HardFault_ReportC(uint32_t *sp)
   FaultPrintHex("CFSR=0x", SCB->CFSR);
   FaultPrintHex("HFSR=0x", SCB->HFSR);
   FaultPrintHex("BFAR=0x", SCB->BFAR);
-  for (;;) { }
+  FaultPrint(">>> system reset\r\n");
+  NVIC_SystemReset();
+}
+
+void HardFault_ReportC(uint32_t *sp)
+{
+  FaultDumpAndReset(sp, "HARDFAULT");
 }
 /* USER CODE END 0 */
 
@@ -143,7 +155,7 @@ void HardFault_Handler(void)
 void MemManage_Handler(void)
 {
   /* USER CODE BEGIN MemoryManagement_IRQn 0 */
-  FaultPrint("\r\n*** MEMMANAGE FAULT ***\r\n");
+  FaultDumpAndReset((uint32_t *)__get_PSP(), "MEMMANAGE FAULT");
   /* USER CODE END MemoryManagement_IRQn 0 */
   while (1)
   {
@@ -158,7 +170,7 @@ void MemManage_Handler(void)
 void BusFault_Handler(void)
 {
   /* USER CODE BEGIN BusFault_IRQn 0 */
-  FaultPrint("\r\n*** BUSFAULT ***\r\n");
+  FaultDumpAndReset((uint32_t *)__get_PSP(), "BUSFAULT");
   /* USER CODE END BusFault_IRQn 0 */
   while (1)
   {
@@ -173,7 +185,7 @@ void BusFault_Handler(void)
 void UsageFault_Handler(void)
 {
   /* USER CODE BEGIN UsageFault_IRQn 0 */
-  FaultPrint("\r\n*** USAGEFAULT ***\r\n");
+  FaultDumpAndReset((uint32_t *)__get_PSP(), "USAGEFAULT");
   /* USER CODE END UsageFault_IRQn 0 */
   while (1)
   {
