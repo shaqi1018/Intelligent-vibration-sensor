@@ -124,6 +124,27 @@ void UsbWcidApp_SetCmdHandler(UsbWcidApp_CmdHandler handler)
 
 static uint8_t  s_resp_buf[1024];
 static uint32_t s_resp_len;
+
+/* 0x85 response writer retry budget: a prior bulk-IN can be in-flight up to one
+ * ~1ms FS frame; retry a few times with a 1ms yield before giving up (M4). */
+#define APP_WCID_WRITE_ATTEMPTS  5U
+
+/* Core 0x85 send with yield-retry. Caller MUST hold s_resp_mutex (or be in the
+ * pre-scheduler single-context phase). Retries so a transient in-flight transfer
+ * doesn't drop the line; the USB ISR clears s_resp_busy independently of the
+ * mutex, so the yield always makes progress (no deadlock). */
+static uint8_t WcidWriteLocked(const uint8_t *buf, uint32_t len)
+{
+  uint8_t r = 1U;
+  for (uint32_t attempt = 0U; attempt < APP_WCID_WRITE_ATTEMPTS; attempt++)
+  {
+    r = USBD_WCID_STREAMING_SendResponse(s_pdev, buf, (uint16_t)len);
+    if (r == 0U) { break; }
+    if ((attempt + 1U) < APP_WCID_WRITE_ATTEMPTS) { osDelay(1U); }  /* no sleep after the last try */
+  }
+  return r;
+}
+
 void UsbWcidApp_RespReset(void)  { s_resp_len = 0U; }
 void UsbWcidApp_RespAppend(const uint8_t *buf, uint32_t len)
 {
@@ -134,7 +155,25 @@ void UsbWcidApp_RespAppend(const uint8_t *buf, uint32_t len)
 uint8_t UsbWcidApp_RespSend(void)
 {
   if (s_resp_len == 0U) { return 0U; }
-  uint8_t r = UsbWcidApp_Write(s_resp_buf, s_resp_len);
+  /* Send the accumulated response in <=64B (one max-packet) chunks so an
+   * arbitrarily long multi-line response is never silently truncated by
+   * SendResponse's staging-buffer cap. Hold s_resp_mutex across the WHOLE loop
+   * so a concurrent AHT/MAG line can't splice into the middle of the response;
+   * chunks call the unlocked core (re-locking per chunk would not be atomic, and
+   * calling UsbWcidApp_Write would deadlock the non-recursive mutex). The 0x85
+   * stream is newline-framed, so byte-boundary chunking is transparent (M5). */
+  uint8_t r = 0U;
+  uint32_t off = 0U;
+  if (s_resp_mutex != NULL) { (void)osMutexAcquire(s_resp_mutex, osWaitForever); }
+  while (off < s_resp_len)
+  {
+    uint32_t chunk = s_resp_len - off;
+    if (chunk > 64U) { chunk = 64U; }
+    r = WcidWriteLocked(&s_resp_buf[off], chunk);
+    if (r != 0U) { break; }   /* persistent EP-busy: stop, drop remainder */
+    off += chunk;
+  }
+  if (s_resp_mutex != NULL) { (void)osMutexRelease(s_resp_mutex); }
   s_resp_len = 0U;
   return r;
 }
@@ -147,12 +186,10 @@ uint8_t UsbWcidApp_Write(const uint8_t *buf, uint32_t len)
 
   /* Serialize all 0x85 writers (cmd task + AHT + MAG). The mutex is created in
    * MX_FREERTOS_Init; before that (enumeration) it is NULL -> single-context,
-   * no-lock fallback. SendResponse busy-waits for the prior USB transfer with
-   * the lock held; the USB ISR (higher priority than any task) clears the busy
-   * flag regardless of the lock, so this cannot deadlock. */
+   * no-lock fallback. Always called from task context (never an ISR). */
   uint8_t r;
   if (s_resp_mutex != NULL) { (void)osMutexAcquire(s_resp_mutex, osWaitForever); }
-  r = USBD_WCID_STREAMING_SendResponse(s_pdev, buf, (uint16_t)len);
+  r = WcidWriteLocked(buf, len);
   if (s_resp_mutex != NULL) { (void)osMutexRelease(s_resp_mutex); }
   return r;
 }

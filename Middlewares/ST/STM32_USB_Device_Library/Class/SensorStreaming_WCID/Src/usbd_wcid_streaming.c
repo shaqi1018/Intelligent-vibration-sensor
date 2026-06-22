@@ -76,7 +76,9 @@ static uint8_t *USBD_WCID_STREAMING_GetUsrStrDescriptor(USBD_HandleTypeDef *pdev
 static uint8_t USBD_WCID_STREAMING_SetTxBuffer(USBD_HandleTypeDef   *pdev, uint8_t  *pbuff, uint16_t length);
 
 static volatile uint8_t s_resp_busy = 0U;
-static uint8_t          s_resp_ep_buf[64U];
+/* 128B (> the 64B max-packet): a >64B line (e.g. a long acq_status) is sent as a
+ * multi-packet bulk IN instead of being silently truncated to 64B (M5). */
+static uint8_t          s_resp_ep_buf[128U];
 static USBD_StatusTypeDef USBD_WCID_STREAMING_TransmitPacket(USBD_HandleTypeDef *pdev, uint8_t epNumber);
 static USBD_StatusTypeDef USBD_WCID_STREAMING_ReceivePacket(USBD_HandleTypeDef *pdev);
 static USBD_StatusTypeDef  USBD_VendDevReq(USBD_HandleTypeDef *pdev, USBD_SetupReqTypedef *req);
@@ -1328,13 +1330,17 @@ uint8_t USBD_WCID_STREAMING_SendResponse(USBD_HandleTypeDef *pdev, const uint8_t
   if (len == 0U) { return 0U; }
   if (len > (uint16_t)sizeof(s_resp_ep_buf)) { len = (uint16_t)sizeof(s_resp_ep_buf); }
 
-  /* Spin-wait for previous transfer (completes in <1ms on FS USB). */
+  /* Fast pre-check only: if the previous 0x85 transfer is still in-flight, return
+   * 1 immediately so the caller (UsbWcidApp_Write) can yield and retry — busy-
+   * waiting the full ~1ms frame here would block the shared response mutex (M4). */
   uint32_t t = 5000U;
   while ((s_resp_busy != 0U) && (t-- != 0U)) {}
   if (s_resp_busy != 0U) { return 1U; }
 
   memcpy(s_resp_ep_buf, buf, len);
   s_resp_busy = 1U;
+  /* len may exceed the 64B max-packet size; USBD_LL_Transmit sends it as a
+   * multi-packet bulk IN and DataIn fires once at completion (clears s_resp_busy). */
   (void)USBD_LL_Transmit(pdev, DATA_IN_EP_RESP, s_resp_ep_buf, len);
   return 0U;
 }
