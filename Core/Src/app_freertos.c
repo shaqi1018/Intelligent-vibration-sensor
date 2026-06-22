@@ -51,6 +51,7 @@
 #include "user_ctrl.h"
 #include "board_io.h"
 #include "app_time.h"
+#include "app_locks.h"
 #include "rtc_pcf85063.h"
 #include "i2c.h"
 #include "mic_capture.h"
@@ -98,6 +99,7 @@ static osSemaphoreId_t s_qma_fifo_sem;  /* released by EXTI4 ISR on PC4 rising e
 static osSemaphoreId_t s_h3_drdy_sem;   /* released by EXTI1 ISR on PA1 rising edge (HW-v2) */
 static osSemaphoreId_t s_mag_drdy_sem;  /* released by EXTI13 ISR on PC13 rising edge (LIS2MDL DRDY) */
 static osMutexId_t     i2c1_mutex;      /* AHT20 + LIS2MDL 共享 I2C1 互斥 */
+static osMutexId_t     i2c2_mutex;      /* ES8311 codec + PCF85063 RTC 共享 I2C2 互斥 (M1) */
 static AppSensorSnapshot_t g_sensor_snapshot;
 
 typedef struct
@@ -205,6 +207,10 @@ static const osMutexAttr_t i2c1_mutex_attr = {
   .name      = "i2c1Mutex",
   .attr_bits = osMutexPrioInherit,
 };
+static const osMutexAttr_t i2c2_mutex_attr = {
+  .name      = "i2c2Mutex",
+  .attr_bits = osMutexPrioInherit,
+};
 
 /* USER CODE END Variables */
 
@@ -245,7 +251,7 @@ osThreadId_t micTaskHandle;
 const osThreadAttr_t micTask_attributes = {
   .name = "micTask",
   .priority = (osPriority_t)osPriorityAboveNormal,
-  .stack_size = 1024 * 1  /* 1KB — codec/SAI start-stop supervisor + small locals */
+  .stack_size = 1024 * 2  /* 2KB — codec/SAI start-stop supervisor; raised from 1KB for printf + Mic_Start deep call-chain margin (M3) */
 };
 
 osThreadId_t aht20TaskHandle;
@@ -369,6 +375,7 @@ void MX_FREERTOS_Init(void)
   frame_buffer_mutex = osMutexNew(&frame_buffer_mutex_attr);
   acq_ctrl_mutex = osMutexNew(&acq_ctrl_mutex_attr);
   i2c1_mutex     = osMutexNew(&i2c1_mutex_attr);
+  i2c2_mutex     = osMutexNew(&i2c2_mutex_attr);
   UsbWcidApp_InitRtos();   /* 串行化 0x85 响应端点（命令响应 + AHT + MAG 共用） */
 #if (APP_SENSOR_TEST_TARGET == APP_SENSOR_TEST_NONE) || \
     (APP_SENSOR_TEST_TARGET == APP_SENSOR_TEST_H3LIS100DL) || \
@@ -1927,7 +1934,12 @@ static void UsbCmd_Process(const char *cmd)
         Pcf85063_Time_t t;
         t.year = (uint8_t)yr;  t.month  = (uint8_t)mo; t.day    = (uint8_t)dy;
         t.hour = (uint8_t)hr;  t.minute = (uint8_t)mn; t.second = (uint8_t)sc;
-        if (Pcf85063_SetTime(&t) == PCF85063_OK)
+        /* Lock only the RTC write here; AppTime_Sync() below self-locks I2C2, so
+         * wrapping it too would double-lock the non-recursive mutex (M1). */
+        AppI2c2Lock();
+        uint8_t _set_ok = (Pcf85063_SetTime(&t) == PCF85063_OK);
+        AppI2c2Unlock();
+        if (_set_ok)
         {
           AppTime_Sync();
           char _line[48];
@@ -3446,6 +3458,19 @@ void AppAssertReset(void)
 {
   NVIC_SystemReset();
   for (;;) {}
+}
+
+/* I2C2 bus lock (ES8311 codec + PCF85063 RTC share the bus). Sequence-level:
+ * callers hold it across a whole codec register sequence or a whole RTC read so
+ * the two never interleave on the wire (M1). NULL-safe before the mutex is
+ * created (early boot) — acquire/release become no-ops. */
+void AppI2c2Lock(void)
+{
+  if (i2c2_mutex != NULL) { (void)osMutexAcquire(i2c2_mutex, osWaitForever); }
+}
+void AppI2c2Unlock(void)
+{
+  if (i2c2_mutex != NULL) { (void)osMutexRelease(i2c2_mutex); }
 }
 
 /* FreeRTOS stack-overflow hook — called when configCHECK_FOR_STACK_OVERFLOW≥1

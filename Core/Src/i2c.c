@@ -1,4 +1,5 @@
 #include "i2c.h"
+#include "app_locks.h"
 #include <stdio.h>
 
 I2C_HandleTypeDef hi2c2;
@@ -35,6 +36,10 @@ void MX_I2C2_Init(void)
   HAL_I2C_Init(&hi2c2);
 }
 
+/* I2C2 锁约定(M1)：本函数【不】自锁。它只在 Pcf85063_GetTime/SetTime 的失败重试
+ * 路径里被调用，而那两个函数总是在已持有 i2c2_mutex 的上下文中运行(AppTime_Sync /
+ * set_time 命令)。若在此再 AppI2c2Lock 会对非递归锁造成递归双锁 → 死锁。故调用者
+ * 必须已持锁；本函数依赖调用者的锁完成串行化。 */
 void I2C2_BusRecover(void)
 {
   /* 简单恢复:DeInit + Init,重置 MCU I2C 外设与句柄。
@@ -43,10 +48,14 @@ void I2C2_BusRecover(void)
   MX_I2C2_Init();
 }
 
-/* 探测 RTC(0x51) 是否在 I2C2 上应答。返回 1=应答(硬件OK),0=无应答。 */
+/* 探测 RTC(0x51) 是否在 I2C2 上应答。返回 1=应答(硬件OK),0=无应答。
+ * I2C2 与 ES8311 共享：经 i2c2_mutex 串行化，避免与 codec/RTC 事务在总线上交错(M1)。 */
 uint8_t I2C2_ProbeRtc(void)
 {
-  return (HAL_I2C_IsDeviceReady(&hi2c2, (0x51U << 1U), 3U, 100U) == HAL_OK) ? 1U : 0U;
+  AppI2c2Lock();
+  uint8_t ok = (HAL_I2C_IsDeviceReady(&hi2c2, (0x51U << 1U), 3U, 100U) == HAL_OK) ? 1U : 0U;
+  AppI2c2Unlock();
+  return ok;
 }
 
 /* PB6 = I2C1_SCL (AF4), PB3 = I2C1_SDA (AF4) —— 对应原理图 MCU pin 58/55。

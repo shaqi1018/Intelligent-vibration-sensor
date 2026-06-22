@@ -1,6 +1,7 @@
 #include "app_time.h"
 #include "rtc_pcf85063.h"
 #include "stm32u5xx_hal.h"
+#include "app_locks.h"
 
 /* DWT µs 读取（160MHz → 每 tick = 6.25ns，除以 160 得 µs） */
 static inline uint32_t DwtUs(void)
@@ -21,7 +22,13 @@ uint8_t AppTime_Sync(void)
   DWT->CTRL        |= DWT_CTRL_CYCCNTENA_Msk;
 
   Pcf85063_Time_t t;
-  if (Pcf85063_Init() != PCF85063_OK || Pcf85063_GetTime(&t) != PCF85063_OK)
+  /* I2C2 is shared with the ES8311 codec — serialize the whole RTC read so it
+   * never interleaves with a Mic_Start/Stop codec sequence (M1). && preserves
+   * the original short-circuit: GetTime is skipped if Init fails. */
+  AppI2c2Lock();
+  uint8_t rtc_ok = (Pcf85063_Init() == PCF85063_OK) && (Pcf85063_GetTime(&t) == PCF85063_OK);
+  AppI2c2Unlock();
+  if (rtc_ok == 0U)
   {
     /* RTC 不可达：以启动时间为基准，epoch_s=0 */
     s_anchor_epoch_s = 0U;
