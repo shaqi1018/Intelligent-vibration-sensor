@@ -70,7 +70,7 @@ static int8_t STORAGE_IsReady_FS(uint8_t lun)
 static int8_t STORAGE_IsWriteProtected_FS(uint8_t lun)
 {
   (void)lun;
-  return USBD_OK;
+  return 1;
 }
 
 static int8_t STORAGE_Read_FS(uint8_t lun, uint8_t *buf, uint32_t blk_addr, uint16_t blk_len)
@@ -86,13 +86,8 @@ static int8_t STORAGE_Read_FS(uint8_t lun, uint8_t *buf, uint32_t blk_addr, uint
 
 static int8_t STORAGE_Write_FS(uint8_t lun, uint8_t *buf, uint32_t blk_addr, uint16_t blk_len)
 {
-  (void)lun;
-  if (HAL_SD_WriteBlocks(&hsd1, buf, blk_addr, blk_len, 2000U) != HAL_OK)
-  {
-    return USBD_FAIL;
-  }
-  while (HAL_SD_GetCardState(&hsd1) != HAL_SD_CARD_TRANSFER) { }
-  return USBD_OK;
+  (void)lun; (void)buf; (void)blk_addr; (void)blk_len;
+  return USBD_FAIL;
 }
 
 static int8_t STORAGE_GetMaxLun_FS(void)

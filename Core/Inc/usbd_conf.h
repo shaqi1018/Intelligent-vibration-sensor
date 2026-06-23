@@ -17,7 +17,7 @@
 #define USBD_SELF_POWERED                     1U
 
 /* MSC class config */
-#define MSC_MEDIA_PACKET                      512U
+#define MSC_MEDIA_PACKET                      4096U
 
 /* malloc / free */
 #define USBD_malloc                           malloc
