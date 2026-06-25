@@ -144,7 +144,7 @@ void StartUserCtrlTask(void *argument)
     }
     else
     {
-      LED_Set(0U);
+      LED_Set(1U);  /* 空闲时熄灭(硬件 active-low:高电平=灭) */
     }
 
     osDelay(UC_POLL_MS);

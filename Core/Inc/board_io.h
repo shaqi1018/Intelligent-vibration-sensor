@@ -4,7 +4,7 @@
 #include "main.h"
 #include <stdint.h>
 
-/* LED: PB12, active-high */
+/* LED: PB12, active-low (硬件实测:低电平亮、高电平灭) */
 #define BOARD_LED_PIN           GPIO_PIN_12
 #define BOARD_LED_PORT          GPIOB
 
