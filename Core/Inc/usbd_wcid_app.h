@@ -62,6 +62,10 @@ uint8_t UsbWcidApp_RespSend(void);
  * single response buffer inside USBD_WCID_STREAMING_SendResponse. */
 uint8_t UsbWcidApp_Write(const uint8_t *buf, uint32_t len);
 
+/* 1 = USB 主机已连接并配置（设备处于 CONFIGURED 态），0 = 无主机。
+ * 用于避免无主机时把状态行(如 DONE dir=)塞进端点 FIFO，等主机接入被陈旧顶出。 */
+uint8_t UsbWcidApp_IsConfigured(void);
+
 /* Create the mutex that serializes UsbWcidApp_Write (0x85). Call once from
  * MX_FREERTOS_Init, in task/kernel-init context (osMutexNew needs the kernel).
  * Before this runs (e.g. USB enumeration), Write falls back to no-lock, which

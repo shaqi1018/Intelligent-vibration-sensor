@@ -29,27 +29,29 @@
  * ========================================================================= */
 
 #define DEV_CFG_PATH           "0:/DEVCFG.JSN"
-#define DEV_CFG_READ_BUF_SZ    2048U     /* 配置文件读取缓冲区字节数 */
+#define DEV_CFG_READ_BUF_SZ    4096U     /* 配置文件读取缓冲区字节数（新模板带中文说明，需 >文件大小，否则尾部传感器被截断丢解析） */
 #define DEV_CFG_OBJ_BUF_SZ     512U      /* 子对象提取缓冲区字节数   */
 
 /* 上电写入的默认模板（与解析器所支持的字段保持一致）
  * _doc / _options_* 等以 _ 开头的键仅作文档用途，解析器会自动忽略。 */
 static const char kCfgTemplate[] =
 "{\r\n"
-"  \"_doc\": \"Sensor Box device config. On power-up the MCU reads this file and applies range/ODR to sensors.\",\r\n"
-"  \"_doc_units\": \"range_g = +/- g | range_dps = +/- deg/s | odr_hz = output data rate (Hz)\",\r\n"
-"  \"_doc_unknown_keys\": \"Any key starting with _ is documentation only and silently ignored by the parser.\",\r\n"
+"  \"_file\": \"Sensor Box 设备配置；开机读取并应用。下划线开头的键是注释，解析器忽略。\",\r\n"
 "\r\n"
-"  \"sample_rate_hz\": 1000,\r\n"
-"  \"sink\": \"USB\",\r\n"
-"  \"storage_mode\": \"LINEAR\",\r\n"
-"  \"trigger_mode\": \"NONE\",\r\n"
-"  \"trigger_delay_ms\": 0,\r\n"
+"  \"_s1\": \"==================== 开机行为 ====================\",\r\n"
+"  \"boot_acquire\": 0,\r\n"
+"  \"_doc_boot_acquire\": \"开机是否自动开始采集：1=自动采，0=需按键/上位机手动启动\",\r\n"
+"  \"_options_boot_acquire\": [0, 1],\r\n"
+"\r\n"
+"  \"sink\": \"SD\",\r\n"
+"  \"_doc_sink\": \"数据出口：SD=存卡(无人值守) / USB=传上位机。开机即采推荐 SD\",\r\n"
+"  \"_options_sink\": [\"SD\", \"USB\"],\r\n"
+"\r\n"
 "  \"duration_ms\": 0,\r\n"
-"  \"sd_ring_max_bytes\": 0,\r\n"
+"  \"_doc_duration_ms\": \"单次采集时长(ms)，到点自动停；0=一直采到关机或手动停\",\r\n"
 "\r\n"
+"  \"_s2\": \"==================== LSM6DSOX 六轴IMU ====================\",\r\n"
 "  \"lsm6dsox\": {\r\n"
-"    \"_doc\": \"ST 6-axis IMU (ACC + GYR + TEMP) on SPI1 (dedicated bus)\",\r\n"
 "    \"enabled\": 1,\r\n"
 "    \"range_g\": 4,\r\n"
 "    \"_options_range_g\": [2, 4, 8, 16],\r\n"
@@ -59,44 +61,43 @@ static const char kCfgTemplate[] =
 "    \"_options_odr_hz\": [12, 26, 52, 104, 208, 416, 833, 1666, 3332, 6664]\r\n"
 "  },\r\n"
 "\r\n"
+"  \"_s3\": \"==================== H3LIS100DL 高量程加速度 ====================\",\r\n"
 "  \"h3lis100dl\": {\r\n"
-"    \"_doc\": \"ST high-g accelerometer (+/-100 g fixed) on SPI2 (shared bus)\",\r\n"
 "    \"enabled\": 1,\r\n"
 "    \"range_g\": 100,\r\n"
 "    \"_options_range_g\": [100],\r\n"
 "    \"odr_hz\": 400,\r\n"
-"    \"_options_odr_hz_normal\": [50, 100, 400],\r\n"
-"    \"_options_odr_hz_lowpower\": [1, 2, 5, 10]\r\n"
+"    \"_options_odr_hz\": [50, 100, 400]\r\n"
 "  },\r\n"
 "\r\n"
+"  \"_s4\": \"==================== QMA6100P 加速度 ====================\",\r\n"
 "  \"qma6100p\": {\r\n"
-"    \"_doc\": \"QST 3-axis accelerometer (up to 1600 Hz, +/-32 g) on SPI2 (shared bus)\",\r\n"
 "    \"enabled\": 1,\r\n"
 "    \"range_g\": 4,\r\n"
 "    \"_options_range_g\": [2, 4, 8, 16, 32],\r\n"
 "    \"odr_hz\": 100,\r\n"
-"    \"_options_odr_hz\": [100, 200, 400, 800, 1600],\r\n"
-"    \"_options_odr_hz_lowpower\": [12, 25, 50]\r\n"
+"    \"_options_odr_hz\": [100, 200, 400, 800, 1600]\r\n"
 "  },\r\n"
 "\r\n"
+"  \"_s5\": \"==================== ES8311 麦克风 ====================\",\r\n"
 "  \"es8311\": {\r\n"
-"    \"_doc\": \"ES8311 mono microphone codec on I2C2 (shared with RTC), I2S/SAI capture\",\r\n"
 "    \"enabled\": 1,\r\n"
 "    \"sample_rate_hz\": 16000,\r\n"
 "    \"_options_sample_rate_hz\": [8000, 16000, 48000, 96000],\r\n"
 "    \"bits\": 16,\r\n"
 "    \"gain_db\": 33,\r\n"
-"    \"_doc_gain_db\": \"mic PGA gain 0..42 dB (approx 3 dB steps)\"\r\n"
+"    \"_doc_gain_db\": \"麦克风增益 0..42 dB\"\r\n"
 "  },\r\n"
 "\r\n"
+"  \"_s6\": \"==================== AHT20 温湿度 ====================\",\r\n"
 "  \"aht20\": {\r\n"
-"    \"_doc\": \"ASAIR AHT20 temp/humidity on I2C1 (sample period >= 1s)\",\r\n"
 "    \"enabled\": 1,\r\n"
-"    \"odr_hz\": 1\r\n"
+"    \"odr_hz\": 1,\r\n"
+"    \"_doc_odr_hz\": \"1Hz\"\r\n"
 "  },\r\n"
 "\r\n"
+"  \"_s7\": \"==================== LIS2MDL 磁力计 ====================\",\r\n"
 "  \"lis2mdl\": {\r\n"
-"    \"_doc\": \"ST LIS2MDL 3-axis magnetometer (+/-50 gauss) on I2C1, DRDY on PC13\",\r\n"
 "    \"enabled\": 1,\r\n"
 "    \"odr_hz\": 100,\r\n"
 "    \"_options_odr_hz\": [10, 20, 50, 100]\r\n"
@@ -269,10 +270,10 @@ static void DeviceCfg_ParseAndApply(const char *buf)
     /* 以当前运行时配置为基础，仅覆盖文件中出现的字段 */
     AcqConfig_GetCopy(&cfg);
 
-    /* ---- 顶层标量字段 ---- */
+    /* ---- 顶层标量字段（仅保留真正生效的） ---- */
 
-    p = json_find_value(buf, "sample_rate_hz");
-    if (json_parse_uint(p, &v)) cfg.sample_rate_hz = v;
+    p = json_find_value(buf, "boot_acquire");
+    if (json_parse_uint(p, &v)) cfg.boot_acquire = (uint8_t)(v != 0U ? 1U : 0U);
 
     p = json_find_value(buf, "sink");
     if (p != NULL && json_parse_string(p, s, sizeof(s)))
@@ -282,29 +283,8 @@ static void DeviceCfg_ParseAndApply(const char *buf)
         else if (strcmp(s, "BOTH") == 0) cfg.sink_mask = ACQ_SINK_BOTH;
     }
 
-    p = json_find_value(buf, "storage_mode");
-    if (p != NULL && json_parse_string(p, s, sizeof(s)))
-    {
-        if      (strcmp(s, "LINEAR") == 0) cfg.storage_mode = ACQ_STORAGE_LINEAR;
-        else if (strcmp(s, "RING")   == 0) cfg.storage_mode = ACQ_STORAGE_RING;
-    }
-
-    p = json_find_value(buf, "trigger_mode");
-    if (p != NULL && json_parse_string(p, s, sizeof(s)))
-    {
-        if      (strcmp(s, "NONE")     == 0) cfg.trigger_mode = ACQ_TRIGGER_NONE;
-        else if (strcmp(s, "EXTERNAL") == 0) cfg.trigger_mode = ACQ_TRIGGER_EXTERNAL;
-        else if (strcmp(s, "TIMER")    == 0) cfg.trigger_mode = ACQ_TRIGGER_TIMER;
-    }
-
-    p = json_find_value(buf, "trigger_delay_ms");
-    if (json_parse_uint(p, &v)) cfg.trigger_delay_ms = v;
-
     p = json_find_value(buf, "duration_ms");
     if (json_parse_uint(p, &v)) cfg.duration_ms = v;
-
-    p = json_find_value(buf, "sd_ring_max_bytes");
-    if (json_parse_uint(p, &v)) cfg.sd_ring_max_bytes = v;
 
     /* ---- lsm6dsox 子对象 ---- */
     if (json_extract_object(buf, "lsm6dsox", s_obj, sizeof(s_obj)))
@@ -404,9 +384,10 @@ static void DeviceCfg_ParseAndApply(const char *buf)
 
     if (AcqConfig_Set(&cfg) == 0)
     {
-        printf("[DevCfg] 配置已应用: %lu Hz, sink=0x%02X\r\n",
-               (unsigned long)cfg.sample_rate_hz,
-               (unsigned int)cfg.sink_mask);
+        printf("[DevCfg] 配置已应用: boot_acquire=%u sink=0x%02X duration=%lu ms\r\n",
+               (unsigned int)cfg.boot_acquire,
+               (unsigned int)cfg.sink_mask,
+               (unsigned long)cfg.duration_ms);
     }
     else
     {
@@ -495,9 +476,7 @@ FRESULT DeviceCfg_WriteCurrentToSD(void)
     FIL         file;
     AcqConfig_t cfg;
     const char *sink_name;
-    const char *storage_str;
-    const char *trigger_str;
-    static char s_line[2048];
+    static char s_line[4096];   /* UTF-8 中文说明占多字节，留足余量 */
     int         line_len;
 
     AcqConfig_GetCopy(&cfg);
@@ -517,36 +496,25 @@ FRESULT DeviceCfg_WriteCurrentToSD(void)
         default:            sink_name = "USB";  break;
     }
 
-    switch (cfg.storage_mode)
-    {
-        case ACQ_STORAGE_RING: storage_str = "RING"; break;
-        default:               storage_str = "LINEAR"; break;
-    }
-
-    switch (cfg.trigger_mode)
-    {
-        case ACQ_TRIGGER_EXTERNAL: trigger_str = "EXTERNAL"; break;
-        case ACQ_TRIGGER_TIMER:    trigger_str = "TIMER";    break;
-        default:                   trigger_str = "NONE";     break;
-    }
-
     line_len = snprintf(
         s_line, sizeof(s_line),
         "{\r\n"
-        "  \"_doc\": \"Sensor Box device config. On power-up the MCU reads this file and applies range/ODR to sensors.\",\r\n"
-        "  \"_doc_units\": \"range_g = +/- g | range_dps = +/- deg/s | odr_hz = output data rate (Hz)\",\r\n"
-        "  \"_doc_unknown_keys\": \"Any key starting with _ is documentation only and silently ignored by the parser.\",\r\n"
+        "  \"_file\": \"Sensor Box 设备配置；开机读取并应用。下划线开头的键是注释，解析器忽略。\",\r\n"
         "\r\n"
-        "  \"sample_rate_hz\": %lu,\r\n"
+        "  \"_s1\": \"==================== 开机行为 ====================\",\r\n"
+        "  \"boot_acquire\": %u,\r\n"
+        "  \"_doc_boot_acquire\": \"开机是否自动开始采集：1=自动采，0=需按键/上位机手动启动\",\r\n"
+        "  \"_options_boot_acquire\": [0, 1],\r\n"
+        "\r\n"
         "  \"sink\": \"%s\",\r\n"
-        "  \"storage_mode\": \"%s\",\r\n"
-        "  \"trigger_mode\": \"%s\",\r\n"
-        "  \"trigger_delay_ms\": %lu,\r\n"
-        "  \"duration_ms\": %lu,\r\n"
-        "  \"sd_ring_max_bytes\": %lu,\r\n"
+        "  \"_doc_sink\": \"数据出口：SD=存卡(无人值守) / USB=传上位机。开机即采推荐 SD\",\r\n"
+        "  \"_options_sink\": [\"SD\", \"USB\"],\r\n"
         "\r\n"
+        "  \"duration_ms\": %lu,\r\n"
+        "  \"_doc_duration_ms\": \"单次采集时长(ms)，到点自动停；0=一直采到关机或手动停\",\r\n"
+        "\r\n"
+        "  \"_s2\": \"==================== LSM6DSOX 六轴IMU ====================\",\r\n"
         "  \"lsm6dsox\": {\r\n"
-        "    \"_doc\": \"ST 6-axis IMU (ACC + GYR + TEMP) on SPI1 (dedicated bus)\",\r\n"
         "    \"enabled\": %u,\r\n"
         "    \"range_g\": %u,\r\n"
         "    \"_options_range_g\": [2, 4, 8, 16],\r\n"
@@ -556,54 +524,51 @@ FRESULT DeviceCfg_WriteCurrentToSD(void)
         "    \"_options_odr_hz\": [12, 26, 52, 104, 208, 416, 833, 1666, 3332, 6664]\r\n"
         "  },\r\n"
         "\r\n"
+        "  \"_s3\": \"==================== H3LIS100DL 高量程加速度 ====================\",\r\n"
         "  \"h3lis100dl\": {\r\n"
-        "    \"_doc\": \"ST high-g accelerometer (+/-100 g fixed) on SPI2 (shared bus)\",\r\n"
         "    \"enabled\": %u,\r\n"
         "    \"range_g\": %u,\r\n"
         "    \"_options_range_g\": [100],\r\n"
         "    \"odr_hz\": %u,\r\n"
-        "    \"_options_odr_hz_normal\": [50, 100, 400],\r\n"
-        "    \"_options_odr_hz_lowpower\": [1, 2, 5, 10]\r\n"
+        "    \"_options_odr_hz\": [50, 100, 400]\r\n"
         "  },\r\n"
         "\r\n"
+        "  \"_s4\": \"==================== QMA6100P 加速度 ====================\",\r\n"
         "  \"qma6100p\": {\r\n"
-        "    \"_doc\": \"QST 3-axis accelerometer (up to 1600 Hz, +/-32 g) on SPI2 (shared bus)\",\r\n"
         "    \"enabled\": %u,\r\n"
         "    \"range_g\": %u,\r\n"
         "    \"_options_range_g\": [2, 4, 8, 16, 32],\r\n"
         "    \"odr_hz\": %u,\r\n"
-        "    \"_options_odr_hz\": [100, 200, 400, 800, 1600],\r\n"
-        "    \"_options_odr_hz_lowpower\": [12, 25, 50]\r\n"
+        "    \"_options_odr_hz\": [100, 200, 400, 800, 1600]\r\n"
         "  },\r\n"
         "\r\n"
+        "  \"_s5\": \"==================== ES8311 麦克风 ====================\",\r\n"
         "  \"es8311\": {\r\n"
-        "    \"_doc\": \"ES8311 mono microphone codec on I2C2 (shared with RTC), I2S/SAI capture\",\r\n"
         "    \"enabled\": %u,\r\n"
         "    \"sample_rate_hz\": %lu,\r\n"
         "    \"_options_sample_rate_hz\": [8000, 16000, 48000, 96000],\r\n"
         "    \"bits\": %u,\r\n"
         "    \"gain_db\": %u,\r\n"
-        "    \"_doc_gain_db\": \"mic PGA gain 0..42 dB (approx 3 dB steps)\"\r\n"
+        "    \"_doc_gain_db\": \"麦克风增益 0..42 dB\"\r\n"
         "  },\r\n"
         "\r\n"
+        "  \"_s6\": \"==================== AHT20 温湿度 ====================\",\r\n"
         "  \"aht20\": {\r\n"
         "    \"enabled\": %u,\r\n"
-        "    \"odr_hz\": %u\r\n"
+        "    \"odr_hz\": %u,\r\n"
+        "    \"_doc_odr_hz\": \"1Hz\"\r\n"
         "  },\r\n"
         "\r\n"
+        "  \"_s7\": \"==================== LIS2MDL 磁力计 ====================\",\r\n"
         "  \"lis2mdl\": {\r\n"
         "    \"enabled\": %u,\r\n"
         "    \"odr_hz\": %u,\r\n"
         "    \"_options_odr_hz\": [10, 20, 50, 100]\r\n"
         "  }\r\n"
         "}\r\n",
-        (unsigned long)cfg.sample_rate_hz,
+        (unsigned int)cfg.boot_acquire,
         sink_name,
-        storage_str,
-        trigger_str,
-        (unsigned long)cfg.trigger_delay_ms,
         (unsigned long)cfg.duration_ms,
-        (unsigned long)cfg.sd_ring_max_bytes,
         (unsigned int)cfg.lsm6dsox.enabled,
         (unsigned int)cfg.lsm6dsox.range,
         (unsigned int)cfg.lsm6dsox.range2,

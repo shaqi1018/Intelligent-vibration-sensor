@@ -178,6 +178,11 @@ uint8_t UsbWcidApp_RespSend(void)
   return r;
 }
 
+uint8_t UsbWcidApp_IsConfigured(void)
+{
+  return ((s_pdev != NULL) && (s_pdev->dev_state == USBD_STATE_CONFIGURED)) ? 1U : 0U;
+}
+
 uint8_t UsbWcidApp_Write(const uint8_t *buf, uint32_t len)
 {
   if (s_pdev == NULL) { return 1U; }

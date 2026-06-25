@@ -1120,6 +1120,38 @@ uint32_t AppAcqStop(void)
   return 1U;
 }
 
+void AppBootAcquireIfConfigured(void)
+{
+  AcqConfig_t cfg;
+  uint8_t     sink;
+
+  AcqConfig_GetCopy(&cfg);
+  if (cfg.boot_acquire == 0U)
+  {
+    return;            /* 未开启开机即采，保持现有行为 */
+  }
+  /* 仅电池上电（长按 2s 锁存电池供电）才开机即采；USB 上电不触发。 */
+  if (BoardIO_IsBatteryLatched() == 0U)
+  {
+    printf("[Acq] boot_acquire: USB 上电，跳过开机即采（仅电池上电触发）\r\n");
+    return;
+  }
+  if (AppAcqIsRunning() != 0U)
+  {
+    return;            /* 已在采集（不应发生），不重复启动 */
+  }
+
+  /* sink：配置含 SD 位优先走 SD（无人值守标准用法）；否则走 USB。
+   * BOTH 含 SD 位 → 归为 SD（AppAcqStart 不支持同时双 sink）。 */
+  sink = ((cfg.sink_mask & ACQ_SINK_SD) != 0U) ? APP_ACQ_SINK_SD : APP_ACQ_SINK_USB;
+
+  printf("[Acq] boot_acquire=1 -> 自动启动 sink=%s duration=%lu ms\r\n",
+         (sink == APP_ACQ_SINK_SD) ? "SD" : "USB",
+         (unsigned long)cfg.duration_ms);
+
+  (void)AppAcqStart(sink, cfg.duration_ms);
+}
+
 static void UsbCmd_AcqStatus(void)
 {
   char line[160];
@@ -3250,7 +3282,9 @@ void StartLoggerTask(void *argument)
         done_dir[sizeof(done_dir) - 1U] = '\0';
         AppFlowStatsSetMode(AppAcqIsUsbSinkActive(), 0U);
         AppLoggerStopSdSession(&sd_file_open, &rows_since_sync);
-        { char _d[64]; int _n = snprintf(_d, sizeof(_d), "DONE dir=%s\r\n", done_dir); \
+        /* 仅在主机已连接时回 DONE：SD-only 无人值守 session 不往 USB 留陈旧状态行 */
+        if (UsbWcidApp_IsConfigured() != 0U)
+        { char _d[64]; int _n = snprintf(_d, sizeof(_d), "DONE dir=%s\r\n", done_dir);
           UsbWcidApp_Write((const uint8_t*)_d, (uint32_t)_n); }
       }
       else
@@ -3470,7 +3504,9 @@ void StartLoggerTask(void *argument)
         done_dir[sizeof(done_dir) - 1U] = '\0';
         AppLoggerStopSdSession(&sd_file_open, &rows_since_sync);
         AppFlowStatsSetMode(AppAcqIsUsbSinkActive(), 0U);
-        { char _d[64]; int _n = snprintf(_d, sizeof(_d), "DONE dir=%s\r\n", done_dir); \
+        /* 仅在主机已连接时回 DONE：SD-only 无人值守 session 不往 USB 留陈旧状态行 */
+        if (UsbWcidApp_IsConfigured() != 0U)
+        { char _d[64]; int _n = snprintf(_d, sizeof(_d), "DONE dir=%s\r\n", done_dir);
           UsbWcidApp_Write((const uint8_t*)_d, (uint32_t)_n); }
       }
       osDelay(10U);

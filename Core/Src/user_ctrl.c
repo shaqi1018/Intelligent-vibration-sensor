@@ -37,6 +37,11 @@ void StartUserCtrlTask(void *argument)
 {
   (void)argument;
 
+  /* 开机即采：等系统稳定（传感器/SD 已在 main 初始化、各任务已就绪）后触发一次。
+   * boot_acquire=0 时为空操作，行为同既往。MSC 模式不进 RTOS，不会到这里。 */
+  osDelay(1000U);
+  AppBootAcquireIfConfigured();
+
   for (;;)
   {
     uint32_t now = osKernelGetTickCount();

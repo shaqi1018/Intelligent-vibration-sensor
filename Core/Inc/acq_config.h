@@ -59,6 +59,7 @@ typedef struct {
 } AcqMicCfg_t;
 
 typedef struct {
+  uint8_t  boot_acquire;               /* 1 = 开机自动开始采集（sink/duration 见下） */
   uint32_t sample_rate_hz;             /* 1..10000 */
   uint8_t  sink_mask;                  /* USB / SD / BOTH */
   AcqStorageMode_t storage_mode;

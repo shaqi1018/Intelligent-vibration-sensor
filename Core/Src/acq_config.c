@@ -32,6 +32,7 @@ static volatile uint32_t s_frame_id = 0U;
 static void AcqCfgLoadDefaults(void)
 {
   memset(&s_cfg, 0, sizeof(s_cfg));
+  s_cfg.boot_acquire     = 0U;   /* 默认不开机即采，保持现有行为 */
   s_cfg.sample_rate_hz   = ACQ_CFG_DEFAULT_RATE_HZ;
   s_cfg.sink_mask        = ACQ_SINK_USB;
   s_cfg.storage_mode     = ACQ_STORAGE_LINEAR;
