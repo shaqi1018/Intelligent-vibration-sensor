@@ -47,6 +47,10 @@ static const char kCfgTemplate[] =
 "  \"_doc_sink\": \"数据出口：SD=存卡(无人值守) / USB=传上位机。开机即采推荐 SD\",\r\n"
 "  \"_options_sink\": [\"SD\", \"USB\"],\r\n"
 "\r\n"
+"  \"output_format\": \"BIN\",\r\n"
+"  \"_doc_output_format\": \"SD 卡数据格式：CSV=文本(兼容既有) / BIN=二进制(体积小,需解析工具)\",\r\n"
+"  \"_options_output_format\": [\"CSV\", \"BIN\"],\r\n"
+"\r\n"
 "  \"duration_ms\": 0,\r\n"
 "  \"_doc_duration_ms\": \"单次采集时长(ms)，到点自动停；0=一直采到关机或手动停\",\r\n"
 "\r\n"
@@ -283,6 +287,13 @@ static void DeviceCfg_ParseAndApply(const char *buf)
         else if (strcmp(s, "BOTH") == 0) cfg.sink_mask = ACQ_SINK_BOTH;
     }
 
+    p = json_find_value(buf, "output_format");
+    if (p != NULL && json_parse_string(p, s, sizeof(s)))
+    {
+        if      (strcmp(s, "CSV") == 0) cfg.output_format = ACQ_OUTPUT_CSV;
+        else if (strcmp(s, "BIN") == 0) cfg.output_format = ACQ_OUTPUT_BIN;
+    }
+
     p = json_find_value(buf, "duration_ms");
     if (json_parse_uint(p, &v)) cfg.duration_ms = v;
 
@@ -476,6 +487,7 @@ FRESULT DeviceCfg_WriteCurrentToSD(void)
     FIL         file;
     AcqConfig_t cfg;
     const char *sink_name;
+    const char *format_name;
     static char s_line[4096];   /* UTF-8 中文说明占多字节，留足余量 */
     int         line_len;
 
@@ -489,12 +501,7 @@ FRESULT DeviceCfg_WriteCurrentToSD(void)
         return r;
     }
 
-    switch (cfg.sink_mask)
-    {
-        case ACQ_SINK_SD:   sink_name = "SD";   break;
-        case ACQ_SINK_BOTH: sink_name = "BOTH"; break;
-        default:            sink_name = "USB";  break;
-    }
+    format_name = (cfg.output_format == ACQ_OUTPUT_BIN) ? "BIN" : "CSV";
 
     line_len = snprintf(
         s_line, sizeof(s_line),
@@ -506,9 +513,9 @@ FRESULT DeviceCfg_WriteCurrentToSD(void)
         "  \"_doc_boot_acquire\": \"开机是否自动开始采集：1=自动采，0=需按键/上位机手动启动\",\r\n"
         "  \"_options_boot_acquire\": [0, 1],\r\n"
         "\r\n"
-        "  \"sink\": \"%s\",\r\n"
-        "  \"_doc_sink\": \"数据出口：SD=存卡(无人值守) / USB=传上位机。开机即采推荐 SD\",\r\n"
-        "  \"_options_sink\": [\"SD\", \"USB\"],\r\n"
+        "  \"output_format\": \"%s\",\r\n"
+        "  \"_doc_output_format\": \"SD 卡数据格式：CSV=文本(兼容既有) / BIN=二进制(体积小,需解析工具)。USB传输始终用CSV\",\r\n"
+        "  \"_options_output_format\": [\"CSV\", \"BIN\"],\r\n"
         "\r\n"
         "  \"duration_ms\": %lu,\r\n"
         "  \"_doc_duration_ms\": \"单次采集时长(ms)，到点自动停；0=一直采到关机或手动停\",\r\n"
@@ -567,7 +574,7 @@ FRESULT DeviceCfg_WriteCurrentToSD(void)
         "  }\r\n"
         "}\r\n",
         (unsigned int)cfg.boot_acquire,
-        sink_name,
+        format_name,
         (unsigned long)cfg.duration_ms,
         (unsigned int)cfg.lsm6dsox.enabled,
         (unsigned int)cfg.lsm6dsox.range,

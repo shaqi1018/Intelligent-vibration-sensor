@@ -32,9 +32,10 @@ static volatile uint32_t s_frame_id = 0U;
 static void AcqCfgLoadDefaults(void)
 {
   memset(&s_cfg, 0, sizeof(s_cfg));
-  s_cfg.boot_acquire     = 0U;   /* 默认不开机即采，保持现有行为 */
+  s_cfg.boot_acquire     = 0U;   /* 默认不开机即采 */
   s_cfg.sample_rate_hz   = ACQ_CFG_DEFAULT_RATE_HZ;
-  s_cfg.sink_mask        = ACQ_SINK_USB;
+  s_cfg.sink_mask        = ACQ_SINK_SD;   /* 新卡默认 SD 卡 */
+  s_cfg.output_format    = ACQ_OUTPUT_BIN; /* 新卡默认二进制格式 */
   s_cfg.storage_mode     = ACQ_STORAGE_LINEAR;
   s_cfg.trigger_mode     = ACQ_TRIGGER_NONE;
   s_cfg.trigger_delay_ms = 0U;
@@ -43,38 +44,38 @@ static void AcqCfgLoadDefaults(void)
 
   /* LSM6DSOX：±4g XL, ±2000dps 陀螺，1666Hz ODR
    * range / range2 存物理量（g 值 / dps），由 AppLsmXlRangeToReg 换算寄存器编码 */
-  s_cfg.lsm6dsox.enabled = 1U;
+  s_cfg.lsm6dsox.enabled = 0U;   /* 新卡默认禁用 */
   s_cfg.lsm6dsox.range   = 4U;      /* ±4 g   */
   s_cfg.lsm6dsox.range2  = 2000U;   /* ±2000 dps */
   s_cfg.lsm6dsox.odr_hz  = 1666U;
 
   /* H3LIS100DL：±100g 固定，ODR 最高 400Hz */
-  s_cfg.h3lis100dl.enabled = 1U;
+  s_cfg.h3lis100dl.enabled = 0U;   /* 新卡默认禁用 */
   s_cfg.h3lis100dl.range   = 100U;  /* 物理量：100g，固定 */
   s_cfg.h3lis100dl.range2  = 0U;
   s_cfg.h3lis100dl.odr_hz  = 400U;
 
   /* QMA6100P：±4g，BW=100Hz
    * range 存物理 g 值，由 AppQmaRangeToReg 换算 */
-  s_cfg.qma6100p.enabled = 1U;
+  s_cfg.qma6100p.enabled = 0U;   /* 新卡默认禁用 */
   s_cfg.qma6100p.range   = 4U;      /* ±4 g  */
   s_cfg.qma6100p.range2  = 0U;
   s_cfg.qma6100p.odr_hz  = 100U;
 
-  /* ES8311 麦克风：默认关闭，由 DEVCFG 打开 */
+  /* ES8311 麦克风：默认关闭 */
   s_cfg.es8311.enabled        = 0U;
   s_cfg.es8311.sample_rate_hz = 16000U;
   s_cfg.es8311.bits           = 16U;
   s_cfg.es8311.gain_db        = 33U;
 
-  /* AHT20 温湿度：默认开启，1Hz（手册要求采集周期≥1s） */
-  s_cfg.aht20.enabled = 1U;
+  /* AHT20 温湿度：新卡默认禁用 */
+  s_cfg.aht20.enabled = 0U;
   s_cfg.aht20.range   = 0U;
   s_cfg.aht20.range2  = 0U;
   s_cfg.aht20.odr_hz  = 1U;
 
-  /* LIS2MDL 三轴磁力：默认开启，100Hz，±50 gauss（固定量程，range 仅信息性） */
-  s_cfg.lis2mdl.enabled = 1U;
+  /* LIS2MDL 三轴磁力：新卡默认禁用 */
+  s_cfg.lis2mdl.enabled = 0U;
   s_cfg.lis2mdl.range   = 50U;
   s_cfg.lis2mdl.range2  = 0U;
   s_cfg.lis2mdl.odr_hz  = 100U;

@@ -28,6 +28,10 @@ extern "C" {
 #define ACQ_SINK_SD                   0x02U
 #define ACQ_SINK_BOTH                 (ACQ_SINK_USB | ACQ_SINK_SD)
 
+/* output_format: SD 卡数据格式 */
+#define ACQ_OUTPUT_CSV                0U  /* CSV 文本格式(默认兼容既有) */
+#define ACQ_OUTPUT_BIN                1U  /* RAW 二进制格式(frame_id + timestamp_us + 原始数据 + CRC32) */
+
 /* SD 存储模式 */
 typedef enum {
   ACQ_STORAGE_LINEAR = 0,   /* 顺序追加，写满即停 */
@@ -62,6 +66,7 @@ typedef struct {
   uint8_t  boot_acquire;               /* 1 = 开机自动开始采集（sink/duration 见下） */
   uint32_t sample_rate_hz;             /* 1..10000 */
   uint8_t  sink_mask;                  /* USB / SD / BOTH */
+  uint8_t  output_format;              /* ACQ_OUTPUT_CSV / ACQ_OUTPUT_BIN (仅 SD sink 生效) */
   AcqStorageMode_t storage_mode;
   AcqTriggerMode_t trigger_mode;
   uint32_t trigger_delay_ms;           /* TIMER 触发时延迟，外部触发为去抖 */

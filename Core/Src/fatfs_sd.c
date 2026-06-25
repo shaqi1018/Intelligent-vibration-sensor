@@ -6,6 +6,7 @@
 #include "diskio.h"
 #include "sd_diskio.h"
 #include "sdmmc.h"
+#include "acq_config.h"  /* ACQ_OUTPUT_CSV / ACQ_OUTPUT_BIN */
 
 /* 会话目录前缀，8.3 格式：CKBX + 4 位数字 = 8 字符 */
 #define FATFS_SD_SESSION_PREFIX   "CKBX"
@@ -124,12 +125,27 @@ static FRESULT FatFs_SD_FindNextSessionDir(char *dir, size_t dir_size)
 }
 
 static FRESULT FatFs_SD_OpenCsvFile(FIL *file, const char *dir, const char *fname,
-                                     const char *header)
+                                     const char *header, uint8_t output_format)
 {
   char path[FATFS_SD_FILE_PATH_MAX];
+  char fname_with_ext[32];
   FRESULT r;
 
-  (void)snprintf(path, sizeof(path), "%s/%s", dir, fname);
+  /* 根据 output_format 选择扩展名: .CSV 或 .BIN */
+  const char *base = fname;
+  const char *dot = strrchr(fname, '.');
+  if (dot != NULL)
+  {
+    size_t base_len = (size_t)(dot - fname);
+    const char *ext = (output_format == ACQ_OUTPUT_BIN) ? ".BIN" : ".CSV";
+    snprintf(fname_with_ext, sizeof(fname_with_ext), "%.*s%s", (int)base_len, fname, ext);
+  }
+  else
+  {
+    snprintf(fname_with_ext, sizeof(fname_with_ext), "%s", fname);
+  }
+
+  (void)snprintf(path, sizeof(path), "%s/%s", dir, fname_with_ext);
 
   r = f_open(file, path, FA_CREATE_ALWAYS | FA_WRITE);
   if (r != FR_OK)
@@ -138,11 +154,15 @@ static FRESULT FatFs_SD_OpenCsvFile(FIL *file, const char *dir, const char *fnam
     return r;
   }
 
-  r = FatFs_SD_WriteExact(file, header, (UINT)strlen(header));
-  if (r != FR_OK)
+  /* CSV 模式写表头,BIN 模式跳过 */
+  if (output_format == ACQ_OUTPUT_CSV && header != NULL)
   {
-    (void)f_close(file);
-    return r;
+    r = FatFs_SD_WriteExact(file, header, (UINT)strlen(header));
+    if (r != FR_OK)
+    {
+      (void)f_close(file);
+      return r;
+    }
   }
 
   return f_sync(file);
@@ -268,10 +288,15 @@ FRESULT FatFs_SD_LoggerStart(void)
     return result;
   }
 
-  /* 打开 6 个 CSV 文件并写入表头 */
+  /* 获取当前配置的输出格式 */
+  AcqConfig_t cfg;
+  AcqConfig_GetCopy(&cfg);
+  uint8_t output_format = cfg.output_format;
+
+  /* 打开 6 个文件(CSV 或 BIN)并根据格式写入表头 */
   for (uint32_t i = 0U; i < FATFS_SD_NUM_FILES; i++)
   {
-    result = FatFs_SD_OpenCsvFile(&g_log_files[i], g_session_dir, fnames[i], headers[i]);
+    result = FatFs_SD_OpenCsvFile(&g_log_files[i], g_session_dir, fnames[i], headers[i], output_format);
     if (result != FR_OK)
     {
       /* 关闭已打开的文件 */

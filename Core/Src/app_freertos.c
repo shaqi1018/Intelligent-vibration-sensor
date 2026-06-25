@@ -31,6 +31,7 @@
 #include <stdlib.h>
 #include "fatfs_sd.h"
 #include "sensor_snapshot.h"
+#include "sensor_bin.h"
 #include "lsm6dsox.h"
 #include "h3lis100dl.h"
 #include "qma6100p.h"
@@ -777,8 +778,8 @@ static uint8_t AppAcqIsUsbSinkActive(void)
   AppAcqControl_t ctrl;
 
   AppAcqGetCopy(&ctrl);
+  /* USB 传输只要采集运行且 USB 连接就可用,不受 sink 配置限制 */
   return (uint8_t)((ctrl.running != 0U) &&
-                   (ctrl.sink == APP_ACQ_SINK_USB) &&
                    (AppUsbRawStreamingActive() != 0U));
 }
 
@@ -2431,12 +2432,18 @@ void StartLsm6dsoxTask(void *argument)
     AppAcqCheckAutoStop();
     /* 门控 = 采集运行中 && 本传感器使能。enabled 每批(约38ms一次水位)读一次,
      * 不进 6664Hz 内层逐样本循环。改 en 停采时改、下次 acq_start 即生效。 */
+    uint8_t output_format = ACQ_OUTPUT_CSV;  /* 默认 CSV */
     {
       AcqConfig_t cfg; AcqConfig_GetCopy(&cfg);
       if ((AppAcqIsRunning() == 0U) || (cfg.lsm6dsox.enabled == 0U))
       {
         osDelay(APP_ACQ_IDLE_DELAY_MS);
         continue;
+      }
+      /* output_format 仅对 SD 存储生效,USB 传输始终用 CSV */
+      if (AppAcqIsSdSessionActive() != 0U)
+      {
+        output_format = cfg.output_format;
       }
     }
 
@@ -2528,37 +2535,57 @@ void StartLsm6dsoxTask(void *argument)
           lsm_ts_us += s_lsm_odr_interval_us;
           uint32_t fid = ++g_lsm_frame_id_counter;
 
-          uint32_t off = 0;
-          off += AppU32ToDec(&rowbuf[off], fid);
-          rowbuf[off++] = ',';
-          memcpy(&rowbuf[off], dt_batch, 12U); off += 12U;
-          rowbuf[off++] = ',';
-          off += AppF1ToDec(&rowbuf[off], (float)cur_acc[0] * xl_s);
-          rowbuf[off++] = ',';
-          off += AppF1ToDec(&rowbuf[off], (float)cur_acc[1] * xl_s);
-          rowbuf[off++] = ',';
-          off += AppF1ToDec(&rowbuf[off], (float)cur_acc[2] * xl_s);
-          rowbuf[off++] = ',';
-          off += AppF1ToDec(&rowbuf[off], (float)cur_gyr[0] * g_s);
-          rowbuf[off++] = ',';
-          off += AppF1ToDec(&rowbuf[off], (float)cur_gyr[1] * g_s);
-          rowbuf[off++] = ',';
-          off += AppF1ToDec(&rowbuf[off], (float)cur_gyr[2] * g_s);
-          rowbuf[off++] = '\r';
-          rowbuf[off++] = '\n';
-          /* Guard: verify exactly 7 commas (8 columns) before writing.
-           * ~0.5% of rows have missing/extra commas from an unknown cause;
-           * silently dropping them is better than corrupting the CSV file. */
+          if (output_format == ACQ_OUTPUT_BIN)
           {
-            uint32_t nc = 0U;
-            for (uint32_t k = 0U; k < off - 2U; k++) { if (rowbuf[k] == ',') nc++; }
-            if (nc == 7U)
+            /* BIN 模式:构建二进制帧 */
+            SensorBinFrame_LSM_t bin_frame;
+            bin_frame.frame_id = fid;
+            bin_frame.timestamp_us = lsm_ts_us;
+            bin_frame.acc_x = cur_acc[0];
+            bin_frame.acc_y = cur_acc[1];
+            bin_frame.acc_z = cur_acc[2];
+            bin_frame.gyr_x = cur_gyr[0];
+            bin_frame.gyr_y = cur_gyr[1];
+            bin_frame.gyr_z = cur_gyr[2];
+            bin_frame.crc32 = SensorBin_CalcCRC32(&bin_frame, sizeof(bin_frame) - 4U);
+
+            RingBuf_Write(&g_ring_lsm_imu, (const uint8_t *)&bin_frame, sizeof(bin_frame));
+          }
+          else
+          {
+            /* CSV 模式:构建文本行 */
+            uint32_t off = 0;
+            off += AppU32ToDec(&rowbuf[off], fid);
+            rowbuf[off++] = ',';
+            memcpy(&rowbuf[off], dt_batch, 12U); off += 12U;
+            rowbuf[off++] = ',';
+            off += AppF1ToDec(&rowbuf[off], (float)cur_acc[0] * xl_s);
+            rowbuf[off++] = ',';
+            off += AppF1ToDec(&rowbuf[off], (float)cur_acc[1] * xl_s);
+            rowbuf[off++] = ',';
+            off += AppF1ToDec(&rowbuf[off], (float)cur_acc[2] * xl_s);
+            rowbuf[off++] = ',';
+            off += AppF1ToDec(&rowbuf[off], (float)cur_gyr[0] * g_s);
+            rowbuf[off++] = ',';
+            off += AppF1ToDec(&rowbuf[off], (float)cur_gyr[1] * g_s);
+            rowbuf[off++] = ',';
+            off += AppF1ToDec(&rowbuf[off], (float)cur_gyr[2] * g_s);
+            rowbuf[off++] = '\r';
+            rowbuf[off++] = '\n';
+            /* Guard: verify exactly 7 commas (8 columns) before writing.
+             * ~0.5% of rows have missing/extra commas from an unknown cause;
+             * silently dropping them is better than corrupting the CSV file. */
             {
-              RingBuf_Write(&g_ring_lsm_imu, (const uint8_t *)rowbuf, off);
-              /* WCID Bulk: write CSV directly to USB endpoint double-buffer. */
-              if (g_boot_mode == BOOT_MODE_WCID_BULK && AppAcqIsUsbSinkActive() != 0U)
+              uint32_t nc = 0U;
+              for (uint32_t k = 0U; k < off - 2U; k++) { if (rowbuf[k] == ',') nc++; }
+              if (nc == 7U)
               {
-                UsbWcidApp_SendCsv(WCID_CH_LSM_IMU, rowbuf, off);
+                RingBuf_Write(&g_ring_lsm_imu, (const uint8_t *)rowbuf, off);
+                /* WCID Bulk: write CSV directly to USB endpoint double-buffer. */
+                if (g_boot_mode == BOOT_MODE_WCID_BULK && AppAcqIsUsbSinkActive() != 0U)
+                {
+                  UsbWcidApp_SendCsv(WCID_CH_LSM_IMU, rowbuf, off);
+                }
               }
             }
           }
@@ -2687,12 +2714,18 @@ void StartH3lis100dlTask(void *argument)
   for (;;)
   {
     AppAcqCheckAutoStop();
+    uint8_t output_format = ACQ_OUTPUT_CSV;  /* 默认 CSV */
     {
       AcqConfig_t cfg; AcqConfig_GetCopy(&cfg);
       if ((AppAcqIsRunning() == 0U) || (cfg.h3lis100dl.enabled == 0U))
       {
         osDelay(APP_ACQ_IDLE_DELAY_MS);
         continue;
+      }
+      /* output_format 仅对 SD 存储生效,USB 传输始终用 CSV */
+      if (AppAcqIsSdSessionActive() != 0U)
+      {
+        output_format = cfg.output_format;
       }
     }
 
@@ -2720,25 +2753,43 @@ void StartH3lis100dlTask(void *argument)
 
       uint32_t fid = ++g_h3_frame_id_counter;
       uint32_t epoch_s_i = (uint32_t)(AppTime_GetEpochUs() / 1000000ULL);
-      char rowbuf[96];
-      uint32_t off = 0;
-      off += AppU32ToDec(&rowbuf[off], fid);
-      rowbuf[off++] = ',';
-      off += AppFmtDateTime12(&rowbuf[off], epoch_s_i);
-      rowbuf[off++] = ',';
-      off += AppF1ToDec(&rowbuf[off], data.acc_mg[0]);
-      rowbuf[off++] = ',';
-      off += AppF1ToDec(&rowbuf[off], data.acc_mg[1]);
-      rowbuf[off++] = ',';
-      off += AppF1ToDec(&rowbuf[off], data.acc_mg[2]);
-      rowbuf[off++] = '\r';
-      rowbuf[off++] = '\n';
-      RingBuf_Write(&g_ring_h3_acc, (const uint8_t *)rowbuf, off);
 
-      /* WCID Bulk: write CSV directly to USB endpoint double-buffer. */
-      if (g_boot_mode == BOOT_MODE_WCID_BULK && AppAcqIsUsbSinkActive() != 0U)
+      if (output_format == ACQ_OUTPUT_BIN)
       {
-        UsbWcidApp_SendCsv(WCID_CH_H3_ACCEL, rowbuf, off);
+        /* BIN 模式:构建二进制帧(使用原始 int16_t,避免 float 精度损失) */
+        SensorBinFrame_H3_t bin_frame;
+        bin_frame.frame_id = fid;
+        bin_frame.timestamp_us = h3_ts_us;
+        bin_frame.acc_x = (int16_t)data.acc_mg[0];  /* mg → int16_t */
+        bin_frame.acc_y = (int16_t)data.acc_mg[1];
+        bin_frame.acc_z = (int16_t)data.acc_mg[2];
+        bin_frame.crc32 = SensorBin_CalcCRC32(&bin_frame, sizeof(bin_frame) - 4U);
+
+        RingBuf_Write(&g_ring_h3_acc, (const uint8_t *)&bin_frame, sizeof(bin_frame));
+      }
+      else
+      {
+        /* CSV 模式:构建文本行 */
+        char rowbuf[96];
+        uint32_t off = 0;
+        off += AppU32ToDec(&rowbuf[off], fid);
+        rowbuf[off++] = ',';
+        off += AppFmtDateTime12(&rowbuf[off], epoch_s_i);
+        rowbuf[off++] = ',';
+        off += AppF1ToDec(&rowbuf[off], data.acc_mg[0]);
+        rowbuf[off++] = ',';
+        off += AppF1ToDec(&rowbuf[off], data.acc_mg[1]);
+        rowbuf[off++] = ',';
+        off += AppF1ToDec(&rowbuf[off], data.acc_mg[2]);
+        rowbuf[off++] = '\r';
+        rowbuf[off++] = '\n';
+        RingBuf_Write(&g_ring_h3_acc, (const uint8_t *)rowbuf, off);
+
+        /* WCID Bulk: write CSV directly to USB endpoint double-buffer. */
+        if (g_boot_mode == BOOT_MODE_WCID_BULK && AppAcqIsUsbSinkActive() != 0U)
+        {
+          UsbWcidApp_SendCsv(WCID_CH_H3_ACCEL, rowbuf, off);
+        }
       }
 
       if (AppAcqIsUsbSinkActive() != 0U)
@@ -2837,12 +2888,18 @@ void StartQma6100pTask(void *argument)
   for (;;)
   {
     AppAcqCheckAutoStop();
+    uint8_t output_format = ACQ_OUTPUT_CSV;  /* 默认 CSV */
     {
       AcqConfig_t cfg; AcqConfig_GetCopy(&cfg);
       if ((AppAcqIsRunning() == 0U) || (cfg.qma6100p.enabled == 0U))
       {
         osDelay(APP_ACQ_IDLE_DELAY_MS);
         continue;
+      }
+      /* output_format 仅对 SD 存储生效,USB 传输始终用 CSV */
+      if (AppAcqIsSdSessionActive() != 0U)
+      {
+        output_format = cfg.output_format;
       }
     }
 
@@ -2928,24 +2985,41 @@ void StartQma6100pTask(void *argument)
       qma_ts_us += s_qma_odr_interval_us;
       uint32_t fid = ++g_qma_frame_id_counter;
 
-      uint32_t off = 0;
-      off += AppU32ToDec(&rowbuf[off], fid);
-      rowbuf[off++] = ',';
-      memcpy(&rowbuf[off], dt_batch_qma, 12U); off += 12U;
-      rowbuf[off++] = ',';
-      off += AppF1ToDec(&rowbuf[off], (float)rx * qma_scale);
-      rowbuf[off++] = ',';
-      off += AppF1ToDec(&rowbuf[off], (float)ry * qma_scale);
-      rowbuf[off++] = ',';
-      off += AppF1ToDec(&rowbuf[off], (float)rz * qma_scale);
-      rowbuf[off++] = '\r';
-      rowbuf[off++] = '\n';
-      RingBuf_Write(&g_ring_qma_acc, (const uint8_t *)rowbuf, off);
-
-      /* WCID Bulk: write CSV directly to USB endpoint double-buffer. */
-      if (g_boot_mode == BOOT_MODE_WCID_BULK && AppAcqIsUsbSinkActive() != 0U)
+      if (output_format == ACQ_OUTPUT_BIN)
       {
-        UsbWcidApp_SendCsv(WCID_CH_QMA_ACCEL, rowbuf, off);
+        /* BIN 模式:构建二进制帧 */
+        SensorBinFrame_QMA_t bin_frame;
+        bin_frame.frame_id = fid;
+        bin_frame.timestamp_us = qma_ts_us;
+        bin_frame.acc_x = rx;
+        bin_frame.acc_y = ry;
+        bin_frame.acc_z = rz;
+        bin_frame.crc32 = SensorBin_CalcCRC32(&bin_frame, sizeof(bin_frame) - 4U);
+
+        RingBuf_Write(&g_ring_qma_acc, (const uint8_t *)&bin_frame, sizeof(bin_frame));
+      }
+      else
+      {
+        /* CSV 模式:构建文本行 */
+        uint32_t off = 0;
+        off += AppU32ToDec(&rowbuf[off], fid);
+        rowbuf[off++] = ',';
+        memcpy(&rowbuf[off], dt_batch_qma, 12U); off += 12U;
+        rowbuf[off++] = ',';
+        off += AppF1ToDec(&rowbuf[off], (float)rx * qma_scale);
+        rowbuf[off++] = ',';
+        off += AppF1ToDec(&rowbuf[off], (float)ry * qma_scale);
+        rowbuf[off++] = ',';
+        off += AppF1ToDec(&rowbuf[off], (float)rz * qma_scale);
+        rowbuf[off++] = '\r';
+        rowbuf[off++] = '\n';
+        RingBuf_Write(&g_ring_qma_acc, (const uint8_t *)rowbuf, off);
+
+        /* WCID Bulk: write CSV directly to USB endpoint double-buffer. */
+        if (g_boot_mode == BOOT_MODE_WCID_BULK && AppAcqIsUsbSinkActive() != 0U)
+        {
+          UsbWcidApp_SendCsv(WCID_CH_QMA_ACCEL, rowbuf, off);
+        }
       }
     }
 
@@ -3016,9 +3090,15 @@ void StartAht20Task(void *argument)
   for (;;)
   {
     AppAcqCheckAutoStop();
+    uint8_t output_format = ACQ_OUTPUT_CSV;  /* 默认 CSV */
     {
       AcqConfig_t cfg; AcqConfig_GetCopy(&cfg);
       if ((AppAcqIsRunning() == 0U) || (cfg.aht20.enabled == 0U)) { osDelay(APP_ACQ_IDLE_DELAY_MS); continue; }
+      /* output_format 仅对 SD 存储生效,USB 传输始终用 CSV */
+      if (AppAcqIsSdSessionActive() != 0U)
+      {
+        output_format = cfg.output_format;
+      }
     }
 
     osMutexAcquire(i2c1_mutex, osWaitForever);
@@ -3038,23 +3118,40 @@ void StartAht20Task(void *argument)
     char dt[12];
     (void)AppFmtDateTime12(dt, epoch_s);
     uint32_t fid = ++g_aht_frame_id_counter;
+    uint64_t ts_us = AppTime_GetEpochUs();
 
-    uint32_t off = 0;
-    off += AppU32ToDec(&rowbuf[off], fid);          rowbuf[off++] = ',';
-    memcpy(&rowbuf[off], dt, 12U); off += 12U;       rowbuf[off++] = ',';
-    off += AppF1ToDec(&rowbuf[off], temp_c);         rowbuf[off++] = ',';
-    off += AppF1ToDec(&rowbuf[off], hum);
-    rowbuf[off++] = '\r'; rowbuf[off++] = '\n';
-    RingBuf_Write(&g_ring_aht_env, (const uint8_t *)rowbuf, off);
-
-    /* WCID Bulk: AHT 数据没有独立 IN 端点，复用命令响应端点 0x85，行首加 "aht,"
-     * 供上位机在该端点上与命令响应文本分流。整行一次发出（≤64B，不截断）。 */
-    if (g_boot_mode == BOOT_MODE_WCID_BULK && AppAcqIsUsbSinkActive() != 0U)
+    if (output_format == ACQ_OUTPUT_BIN)
     {
-      char usbrow[56];
-      usbrow[0] = 'a'; usbrow[1] = 'h'; usbrow[2] = 't'; usbrow[3] = ',';
-      memcpy(&usbrow[4], rowbuf, off);
-      (void)UsbWcidApp_Write((const uint8_t *)usbrow, off + 4U);
+      /* BIN 模式:构建二进制帧(temp_raw/humidity_raw 存放 float 的二进制表示) */
+      SensorBinFrame_AHT_t bin_frame;
+      bin_frame.frame_id = fid;
+      bin_frame.timestamp_us = ts_us;
+      memcpy(&bin_frame.temp_raw, &temp_c, sizeof(float));  /* float 按位存储 */
+      memcpy(&bin_frame.humidity_raw, &hum, sizeof(float));
+      bin_frame.crc32 = SensorBin_CalcCRC32(&bin_frame, sizeof(bin_frame) - 4U);
+
+      RingBuf_Write(&g_ring_aht_env, (const uint8_t *)&bin_frame, sizeof(bin_frame));
+    }
+    else
+    {
+      /* CSV 模式:构建文本行 */
+      uint32_t off = 0;
+      off += AppU32ToDec(&rowbuf[off], fid);          rowbuf[off++] = ',';
+      memcpy(&rowbuf[off], dt, 12U); off += 12U;       rowbuf[off++] = ',';
+      off += AppF1ToDec(&rowbuf[off], temp_c);         rowbuf[off++] = ',';
+      off += AppF1ToDec(&rowbuf[off], hum);
+      rowbuf[off++] = '\r'; rowbuf[off++] = '\n';
+      RingBuf_Write(&g_ring_aht_env, (const uint8_t *)rowbuf, off);
+
+      /* WCID Bulk: AHT 数据没有独立 IN 端点，复用命令响应端点 0x85，行首加 "aht,"
+       * 供上位机在该端点上与命令响应文本分流。整行一次发出（≤64B，不截断）。 */
+      if (g_boot_mode == BOOT_MODE_WCID_BULK && AppAcqIsUsbSinkActive() != 0U)
+      {
+        char usbrow[56];
+        usbrow[0] = 'a'; usbrow[1] = 'h'; usbrow[2] = 't'; usbrow[3] = ',';
+        memcpy(&usbrow[4], rowbuf, off);
+        (void)UsbWcidApp_Write((const uint8_t *)usbrow, off + 4U);
+      }
     }
 
     osDelay(1000U);   /* ~1Hz（手册要求采集周期≥1s） */
@@ -3094,9 +3191,15 @@ void StartLis2mdlTask(void *argument)
   for (;;)
   {
     AppAcqCheckAutoStop();
+    uint8_t output_format = ACQ_OUTPUT_CSV;  /* 默认 CSV */
     {
       AcqConfig_t cfg; AcqConfig_GetCopy(&cfg);
       if ((AppAcqIsRunning() == 0U) || (cfg.lis2mdl.enabled == 0U)) { dt_valid = 0U; osDelay(APP_ACQ_IDLE_DELAY_MS); continue; }
+      /* output_format 仅对 SD 存储生效,USB 传输始终用 CSV */
+      if (AppAcqIsSdSessionActive() != 0U)
+      {
+        output_format = cfg.output_format;
+      }
     }
 
     /* DRDY 硬件节拍（不靠 tick 计时）；20ms 超时自愈。 */
@@ -3136,24 +3239,43 @@ void StartLis2mdlTask(void *argument)
     }
 
     uint32_t fid = ++g_mag_frame_id_counter;
-    uint32_t off = 0;
-    off += AppU32ToDec(&rowbuf[off], fid);     rowbuf[off++] = ',';
-    memcpy(&rowbuf[off], dt, 12U); off += 12U;  rowbuf[off++] = ',';
-    off += AppF1ToDec(&rowbuf[off], mg[0]);    rowbuf[off++] = ',';
-    off += AppF1ToDec(&rowbuf[off], mg[1]);    rowbuf[off++] = ',';
-    off += AppF1ToDec(&rowbuf[off], mg[2]);
-    rowbuf[off++] = '\r'; rowbuf[off++] = '\n';
-    RingBuf_Write(&g_ring_mag, (const uint8_t *)rowbuf, off);
+    uint64_t ts_us = AppTime_GetEpochUs();
 
-    /* WCID Bulk: MAG 数据没有独立 IN 端点，复用命令响应端点 0x85，行首加 "mag,"
-     * 供上位机分流。整行 ≤56B，单次发出不截断。100Hz × ~56B ≈ 5.6KB/s，对 0x85
-     * 可忽略；与命令响应/AHT 的并发由 UsbWcidApp_Write 内的互斥锁串行化。 */
-    if (g_boot_mode == BOOT_MODE_WCID_BULK && AppAcqIsUsbSinkActive() != 0U)
+    if (output_format == ACQ_OUTPUT_BIN)
     {
-      char usbrow[72];
-      usbrow[0] = 'm'; usbrow[1] = 'a'; usbrow[2] = 'g'; usbrow[3] = ',';
-      memcpy(&usbrow[4], rowbuf, off);
-      (void)UsbWcidApp_Write((const uint8_t *)usbrow, off + 4U);
+      /* BIN 模式:构建二进制帧(使用原始 int16_t raw 数据) */
+      SensorBinFrame_MAG_t bin_frame;
+      bin_frame.frame_id = fid;
+      bin_frame.timestamp_us = ts_us;
+      bin_frame.mag_x = raw[0];
+      bin_frame.mag_y = raw[1];
+      bin_frame.mag_z = raw[2];
+      bin_frame.crc32 = SensorBin_CalcCRC32(&bin_frame, sizeof(bin_frame) - 4U);
+
+      RingBuf_Write(&g_ring_mag, (const uint8_t *)&bin_frame, sizeof(bin_frame));
+    }
+    else
+    {
+      /* CSV 模式:构建文本行 */
+      uint32_t off = 0;
+      off += AppU32ToDec(&rowbuf[off], fid);     rowbuf[off++] = ',';
+      memcpy(&rowbuf[off], dt, 12U); off += 12U;  rowbuf[off++] = ',';
+      off += AppF1ToDec(&rowbuf[off], mg[0]);    rowbuf[off++] = ',';
+      off += AppF1ToDec(&rowbuf[off], mg[1]);    rowbuf[off++] = ',';
+      off += AppF1ToDec(&rowbuf[off], mg[2]);
+      rowbuf[off++] = '\r'; rowbuf[off++] = '\n';
+      RingBuf_Write(&g_ring_mag, (const uint8_t *)rowbuf, off);
+
+      /* WCID Bulk: MAG 数据没有独立 IN 端点，复用命令响应端点 0x85，行首加 "mag,"
+       * 供上位机分流。整行 ≤56B，单次发出不截断。100Hz × ~56B ≈ 5.6KB/s，对 0x85
+       * 可忽略；与命令响应/AHT 的并发由 UsbWcidApp_Write 内的互斥锁串行化。 */
+      if (g_boot_mode == BOOT_MODE_WCID_BULK && AppAcqIsUsbSinkActive() != 0U)
+      {
+        char usbrow[72];
+        usbrow[0] = 'm'; usbrow[1] = 'a'; usbrow[2] = 'g'; usbrow[3] = ',';
+        memcpy(&usbrow[4], rowbuf, off);
+        (void)UsbWcidApp_Write((const uint8_t *)usbrow, off + 4U);
+      }
     }
   }
 }
