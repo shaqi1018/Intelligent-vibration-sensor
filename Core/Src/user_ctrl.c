@@ -3,6 +3,9 @@
 #include "app_acq.h"
 #include "cmsis_os2.h"
 
+/* 外部声明系统异常标志(定义在 app_freertos.c) */
+extern volatile uint8_t g_system_error;
+
 #define UC_USER_ACT_MS  2000U  /* 用户键按住 2s → 切换采集开/停 */
 #define UC_PWR_OFF_MS   3000U  /* 电源键按住 3s → 关机 */
 #define UC_LED_MIN_MS     50U
@@ -131,8 +134,14 @@ void StartUserCtrlTask(void *argument)
 
     /* ── LED 闪烁（采集中随机间隔） ──
      * 用 AppCaptureActive 而非 AppAcqIsRunning:麦克风启用时,灯要等 SAI DMA 真正
-     * 开录后才闪,这样"灯亮=麦克风和传感器都在采",用户见灯再开口不会被切开头。 */
-    if (AppCaptureActive() != 0U)
+     * 开录后才闪,这样"灯亮=麦克风和传感器都在采",用户见灯再开口不会被切开头。
+     *
+     * 最高优先级:系统异常时(SD 写失败/传感器初始化失败)LED 常亮告警,跳过其他逻辑。 */
+    if (g_system_error != 0U)
+    {
+      LED_Set(0U);  /* 常亮(硬件 active-low:低电平=亮) */
+    }
+    else if (AppCaptureActive() != 0U)
     {
       if ((int32_t)(now - s_led_next) >= 0)
       {

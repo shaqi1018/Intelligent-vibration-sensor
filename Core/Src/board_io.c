@@ -33,10 +33,10 @@ void BoardIO_Init(void)
   HAL_GPIO_Init(BOARD_POWER_CTL_PORT, &g);
   HAL_GPIO_WritePin(BOARD_POWER_CTL_PORT, BOARD_POWER_CTL_PIN, GPIO_PIN_RESET);
 
-  /* LED (PB12) — output, start off */
+  /* LED (PB12) — output, start off (active-low: HIGH=off) */
   g.Pin = BOARD_LED_PIN;
   HAL_GPIO_Init(BOARD_LED_PORT, &g);
-  HAL_GPIO_WritePin(BOARD_LED_PORT, BOARD_LED_PIN, GPIO_PIN_RESET);
+  HAL_GPIO_WritePin(BOARD_LED_PORT, BOARD_LED_PIN, GPIO_PIN_SET);
 
   /* PA_EN (PB15) — push-pull output. Active-LOW: default HIGH so the codec is
    * NOT powered (saves current, safe on boot). PaEn_Set(1) pulls it LOW. */

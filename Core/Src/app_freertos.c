@@ -82,6 +82,8 @@
 /* Private variables ---------------------------------------------------------*/
 /* USER CODE BEGIN Variables */
 
+volatile uint8_t g_system_error = 0U;  /* 1 = 系统异常(SD写失败/传感器初始化失败),LED 常亮告警 */
+
 /* ======================== Bus architecture ================================
  *
  *   SPI1 (PA5/PA6/PA7 + PC4 CS)          -> LSM6DSOX   (dedicated bus)
@@ -1642,6 +1644,8 @@ static void AppFlowStatsRecordFrameWrite(const AppSensorFrame_t *frame)
 
 static void AppFlowStatsRecordWriteFailure(void)
 {
+  g_system_error = 1U;  /* SD 写失败触发异常告警 */
+
   if (snapshot_mutex == NULL)
   {
     return;
@@ -2390,6 +2394,7 @@ void StartLsm6dsoxTask(void *argument)
    * 重启。FIFO 清空/ODR 重配由 acq_start 与 s 命令时的 AppApplySensorConfig 负责。 */
   if (LSM6DSOX_Init() != HAL_OK)
   {
+    g_system_error = 1U;  /* 传感器初始化失败触发异常告警 */
     printf("[LSM6DSOX] init failed, task exit\r\n");
     /* Null the handle before self-terminating so AppPrintRuntimeDiag's
      * osThreadGetStackSpace() reads NULL (→0) instead of the freed TCB (L1). */
@@ -2646,6 +2651,7 @@ void StartH3lis100dlTask(void *argument)
   osMutexRelease(spi2_mutex);
   if (init_ret != 0)
   {
+    g_system_error = 1U;  /* 传感器初始化失败触发异常告警 */
     printf("[H3LIS100DL] init failed, task exit\r\n");
     h3lis100dlTaskHandle = NULL;   /* avoid dangling handle in diag (L1) */
     osThreadTerminate(NULL);
@@ -2768,6 +2774,7 @@ void StartQma6100pTask(void *argument)
   if (QMA6100P_Init() != HAL_OK)
   {
     osMutexRelease(spi2_mutex);
+    g_system_error = 1U;  /* 传感器初始化失败触发异常告警 */
     printf("[QMA6100P] init failed, task exit\r\n");
     qma6100pTaskHandle = NULL;   /* avoid dangling handle in diag (L1) */
     osThreadTerminate(NULL);
