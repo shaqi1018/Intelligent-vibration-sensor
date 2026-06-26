@@ -32,6 +32,10 @@
 #define BOARD_PA_EN_PIN         GPIO_PIN_15
 #define BOARD_PA_EN_PORT        GPIOB
 
+/* BAT_ADC: PC0 = ADC1_IN1，电池电压检测（经分压电阻） */
+#define BOARD_BAT_ADC_PIN       GPIO_PIN_0
+#define BOARD_BAT_ADC_PORT      GPIOC
+
 void    BoardIO_Init(void);
 void    BoardIO_StartupLatch(void);
 uint8_t BoardIO_IsBatteryLatched(void);

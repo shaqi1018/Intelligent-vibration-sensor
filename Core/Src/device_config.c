@@ -105,6 +105,12 @@ static const char kCfgTemplate[] =
 "    \"enabled\": 1,\r\n"
 "    \"odr_hz\": 100,\r\n"
 "    \"_options_odr_hz\": [10, 20, 50, 100]\r\n"
+"  },\r\n"
+"\r\n"
+"  \"_s8\": \"==================== 电池配置 ====================\",\r\n"
+"  \"battery\": {\r\n"
+"    \"full_mv\": 4200,\r\n"
+"    \"_doc_full_mv\": \"电池满电电压(mV)，充满静置10分钟后用万用表测量填入，用于电量百分比计算\"\r\n"
 "  }\r\n"
 "}\r\n";
 
@@ -263,7 +269,8 @@ static FRESULT DeviceCfg_WriteTemplate(void)
  *  JSON 解析并应用到运行时配置
  * ========================================================================= */
 
-static void DeviceCfg_ParseAndApply(const char *buf)
+/* 返回 1=文件中已有 battery 字段；0=缺少（调用者需补写） */
+static int DeviceCfg_ParseAndApply(const char *buf)
 {
     AcqConfig_t  cfg;
     const char  *p;
@@ -393,6 +400,16 @@ static void DeviceCfg_ParseAndApply(const char *buf)
             cfg.lis2mdl.odr_hz = (uint16_t)v;
     }
 
+    /* ---- battery 子对象 ---- */
+    int has_battery = 0;
+    if (json_extract_object(buf, "battery", s_obj, sizeof(s_obj)))
+    {
+        has_battery = 1;
+        p = json_find_value(s_obj, "full_mv");
+        if (json_parse_uint(p, &v) && v >= 3500U && v <= 4400U)
+            cfg.bat_full_mv = v;
+    }
+
     if (AcqConfig_Set(&cfg) == 0)
     {
         printf("[DevCfg] 配置已应用: boot_acquire=%u sink=0x%02X duration=%lu ms\r\n",
@@ -404,6 +421,7 @@ static void DeviceCfg_ParseAndApply(const char *buf)
     {
         printf("[DevCfg] 配置应用被拒绝（范围校验未通过），使用默认值\r\n");
     }
+    return has_battery;
 }
 
 /* ============================================================================
@@ -473,7 +491,56 @@ FRESULT DeviceCfg_LoadFromSD(void)
     printf("[DevCfg] 已读取 %s (%u bytes)\r\n",
            DEV_CFG_PATH, (unsigned int)read_len);
 
-    DeviceCfg_ParseAndApply(s_buf);
+    int has_battery = DeviceCfg_ParseAndApply(s_buf);
+
+    /* 旧配置文件缺少 battery 字段：找到末尾的 } 前插入 battery 块 */
+    if (has_battery == 0)
+    {
+        /* 找最后一个 } */
+        char *last_brace = NULL;
+        char *q = s_buf;
+        while (*q != '\0') { if (*q == '}') last_brace = q; q++; }
+
+        if (last_brace != NULL)
+        {
+            AcqConfig_t cfg2;
+            AcqConfig_GetCopy(&cfg2);
+
+            /* 在最后的 } 处截断，改写为追加 battery 再闭合 */
+            *last_brace = '\0';
+
+            /* 去掉末尾多余的逗号/空白，再追加 battery */
+            static char s_patch[256];
+            int patch_len = snprintf(s_patch, sizeof(s_patch),
+                ",\r\n\r\n"
+                "  \"_s8\": \"==================== 电池配置 ====================\",\r\n"
+                "  \"battery\": {\r\n"
+                "    \"full_mv\": %lu,\r\n"
+                "    \"_doc_full_mv\": \"电池满电电压(mV)，充满静置10分钟后用万用表测量填入\"\r\n"
+                "  }\r\n"
+                "}\r\n",
+                (unsigned long)cfg2.bat_full_mv);
+
+            if (patch_len > 0 && (size_t)patch_len < sizeof(s_patch))
+            {
+                FIL patch_file;
+                if (f_open(&patch_file, DEV_CFG_PATH, FA_WRITE | FA_OPEN_EXISTING) == FR_OK)
+                {
+                    /* 定位到最后的 } 位置覆写 */
+                    FSIZE_t patch_offset = (FSIZE_t)(last_brace - s_buf);
+                    if (f_lseek(&patch_file, patch_offset) == FR_OK)
+                    {
+                        UINT written = 0U;
+                        (void)f_write(&patch_file, s_patch, (UINT)patch_len, &written);
+                        (void)f_truncate(&patch_file);
+                        (void)f_sync(&patch_file);
+                        printf("[DevCfg] 已向配置文件补写 battery 字段\r\n");
+                    }
+                    (void)f_close(&patch_file);
+                }
+            }
+        }
+    }
 
     FatFs_SD_Unmount();
     return FR_OK;
@@ -571,6 +638,12 @@ FRESULT DeviceCfg_WriteCurrentToSD(void)
         "    \"enabled\": %u,\r\n"
         "    \"odr_hz\": %u,\r\n"
         "    \"_options_odr_hz\": [10, 20, 50, 100]\r\n"
+        "  },\r\n"
+        "\r\n"
+        "  \"_s8\": \"==================== 电池配置 ====================\",\r\n"
+        "  \"battery\": {\r\n"
+        "    \"full_mv\": %lu,\r\n"
+        "    \"_doc_full_mv\": \"电池满电电压(mV)，充满静置10分钟后用万用表测量填入\"\r\n"
         "  }\r\n"
         "}\r\n",
         (unsigned int)cfg.boot_acquire,
@@ -593,7 +666,8 @@ FRESULT DeviceCfg_WriteCurrentToSD(void)
         (unsigned int)cfg.aht20.enabled,
         (unsigned int)cfg.aht20.odr_hz,
         (unsigned int)cfg.lis2mdl.enabled,
-        (unsigned int)cfg.lis2mdl.odr_hz);
+        (unsigned int)cfg.lis2mdl.odr_hz,
+        (unsigned long)cfg.bat_full_mv);
 
     if ((line_len < 0) || ((size_t)line_len >= sizeof(s_line)))
         return FR_INT_ERR;

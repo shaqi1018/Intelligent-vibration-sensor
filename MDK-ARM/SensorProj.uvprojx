@@ -508,6 +508,11 @@
               <FileType>1</FileType>
               <FilePath>../Core/Src/mic_capture.c</FilePath>
             </File>
+            <File>
+              <FileName>battery_adc.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\Core\Src\battery_adc.c</FilePath>
+            </File>
           </Files>
         </Group>
         <Group>

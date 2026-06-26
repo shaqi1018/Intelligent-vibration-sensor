@@ -1,6 +1,7 @@
 #include "user_ctrl.h"
 #include "board_io.h"
 #include "app_acq.h"
+#include "battery_adc.h"
 #include "cmsis_os2.h"
 
 /* 外部声明系统异常标志(定义在 app_freertos.c) */
@@ -14,6 +15,10 @@ extern volatile uint8_t g_system_error;
 /* Require this many consecutive non-pressed polls to reset the 3s power-off
  * timer — prevents mechanical button bounce from restarting the countdown. */
 #define UC_PWR_RELEASE_DEBOUNCE  3U
+
+/* 电量显示：短按电源键后的 LED 快闪参数 */
+#define UC_BAT_FLASH_ON_MS    80U   /* 每次闪亮持续时间 */
+#define UC_BAT_FLASH_OFF_MS   120U  /* 每次闪灭间隔时间 */
 
 static uint32_t s_rng = 0x12345678U;
 
@@ -33,6 +38,35 @@ static uint32_t   s_user_tick      = 0U;
 static uint32_t   s_pwr_tick       = 0U;
 static uint32_t   s_led_next       = 0U;
 static uint8_t    s_pwr_release_ct = 0U; /* release debounce counter */
+
+/* 根据电量百分比决定闪烁次数
+ * ≥80% → 5次, ≥60% → 4次, ≥40% → 3次, ≥20% → 2次, <20% → 1次 */
+static uint8_t BatPercent_ToFlashCount(uint8_t pct)
+{
+  if (pct >= 80U) { return 5U; }
+  if (pct >= 60U) { return 4U; }
+  if (pct >= 40U) { return 3U; }
+  if (pct >= 20U) { return 2U; }
+  return 1U;
+}
+
+/* LED 快闪 n 次（阻塞，仅在触发电量显示时调用，持续约 1~1.5s）*/
+static void BatLed_Flash(uint8_t count)
+{
+  LED_Set(1U);  /* 确保从灭态开始 */
+  osDelay(200U);
+
+  for (uint8_t i = 0U; i < count; i++)
+  {
+    LED_Set(0U);                    /* 亮 (active-low) */
+    osDelay(UC_BAT_FLASH_ON_MS);
+    LED_Set(1U);                    /* 灭 */
+    if (i < count - 1U)
+    {
+      osDelay(UC_BAT_FLASH_OFF_MS); /* 最后一闪后不再等待 */
+    }
+  }
+}
 
 void UserCtrl_Init(void) { /* no RTOS objects needed */ }
 
@@ -80,7 +114,13 @@ void StartUserCtrlTask(void *argument)
       s_user_state = UC_BTN_IDLE;
     }
 
-    /* ── 电源按键：按住 3s 关机 ── */
+    /* ── 电源按键：短按显示电量，长按 3s 关机 ──
+     *
+     * 状态机：
+     *   IDLE → 按下 → PRESSED（记录时刻）
+     *   PRESSED + 仍按住 >= 3s → 执行关机（HANDLED）
+     *   PRESSED + 松开 < 3s   → 显示电量（短按），回到 IDLE
+     */
     uint8_t pwr_dn = PwrBtn_IsPressed();
     if (pwr_dn)
     {
@@ -94,6 +134,8 @@ void StartUserCtrlTask(void *argument)
       {
         if ((now - s_pwr_tick) >= UC_PWR_OFF_MS)
         {
+          /* 长按 3s → 关机 */
+          s_pwr_state = UC_BTN_HANDLED;
           if (AppAcqIsRunning() != 0U)
           {
             AppAcqStop();
@@ -116,10 +158,28 @@ void StartUserCtrlTask(void *argument)
     }
     else
     {
-      /* Require UC_PWR_RELEASE_DEBOUNCE consecutive non-pressed polls before
-       * resetting state — one bounce (20ms) won't restart the 3s counter. */
-      if (s_pwr_state != UC_BTN_IDLE)
+      /* 按键松开 */
+      if (s_pwr_state == UC_BTN_PRESSED)
       {
+        /* 防抖：需要连续几次未按下才确认松开 */
+        if (s_pwr_release_ct < UC_PWR_RELEASE_DEBOUNCE)
+        {
+          s_pwr_release_ct++;
+        }
+        else
+        {
+          /* 松开时长按未到 3s → 短按，显示电量 */
+          uint8_t pct   = BatteryADC_GetPercentage();
+          uint8_t count = BatPercent_ToFlashCount(pct);
+          BatLed_Flash(count);
+
+          s_pwr_state      = UC_BTN_IDLE;
+          s_pwr_release_ct = 0U;
+        }
+      }
+      else if (s_pwr_state == UC_BTN_HANDLED)
+      {
+        /* 关机后松开，等待断电 */
         if (s_pwr_release_ct < UC_PWR_RELEASE_DEBOUNCE)
         {
           s_pwr_release_ct++;

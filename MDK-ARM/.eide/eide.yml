@@ -23,6 +23,9 @@ virtualFolder:
                 - path: ../Core/Src/main.c
                 - path: ../Core/Src/gpio.c
                 - path: ../Core/Src/app_freertos.c
+                - path: ../Core/Src/app_time.c
+                - path: ../Core/Src/i2c.c
+                - path: ../Core/Src/rtc_pcf85063.c
                 - path: ../Core/Src/icache.c
                 - path: ../Core/Src/stm32u5xx_it.c
                 - path: ../Core/Src/stm32u5xx_hal_msp.c
@@ -37,9 +40,6 @@ virtualFolder:
                 - path: ../Core/Src/acq_config.c
                 - path: ../Core/Src/sensor_bin.c
                 - path: ../Core/Src/frame_ring.c
-                - path: ../Core/Src/i2c.c
-                - path: ../Core/Src/app_time.c
-                - path: ../Core/Src/rtc_pcf85063.c
               folders: []
             - name: Storage
               files:

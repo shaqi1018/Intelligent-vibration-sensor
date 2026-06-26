@@ -36,6 +36,7 @@ static void AcqCfgLoadDefaults(void)
   s_cfg.sample_rate_hz   = ACQ_CFG_DEFAULT_RATE_HZ;
   s_cfg.sink_mask        = ACQ_SINK_SD;   /* 新卡默认 SD 卡 */
   s_cfg.output_format    = ACQ_OUTPUT_BIN; /* 新卡默认二进制格式 */
+  s_cfg.bat_full_mv      = 4200U;          /* 默认满电 4.2V，可通过 DEVCFG.JSN 覆盖 */
   s_cfg.storage_mode     = ACQ_STORAGE_LINEAR;
   s_cfg.trigger_mode     = ACQ_TRIGGER_NONE;
   s_cfg.trigger_delay_ms = 0U;
