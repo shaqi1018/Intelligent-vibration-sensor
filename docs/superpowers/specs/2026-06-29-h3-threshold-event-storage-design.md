@@ -78,7 +78,7 @@ uint16_t trig_holdoff_sec;   /* 事件间死区秒数 */
 
 ```
 IDLE --start(threshold)--> ARMED
-  ARMED:  所有启用传感器照常采集 → 各 ring "满则丢最旧覆盖",始终保最近一个 ring 容量(见风险①缓解)
+  ARMED:  所有启用传感器照常采集 → logger 消费者侧裁剪各 ring,只留最近 ~size/2(见风险①缓解)
           logger 不开文件、不写 SD;H3 任务每样本算合矢量
   ARMED --H3 合矢量越限--> TRIGGERED
   TRIGGERED:  ① 新建会话目录 + 开 6 文件(复用 LoggerStart)
@@ -100,7 +100,7 @@ IDLE --start(threshold)--> ARMED
 
 | 风险 | 性质 | 严重度 | 缓解 |
 |---|---|---|---|
-| **① 预触发取错段**: 现 `RingBuf_Write` 满了丢新保旧,预触发需丢旧保新 | 内容错位 | **高(必改)** | ARMED 期 ring 改"满则丢最旧覆盖"(满时推进 tail 腾位再写新),ring 始终持有最近一个 ring 容量的历史;pre_window 即 ring 自然容量(~1.3s LSM),不另配。**仅 ARMED 态生效**(此时 logger 不消费,仅生产者动 tail,无竞争);RUNNING 态恢复原"满则丢新"写盘行为不变。 |
+| **① 预触发取错段**: 现 `RingBuf_Write` 满了丢新保旧,预触发需丢旧保新 | 内容错位 | **高(必改)** | **消费者侧维持**(保护干净 SPSC,不碰 6664Hz 热路径):ARMED/HOLDOFF 期 logger 不写盘,而是主动消费每条 ring 的最旧字节、只留最近 ~size/2(pre_window,LSM ≈ 0.6s,< 1s)。`RingBuf_Write` 与生产者一字不改(仍仅生产者写 `wr_idx`、仅消费者写 `rd_idx`,SPSC 不破)。触发时现有 drain 把留存尾段刷出即预触发。留 size/2 的空余也保证 ARMED 期生产者永不触发"丢新"。 |
 | **② 开文件延迟溢出丢帧**: 触发瞬间 mkdir+6×open+头+sync(数十~>100ms),其间 ring 续灌 | 丢样本 | 中 | LSM ring 1.3s 深度提供缓冲;复用 `AppPrintRuntimeDiag` ring overrun 统计监测;CONFIG.JSN 记录是否发生溢出 |
 | **③ FindNextSessionDir O(n)**: 事件攒多后每次从 CKBX0001 重扫,放大②的窗口 | 丢样本(长期) | 中 | 增量分配:缓存上次会话序号,从 last+1 起扫,避免 O(n²) |
 | ④ 与 seg_size_mb 分段交互 | — | 低 | post_sec=3s 时 LSM 仅 ~560KB ≪ 512MB 段限,事件内不触发分段;无需处理 |
@@ -114,7 +114,7 @@ IDLE --start(threshold)--> ARMED
 
 1. **触发检测器**(H3 采集支路内,`app_freertos.c`): 输入每样本 `acc_mg[3]`,输出"是否越限";纯整数,无副作用。
 2. **事件状态机**(新模块或并入 logger 任务): ARMED/TRIGGERED/RUNNING/HOLDOFF 转换 + post/holdoff 计时;调用 LoggerStart/Stop。
-3. **ARMED 态 ring 覆盖语义**(`RingBuf_Write` + 状态标志): ARMED 时满则丢最旧覆盖,RUNNING 时维持原满则丢新;切换由全局事件态决定。
+3. **ARMED 态 ring 裁剪**(logger 消费者侧): ARMED/HOLDOFF 时 logger 消费各 ring 最旧字节、只留最近 ~size/2;`RingBuf_Write`/生产者不改。
 4. **配置解析与快照**(`device_config.c`/`acq_config.c`): 新字段解析、夹紧、自动补写、CONFIG.JSN 输出。
 5. **会话序号增量分配**(`fatfs_sd.c`): `FindNextSessionDir` 缓存 last index。
 
