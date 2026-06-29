@@ -778,8 +778,11 @@ static uint8_t AppAcqIsUsbSinkActive(void)
   AppAcqControl_t ctrl;
 
   AppAcqGetCopy(&ctrl);
-  /* USB 传输只要采集运行且 USB 连接就可用,不受 sink 配置限制 */
+  /* USB 推流必须用户选了 USB 出口才做。否则 SD-only 模式下只要 USB 连着(看串口),
+   * 就会对每个样本(LSM 6664Hz)逐字节灌没人读的 WCID 端点,抢光 logger/mic 的 CPU
+   * → SD 文件丢失/残缺、mic 崩、apptime 乱(回归根因，3993f6d 误删此门）。 */
   return (uint8_t)((ctrl.running != 0U) &&
+                   (ctrl.sink == APP_ACQ_SINK_USB) &&
                    (AppUsbRawStreamingActive() != 0U));
 }
 
