@@ -29,7 +29,7 @@
 | 会话目录由 `FindNextSessionDir` 从 `CKBX0001` 逐个 `f_stat` 扫到空位(O(n)) | `fatfs_sd.c:127-153` |
 | `LoggerStart` 建目录 + 开 6 文件首段 + 写头;支持 BIN/CSV + seg_size_mb 分段 | `fatfs_sd.c:289-376` |
 | `DeviceCfg_WriteCurrentToSD` 往会话目录写 `CONFIG.JSN` 配置快照 | `device_config.c:602,823` |
-| 触发模式骨架已有 `NONE/EXTERNAL/TIMER` + 状态机 `IDLE/ARMED/RUNNING/STOPPING` | `acq_config.h:42-46,86-91` |
+| 触发模式骨架 `NONE/EXTERNAL/TIMER` + 状态机 `IDLE/ARMED/RUNNING/STOPPING`;**EXTERNAL/TIMER 及 ARMED 未接通**(无代码消费 ARMED) | `acq_config.h:42-46,86-91`; `acq_config.c:381` |
 | ring 尺寸: LSM 256KB / QMA 32KB / H3 16KB / MAG 16KB / AHT 4KB / MIC 64KB | `sensor_snapshot.h:103-109` |
 
 LSM BIN 帧 28 字节 @6664Hz ≈ 187KB/s → 256KB ring 预触发上限 ≈ **1.3s**(CSV 更大,~0.5s)。预触发被 LSM 卡在亚秒级,符合需求。
@@ -38,30 +38,37 @@ DATALOG1 参考工程为连续流式记录,无预触发事件模式可抄(其 Au
 
 ---
 
-## 配置(DEVCFG.JSN 新增字段)
+## 配置(DEVCFG.JSN)
 
-沿用既有自定义 JSON 解析 + 缺字段自动补写 + 夹紧的套路(同 `seg_size_mb`/`bat_full_mv`)。
+**复用既有 `trigger_mode` 字段,不新增平行模式字段。** 现状 `trigger_mode`(`NONE/EXTERNAL/TIMER`)是没接完的脚手架:仅 `AcqConfig_Start`(`acq_config.c:381`)用它决定 `RUNNING` vs `ARMED`,但全工程无任何代码消费 `ACQ_STATE_ARMED`,采集任务用独立的 `g_acq_ctrl.running`,且 DEVCFG.JSN 从不解析 `trigger_mode`。`EXTERNAL/TIMER` 从未真正工作,`ARMED` 状态闲置。
+
+本设计**给 `trigger_mode` 加 `THRESHOLD` 值并真正接通**:`ARMED`(注释即"等待触发")语义与事件门控吻合,顺手复活闲置状态机。`EXTERNAL/TIMER` 保留不动(本就未用)。
+
+沿用既有自定义 JSON 解析 + 缺字段自动补写 + 夹紧的套路(同 `seg_size_mb`/`bat_full_mv`):
 
 ```jsonc
-"trig_mode": "threshold",   // "none"(默认,原行为) | "threshold"
-"trig_src": "h3",           // 触发源,目前仅 "h3"(预留扩展)
-"trig_level_g": 5,          // 合矢量阈值(g),夹紧 [1, 100]
-"trig_post_sec": 3,         // 后触发录制秒数,夹紧 [1, 600]
-"trig_holdoff_sec": 2       // 事件间死区秒数,夹紧 [0, 600]
+"trigger_mode": "threshold", // "none"(默认=今天的连续录制) | "threshold"(事件门控)
+"trig_level_g": 5,           // 合矢量阈值(g),夹紧 [1, 100]
+"trig_post_sec": 3,          // 后触发录制秒数,夹紧 [1, 600]
+"trig_holdoff_sec": 2        // 事件间死区秒数,夹紧 [0, 600]
 ```
+
+`"none"` = 默认值 = 现行连续记录模式(`acq_start`/开机自采/按键启动后连续录到停或 `duration_ms`),新功能默认关闭、不配者行为不变。
 
 默认值: `trig_level_g=5`、`trig_post_sec=3`、`trig_holdoff_sec=2`。
 缺失字段自动补写进 DEVCFG.JSN(带 `_doc_*` 说明,不写上限注释,夹紧静默在代码内)。
 
-`AcqConfig_t` 对应新增:
+`AcqConfig_t` 改动:
 ```c
-uint8_t  trig_mode;          /* 0=NONE, 1=THRESHOLD */
-uint8_t  trig_src;           /* 0=H3(目前唯一) */
+/* AcqTriggerMode_t 既有 NONE/EXTERNAL/TIMER, 新增: */
+ACQ_TRIGGER_THRESHOLD = 3,   /* H3 合矢量越限事件门控 */
+
+/* 新增参数字段(仅 THRESHOLD 模式生效): */
 uint16_t trig_level_g;       /* 合矢量阈值, g */
 uint16_t trig_post_sec;      /* 后触发秒数 */
 uint16_t trig_holdoff_sec;   /* 事件间死区秒数 */
 ```
-触发判据用 `trig_level_mg² = (level_g*1000)²` 预算成 `uint64_t` 存运行时,H3 每样本只做整数乘加比较。
+触发判据用 `trig_level_mg² = (level_g*1000)²` 预算成 `uint64_t` 存运行时,H3 每样本只做整数乘加比较。触发源固定 H3,不设 `trig_src`(YAGNI,扩展时再加)。
 
 ---
 
@@ -119,7 +126,8 @@ IDLE --start(threshold)--> ARMED
 
 - 不做单轴/任一轴触发(已定合矢量)。
 - 不做可配置预触发时长(用 ring 自然深度,< 1s)。
-- 不做多触发源并存(`trig_src` 仅 h3,字段预留)。
+- 不做多触发源并存(触发源固定 H3,不设 `trig_src` 字段)。
+- 不动老 `EXTERNAL`/`TIMER`(本就未接通),不在本特性内补完它们。
 - 不做事件专用目录命名(用普通 CKBXnnnn + CONFIG.JSN 区分)。
 - 不碰 USB 路径、不碰 IDMA、不碰已验证的写盘字节通路。
 
