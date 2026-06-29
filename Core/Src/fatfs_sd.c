@@ -39,6 +39,34 @@ static uint8_t g_sd_mounted = 0U;
 static uint8_t g_logger_active = 0U;
 static uint32_t g_logger_rows_written = 0U;
 
+/* ---- 文件分段(segmentation) ----
+ * 6 个传感器数据文件(索引 0..5)各自独立按字节数滚动；MIC.WAV(索引6)不分段。
+ * 段1沿用原文件名(如 LSM_IMU.CSV)；续段用短标签+4位段号(如 IMU0002.CSV)，
+ * 满足 8.3 短名限制(_USE_LFN=0)。CSV 续段重写表头，BIN 续段无头(同首段)。*/
+static uint32_t g_seg_max_bytes = 0U;                    /* 0=不分段；否则每段字节上限 */
+static uint8_t  g_log_format    = ACQ_OUTPUT_CSV;        /* LoggerStart 时缓存的输出格式 */
+static uint32_t g_file_bytes[FATFS_SD_NUM_FILES] = {0};  /* 当前段已写字节数 */
+static uint16_t g_file_seg[FATFS_SD_NUM_FILES]   = {0};  /* 当前段号(1 基) */
+
+static const char *const kLogFnames[FATFS_SD_NUM_FILES] = {
+  FATFS_SD_FNAME_LSM_IMU, FATFS_SD_FNAME_LSM_TMP,
+  FATFS_SD_FNAME_H3_ACC,  FATFS_SD_FNAME_QMA_ACC,
+  FATFS_SD_FNAME_AHT_ENV, FATFS_SD_FNAME_MAG
+};
+/* 续段短标签：≤4 字符，拼 4 位段号后 ≤8 字符，满足 8.3 */
+static const char *const kLogTags[FATFS_SD_NUM_FILES] = {
+  "IMU", "TMP", "H3_", "QMA", "ENV", "MAG"
+};
+/* CSV 表头（缩放后物理量 mg / mdps）。BIN 模式不写。*/
+static const char *const kLogHeaders[FATFS_SD_NUM_FILES] = {
+  "frame_id,datetime,acc_x_mg,acc_y_mg,acc_z_mg,gyr_x_mdps,gyr_y_mdps,gyr_z_mdps\r\n",
+  "frame_id,tick_ms,temp_C\r\n",
+  "frame_id,datetime,acc_x_mg,acc_y_mg,acc_z_mg\r\n",
+  "frame_id,datetime,acc_x_mg,acc_y_mg,acc_z_mg\r\n",
+  "frame_id,datetime,temp_C,humidity_pct\r\n",
+  "frame_id,datetime,mag_x_mG,mag_y_mG,mag_z_mG\r\n"
+};
+
 /* MIC.WAV —— 单独的 FIL + 字节计数器（区别于 CSV 的 g_log_files[]）。
  * 头里的 chunk_size/data_size 先写占位，停止时 f_lseek 回填。 */
 static FIL      g_wav_file;
@@ -168,6 +196,33 @@ static FRESULT FatFs_SD_OpenCsvFile(FIL *file, const char *dir, const char *fnam
   return f_sync(file);
 }
 
+/* 打开数据文件 idx 的当前段(文件名由 g_file_seg[idx] 决定)，并清零该段字节计数。
+ * 段1用原名 kLogFnames[idx]；段>1 用 kLogTags[idx]+4位段号。扩展名/表头由
+ * FatFs_SD_OpenCsvFile 按 g_log_format 处理(CSV写表头、BIN跳过)。*/
+static FRESULT FatFs_SD_OpenLogSegment(uint8_t idx)
+{
+  char base[16];
+
+  if (g_file_seg[idx] <= 1U)
+  {
+    (void)snprintf(base, sizeof(base), "%s", kLogFnames[idx]);
+  }
+  else
+  {
+    /* 续段：短标签 + 4位段号 + 占位 .CSV(扩展名由 OpenCsvFile 按格式重定) */
+    (void)snprintf(base, sizeof(base), "%s%04u.CSV",
+                   kLogTags[idx], (unsigned int)g_file_seg[idx]);
+  }
+
+  FRESULT r = FatFs_SD_OpenCsvFile(&g_log_files[idx], g_session_dir, base,
+                                   kLogHeaders[idx], g_log_format);
+  if (r == FR_OK)
+  {
+    g_file_bytes[idx] = 0U;
+  }
+  return r;
+}
+
 FRESULT FatFs_SD_Mount(void)
 {
   FRESULT result;
@@ -235,24 +290,6 @@ FRESULT FatFs_SD_LoggerStart(void)
 {
   FRESULT result;
 
-  /* CSV headers — scaled physical values (mg / mdps) */
-  static const char kHdrLsmImu[] =
-      "frame_id,datetime,acc_x_mg,acc_y_mg,acc_z_mg,gyr_x_mdps,gyr_y_mdps,gyr_z_mdps\r\n";
-  static const char kHdrLsmTmp[] = "frame_id,tick_ms,temp_C\r\n";
-  static const char kHdrH3Acc[]  = "frame_id,datetime,acc_x_mg,acc_y_mg,acc_z_mg\r\n";
-  static const char kHdrQmaAcc[] = "frame_id,datetime,acc_x_mg,acc_y_mg,acc_z_mg\r\n";
-  static const char kHdrAhtEnv[] = "frame_id,datetime,temp_C,humidity_pct\r\n";
-  static const char kHdrMag[]    = "frame_id,datetime,mag_x_mG,mag_y_mG,mag_z_mG\r\n";
-
-  static const char *headers[FATFS_SD_NUM_FILES] = {
-    kHdrLsmImu, kHdrLsmTmp, kHdrH3Acc, kHdrQmaAcc, kHdrAhtEnv, kHdrMag
-  };
-  static const char *fnames[FATFS_SD_NUM_FILES] = {
-    FATFS_SD_FNAME_LSM_IMU, FATFS_SD_FNAME_LSM_TMP,
-    FATFS_SD_FNAME_H3_ACC,  FATFS_SD_FNAME_QMA_ACC,
-    FATFS_SD_FNAME_AHT_ENV, FATFS_SD_FNAME_MAG
-  };
-
   if (g_logger_active != 0U)
   {
     return FR_OK;
@@ -288,15 +325,30 @@ FRESULT FatFs_SD_LoggerStart(void)
     return result;
   }
 
-  /* 获取当前配置的输出格式 */
+  /* 获取当前配置的输出格式与分段大小 */
   AcqConfig_t cfg;
   AcqConfig_GetCopy(&cfg);
-  uint8_t output_format = cfg.output_format;
+  g_log_format = cfg.output_format;
 
-  /* 打开 6 个文件(CSV 或 BIN)并根据格式写入表头 */
+  /* 计算分段字节上限：0=不分段；否则夹紧到 [16,4000]MB(<FAT32 单文件 4GB) */
+  if (cfg.seg_size_mb == 0U)
+  {
+    g_seg_max_bytes = 0U;
+  }
+  else
+  {
+    uint32_t mb = cfg.seg_size_mb;
+    if (mb < 16U)   { mb = 16U; }
+    if (mb > 4000U) { mb = 4000U; }
+    g_seg_max_bytes = mb * 1024U * 1024U;   /* 4000*1MiB=4194304000 < UINT32_MAX */
+  }
+
+  /* 打开 6 个数据文件的首段(CSV 或 BIN)，并根据格式写入表头 */
   for (uint32_t i = 0U; i < FATFS_SD_NUM_FILES; i++)
   {
-    result = FatFs_SD_OpenCsvFile(&g_log_files[i], g_session_dir, fnames[i], headers[i], output_format);
+    g_file_seg[i]   = 1U;
+    g_file_bytes[i] = 0U;
+    result = FatFs_SD_OpenLogSegment((uint8_t)i);
     if (result != FR_OK)
     {
       /* 关闭已打开的文件 */
@@ -309,7 +361,15 @@ FRESULT FatFs_SD_LoggerStart(void)
     }
   }
 
-  printf("[FatFs] 会话目录已创建: %s\r\n", g_session_dir);
+  if (g_seg_max_bytes == 0U)
+  {
+    printf("[FatFs] 会话目录已创建: %s (不分段)\r\n", g_session_dir);
+  }
+  else
+  {
+    printf("[FatFs] 会话目录已创建: %s (每文件分段 %luMB)\r\n",
+           g_session_dir, (unsigned long)(g_seg_max_bytes / (1024U * 1024U)));
+  }
   g_logger_active = 1U;
   g_logger_rows_written = 0U;
   return FR_OK;
@@ -420,7 +480,32 @@ FRESULT FatFs_SD_LoggerWriteFileIndex(uint8_t idx, const uint8_t *data, uint32_t
   if (idx >= FATFS_SD_NUM_FILES) return FR_INVALID_PARAMETER;
   if (g_logger_active == 0U) return FR_NOT_ENABLED;
   if (SDMMC1_IsCardDetected() == 0U) return FR_NOT_READY;
-  return FatFs_SD_WriteExact(&g_log_files[idx], data, (UINT)len);
+
+  /* 分段：本段已写 g_file_bytes[idx]，若再写 len 会超过上限就先滚动到下一段。
+   * 在写入前滚动可保证“整块写入”不跨文件，每段大小始终 ≤ g_seg_max_bytes
+   * (误差 < 一次 flush 块 16KB)。g_file_bytes!=0 的判定避免首块即滚动。*/
+  if ((g_seg_max_bytes != 0U) && (g_file_bytes[idx] != 0U) &&
+      ((g_file_bytes[idx] + len) > g_seg_max_bytes))
+  {
+    (void)f_sync(&g_log_files[idx]);
+    (void)f_close(&g_log_files[idx]);
+    g_file_seg[idx]++;
+    FRESULT ro = FatFs_SD_OpenLogSegment(idx);
+    if (ro != FR_OK)
+    {
+      printf("[FatFs] 文件%u 开新段(seg=%u)失败: %s (%d)\r\n",
+             (unsigned int)idx, (unsigned int)g_file_seg[idx],
+             FatFs_SD_ResultToString(ro), (int)ro);
+      return ro;
+    }
+  }
+
+  FRESULT r = FatFs_SD_WriteExact(&g_log_files[idx], data, (UINT)len);
+  if (r == FR_OK)
+  {
+    g_file_bytes[idx] += len;
+  }
+  return r;
 }
 
 /* MIC.WAV 收尾：回填 chunk_size(@偏移4) 与 data_size(@偏移40)，同步并关闭。 */

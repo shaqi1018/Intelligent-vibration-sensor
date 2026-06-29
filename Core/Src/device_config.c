@@ -29,7 +29,7 @@
  * ========================================================================= */
 
 #define DEV_CFG_PATH           "0:/DEVCFG.JSN"
-#define DEV_CFG_READ_BUF_SZ    4096U     /* 配置文件读取缓冲区字节数（新模板带中文说明，需 >文件大小，否则尾部传感器被截断丢解析） */
+#define DEV_CFG_READ_BUF_SZ    6144U     /* 配置文件读取缓冲区字节数（新模板带中文说明+分段，需 >文件大小，否则尾部字段被截断丢解析） */
 #define DEV_CFG_OBJ_BUF_SZ     512U      /* 子对象提取缓冲区字节数   */
 
 /* 上电写入的默认模板（与解析器所支持的字段保持一致）
@@ -53,6 +53,9 @@ static const char kCfgTemplate[] =
 "\r\n"
 "  \"duration_ms\": 0,\r\n"
 "  \"_doc_duration_ms\": \"单次采集时长(ms)，到点自动停；0=一直采到关机或手动停\",\r\n"
+"\r\n"
+"  \"seg_size_mb\": 512,\r\n"
+"  \"_doc_seg_size_mb\": \"SD每个数据文件分段大小(MB)：单文件写满即新建续段(如 LSM_IMU.BIN→IMU0002.BIN→...)，各文件独立计数；0=不分段(单文件)。麦克风MIC.WAV不分段\",\r\n"
 "\r\n"
 "  \"_s2\": \"==================== LSM6DSOX 六轴IMU ====================\",\r\n"
 "  \"lsm6dsox\": {\r\n"
@@ -269,7 +272,8 @@ static FRESULT DeviceCfg_WriteTemplate(void)
  *  JSON 解析并应用到运行时配置
  * ========================================================================= */
 
-/* 返回 1=文件中已有 battery 字段；0=缺少（调用者需补写） */
+/* 返回位掩码：bit0=文件已有 battery 字段，bit1=已有 seg_size_mb 字段。
+ * 缺失的位由调用者补写进配置文件。 */
 static int DeviceCfg_ParseAndApply(const char *buf)
 {
     AcqConfig_t  cfg;
@@ -303,6 +307,27 @@ static int DeviceCfg_ParseAndApply(const char *buf)
 
     p = json_find_value(buf, "duration_ms");
     if (json_parse_uint(p, &v)) cfg.duration_ms = v;
+
+    /* ---- seg_size_mb 顶层标量（分段大小，MB） ---- */
+    int has_seg = 0;
+    p = json_find_value(buf, "seg_size_mb");
+    if (p != NULL)
+    {
+        has_seg = 1;
+        if (json_parse_uint(p, &v))
+        {
+            if (v == 0U)
+            {
+                cfg.seg_size_mb = 0U;          /* 0=不分段 */
+            }
+            else
+            {
+                if (v < 16U)   v = 16U;        /* 下限 16MB */
+                if (v > 4000U) v = 4000U;      /* 上限 4000MB(<FAT32 4GB) */
+                cfg.seg_size_mb = v;
+            }
+        }
+    }
 
     /* ---- lsm6dsox 子对象 ---- */
     if (json_extract_object(buf, "lsm6dsox", s_obj, sizeof(s_obj)))
@@ -421,7 +446,7 @@ static int DeviceCfg_ParseAndApply(const char *buf)
     {
         printf("[DevCfg] 配置应用被拒绝（范围校验未通过），使用默认值\r\n");
     }
-    return has_battery;
+    return (has_battery ? 1 : 0) | (has_seg ? 2 : 0);
 }
 
 /* ============================================================================
@@ -491,10 +516,10 @@ FRESULT DeviceCfg_LoadFromSD(void)
     printf("[DevCfg] 已读取 %s (%u bytes)\r\n",
            DEV_CFG_PATH, (unsigned int)read_len);
 
-    int has_battery = DeviceCfg_ParseAndApply(s_buf);
+    int present = DeviceCfg_ParseAndApply(s_buf);  /* bit0=battery, bit1=seg */
 
-    /* 旧配置文件缺少 battery 字段：找到末尾的 } 前插入 battery 块 */
-    if (has_battery == 0)
+    /* 旧配置文件可能缺少 seg_size_mb / battery：在末尾的 } 前一次性补齐缺失项 */
+    if (((present & 1) == 0) || ((present & 2) == 0))
     {
         /* 找最后一个 } */
         char *last_brace = NULL;
@@ -506,22 +531,48 @@ FRESULT DeviceCfg_LoadFromSD(void)
             AcqConfig_t cfg2;
             AcqConfig_GetCopy(&cfg2);
 
-            /* 在最后的 } 处截断，改写为追加 battery 再闭合 */
+            /* 在最后的 } 处截断，改写为追加缺失字段再闭合 */
             *last_brace = '\0';
 
-            /* 去掉末尾多余的逗号/空白，再追加 battery */
-            static char s_patch[256];
-            int patch_len = snprintf(s_patch, sizeof(s_patch),
-                ",\r\n\r\n"
-                "  \"_s8\": \"==================== 电池配置 ====================\",\r\n"
-                "  \"battery\": {\r\n"
-                "    \"full_mv\": %lu,\r\n"
-                "    \"_doc_full_mv\": \"电池满电电压(mV)，充满静置10分钟后用万用表测量填入\"\r\n"
-                "  }\r\n"
-                "}\r\n",
-                (unsigned long)cfg2.bat_full_mv);
+            static char s_patch[640];
+            char  *w     = s_patch;
+            size_t cap   = sizeof(s_patch);
+            int    adv;
+            int    first = 1;   /* 第一个补写段不加前导逗号(分隔逗号已先写) */
 
-            if (patch_len > 0 && (size_t)patch_len < sizeof(s_patch))
+            /* 与原有最后一个字段之间的分隔逗号 */
+            adv = snprintf(w, cap, ",\r\n");
+            if (adv > 0 && (size_t)adv < cap) { w += adv; cap -= (size_t)adv; }
+
+            if ((present & 2) == 0)   /* 补 seg_size_mb */
+            {
+                adv = snprintf(w, cap,
+                    "%s\r\n"
+                    "  \"seg_size_mb\": %lu,\r\n"
+                    "  \"_doc_seg_size_mb\": \"SD每个数据文件分段大小(MB)：单文件写满即新建续段(LSM_IMU.BIN→IMU0002.BIN...)，各文件独立计数；0=不分段。MIC.WAV不分段\"",
+                    first ? "" : ",\r\n", (unsigned long)cfg2.seg_size_mb);
+                if (adv > 0 && (size_t)adv < cap) { w += adv; cap -= (size_t)adv; first = 0; }
+            }
+
+            if ((present & 1) == 0)   /* 补 battery */
+            {
+                adv = snprintf(w, cap,
+                    "%s\r\n"
+                    "  \"_s8\": \"==================== 电池配置 ====================\",\r\n"
+                    "  \"battery\": {\r\n"
+                    "    \"full_mv\": %lu,\r\n"
+                    "    \"_doc_full_mv\": \"电池满电电压(mV)，充满静置10分钟后用万用表测量填入\"\r\n"
+                    "  }",
+                    first ? "" : ",\r\n", (unsigned long)cfg2.bat_full_mv);
+                if (adv > 0 && (size_t)adv < cap) { w += adv; cap -= (size_t)adv; first = 0; }
+            }
+
+            /* 闭合外层对象 */
+            adv = snprintf(w, cap, "\r\n}\r\n");
+            if (adv > 0 && (size_t)adv < cap) { w += adv; cap -= (size_t)adv; }
+
+            int patch_len = (int)(w - s_patch);
+            if (patch_len > 0)
             {
                 FIL patch_file;
                 if (f_open(&patch_file, DEV_CFG_PATH, FA_WRITE | FA_OPEN_EXISTING) == FR_OK)
@@ -534,7 +585,7 @@ FRESULT DeviceCfg_LoadFromSD(void)
                         (void)f_write(&patch_file, s_patch, (UINT)patch_len, &written);
                         (void)f_truncate(&patch_file);
                         (void)f_sync(&patch_file);
-                        printf("[DevCfg] 已向配置文件补写 battery 字段\r\n");
+                        printf("[DevCfg] 已向配置文件补写缺失字段(seg/battery)\r\n");
                     }
                     (void)f_close(&patch_file);
                 }
@@ -555,7 +606,7 @@ FRESULT DeviceCfg_WriteCurrentToSD(void)
     AcqConfig_t cfg;
     const char *sink_name;
     const char *format_name;
-    static char s_line[4096];   /* UTF-8 中文说明占多字节，留足余量 */
+    static char s_line[6144];   /* UTF-8 中文说明占多字节，留足余量 */
     int         line_len;
 
     AcqConfig_GetCopy(&cfg);
@@ -586,6 +637,9 @@ FRESULT DeviceCfg_WriteCurrentToSD(void)
         "\r\n"
         "  \"duration_ms\": %lu,\r\n"
         "  \"_doc_duration_ms\": \"单次采集时长(ms)，到点自动停；0=一直采到关机或手动停\",\r\n"
+        "\r\n"
+        "  \"seg_size_mb\": %lu,\r\n"
+        "  \"_doc_seg_size_mb\": \"SD每个数据文件分段大小(MB)：单文件写满即新建续段(LSM_IMU.BIN→IMU0002.BIN...)，各文件独立计数；0=不分段。MIC.WAV不分段\",\r\n"
         "\r\n"
         "  \"_s2\": \"==================== LSM6DSOX 六轴IMU ====================\",\r\n"
         "  \"lsm6dsox\": {\r\n"
@@ -649,6 +703,7 @@ FRESULT DeviceCfg_WriteCurrentToSD(void)
         (unsigned int)cfg.boot_acquire,
         format_name,
         (unsigned long)cfg.duration_ms,
+        (unsigned long)cfg.seg_size_mb,
         (unsigned int)cfg.lsm6dsox.enabled,
         (unsigned int)cfg.lsm6dsox.range,
         (unsigned int)cfg.lsm6dsox.range2,

@@ -68,6 +68,7 @@ typedef struct {
   uint8_t  sink_mask;                  /* USB / SD / BOTH */
   uint8_t  output_format;              /* ACQ_OUTPUT_CSV / ACQ_OUTPUT_BIN (仅 SD sink 生效) */
   uint32_t bat_full_mv;                /* 电池满电电压（mV），用于电量百分比计算；0=使用默认4200mV */
+  uint32_t seg_size_mb;                /* SD 每个数据文件分段大小（MB）：写满即新建续段；0=不分段(单文件)。上限4000(FAT32 4GB限制) */
   AcqStorageMode_t storage_mode;
   AcqTriggerMode_t trigger_mode;
   uint32_t trigger_delay_ms;           /* TIMER 触发时延迟，外部触发为去抖 */
