@@ -2,6 +2,7 @@
 #include "board_io.h"
 #include "app_acq.h"
 #include "battery_adc.h"
+#include "boot_mode.h"
 #include "cmsis_os2.h"
 
 /* 外部声明系统异常标志(定义在 app_freertos.c) */
@@ -68,6 +69,42 @@ static void BatLed_Flash(uint8_t count)
   }
 }
 
+/* path/sd: USB 插入即进 MSC(把 SD 卡当 U 盘给电脑读录制文件)。
+ * 触发条件:自开机起至少观测到一次 USB 未插(PC7 LOW)之后,再出现 PC7 上升沿才触发。
+ *   —— 这样"USB 上电启动"或"MSC 因无卡弹回 DATA_LOG 后 USB 仍插着"这两种开机即 HIGH 的
+ *      情形不会立刻重进 MSC,根除 normal↔MSC 复位死循环;电池运行后用户插 USB 的正常读卡
+ *      场景照常触发。逻辑自包含,不改 fatfs_sd.c 等共享文件(保 cherry-pick)。
+ * 进 MSC 前先优雅停采、等 logger 关文件 flush,保证刚录的数据完整(用户要求)。 */
+static uint8_t s_usb_seen_low = 0U;
+static uint8_t s_usb_prev     = 0U;
+
+static void Uc_CheckUsbToMsc(void)
+{
+  uint8_t usb_now = UsbDet_IsPresent();
+  if (usb_now == 0U) { s_usb_seen_low = 1U; }
+
+  if ((s_usb_seen_low != 0U) && (usb_now != 0U) && (s_usb_prev == 0U))
+  {
+    /* USB 插入上升沿 → 进 MSC */
+    if (AppAcqIsRunning() != 0U)
+    {
+      AppAcqStop();
+      /* 等采集真正收尾(logger 关闭并 flush 文件),最多 ~3s */
+      for (uint32_t i = 0U; i < 150U; i++)
+      {
+        if (AppAcqIsRunning() == 0U) { break; }
+        osDelay(20U);
+      }
+      osDelay(300U);  /* 余量:确保 f_close/f_sync 落盘 */
+    }
+    LED_Set(1U);                        /* 灭灯 */
+    BootMode_Write(BOOT_MODE_USB_MSC);  /* 写 TAMP 标志 */
+    NVIC_SystemReset();                 /* 复位 → 开机枚举为 U 盘(MSC) */
+  }
+
+  s_usb_prev = usb_now;
+}
+
 void UserCtrl_Init(void) { /* no RTOS objects needed */ }
 
 void StartUserCtrlTask(void *argument)
@@ -82,6 +119,9 @@ void StartUserCtrlTask(void *argument)
   for (;;)
   {
     uint32_t now = osKernelGetTickCount();
+
+    /* path/sd: USB 插入 → 优雅停采收尾 → 复位进 MSC 读卡(优先于按键逻辑) */
+    Uc_CheckUsbToMsc();
 
     /* ── 用户按键：按住 2s 切换采集开/停 ── */
     uint8_t user_dn = UserBtn_IsPressed();

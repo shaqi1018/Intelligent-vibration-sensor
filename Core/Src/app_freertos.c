@@ -278,9 +278,7 @@ static uint32_t RingBuf_PeekContiguous(AppRingBuffer_t *rb, const uint8_t **out_
 static void     RingBuf_Consume(AppRingBuffer_t *rb, uint32_t len);
 static int      LoggerDrainRing(AppRingBuffer_t *rb, uint8_t file_idx, uint32_t min_flush,
                                 uint32_t *rows_since_sync, FRESULT *out_res);
-static void     AppEvtH3Sample(float mx, float my, float mz);  /* 阈值检测:定义在 StartLoggerTask 前,调用在 H3 支路(更靠前),需前置声明 */
-static uint8_t  AppEvtThresholdMode(void);  /* 同上,供 AppAcqCheckAutoStop/AppCaptureActive 提前调用 */
-static uint8_t  AppEvtIsRecording(void);
+/* 阈值控制器(AppEvt*)已移除 */
 static inline uint32_t AppU32ToDec(char *out, uint32_t v);
 static inline uint32_t AppI32ToDec(char *out, int32_t v);
 static inline uint32_t AppU64ToDec(char *out, uint64_t v);
@@ -715,9 +713,6 @@ uint32_t AppAcqIsRunning(void)
 uint8_t AppCaptureActive(void)
 {
   if (AppAcqIsRunning() == 0U) { return 0U; }
-  /* 阈值模式:只有真正在录制事件(REC)时才算"采集中"。布防/死区返回 0 → LED 灭,
-   * 这样灯灭=守候、灯闪=正在录事件,肉眼可区分。 */
-  if (AppEvtThresholdMode() != 0U) { return AppEvtIsRecording(); }
   AcqConfig_t c;
   AcqConfig_GetCopy(&c);
   if ((c.es8311.enabled != 0U) && (s_mic_capturing == 0U)) { return 0U; }
@@ -869,12 +864,6 @@ static void AppAcqCheckAutoStop(void)
 
   AppAcqGetCopy(&ctrl);
   if ((ctrl.running == 0U) || (ctrl.duration_ms == 0U) || (ctrl.timer_armed == 0U))
-  {
-    return;
-  }
-  /* 阈值模式:不按 duration 自动停(每个事件会重置会话计时器,duration 永不到点;
-   * 且语义是"布防守候到手动停/断电")。事件录制时长由 trig_post_sec 控制。 */
-  if (AppEvtThresholdMode() != 0U)
   {
     return;
   }
@@ -2079,9 +2068,6 @@ void StartH3lis100dlTask(void *argument)
 
     if (ret == 0)
     {
-      /* 阈值事件门控:每样本判合矢量越限(仅阈值模式生效,非阈值模式立即返回)。 */
-      AppEvtH3Sample(data.acc_mg[0], data.acc_mg[1], data.acc_mg[2]);
-
       /* Monotonic timestamp: seed with DWT on first sample, then +interval per sample. */
       static uint32_t h3_ts_us = 0U;
       static uint8_t h3_ts_init = 0U;
@@ -2577,167 +2563,6 @@ void StartMicTask(void *argument)
   }
 }
 
-/* ============================================================================
- *  H3 阈值触发事件门控控制器
- *  - H3 采集任务每样本调 AppEvtH3Sample()，越限则自增 g_evt_trig_seq(唯一写者)。
- *  - logger 任务每轮调 AppEvtSdGate() 推进状态机，返回"此刻是否应开 SD 会话"。
- *  - ARMED/HOLDOFF 期 logger 调 AppEvtTrimRings() 在消费者侧裁剪各 ring，只留最近
- *    ~size/2 作预触发(不碰 RingBuf_Write/生产者，SPSC 不破)。
- *  时间基准用 AppTime_GetEpochUs()(RTOS tick 慢~19%，定时不可用 tick)；logger 每轮
- *  仅调用一次，频率低，符合 AppTime 限流要求。
- * ========================================================================= */
-typedef enum { EVT_OFF = 0, EVT_ARMED, EVT_REC, EVT_HOLDOFF } AppEvtState_t;
-
-static volatile uint32_t g_evt_trig_seq = 0U;   /* H3 在"上升越过触发阈值"时自增(唯一写者) */
-static volatile uint8_t  g_evt_over     = 0U;    /* H3 迟滞态:1=当前在触发阈值之上(唯一写者 H3) */
-static uint32_t  g_evt_last_seen_seq = 0U;       /* logger 上次观察到的 seq */
-static uint64_t  g_evt_level_mg2     = 0U;       /* 触发阈值平方(mg²) */
-static uint64_t  g_evt_release_mg2   = 0U;       /* 释放阈值平方(mg²)=0.8×触发,迟滞防抖 */
-static uint32_t  g_evt_post_ms       = 0U;       /* 后触发窗口(ms,用 tick 计时) */
-static uint32_t  g_evt_holdoff_ms    = 0U;       /* 死区(ms) */
-static uint32_t  g_evt_deadline_ms   = 0U;       /* REC:post 截止 / HOLDOFF:死区截止(tick ms) */
-static AppEvtState_t g_evt_state      = EVT_OFF;
-static uint8_t   g_evt_mode          = 0U;       /* 1=本次采集为阈值模式 */
-
-/* 采集启动时调用：按配置决定是否进入阈值模式并预算阈值/窗口。 */
-static void AppEvtBeginSession(const AcqConfig_t *cfg)
-{
-  if (cfg != NULL && cfg->trigger_mode == ACQ_TRIGGER_THRESHOLD)
-  {
-    uint64_t mg = (uint64_t)cfg->trig_level_g * 1000U;   /* g → mg */
-    g_evt_level_mg2   = mg * mg;
-    uint64_t rmg = (mg * 8U) / 10U;                      /* 释放阈值 = 触发的 0.8 倍 */
-    g_evt_release_mg2 = rmg * rmg;
-    g_evt_post_ms    = (uint32_t)cfg->trig_post_sec    * 1000U;
-    g_evt_holdoff_ms = (uint32_t)cfg->trig_holdoff_sec * 1000U;
-    g_evt_last_seen_seq = g_evt_trig_seq;   /* 丢弃布防前的历史触发 */
-    g_evt_over  = 0U;
-    g_evt_state = EVT_ARMED;
-    g_evt_mode  = 1U;
-    if (cfg->h3lis100dl.enabled == 0U)
-    {
-      printf("[Evt] 警告：阈值模式但 H3 未启用，将永不触发！请在 DEVCFG.JSN 启用 h3lis100dl\r\n");
-    }
-    printf("[Evt] 阈值模式布防: level=%ug post=%us holdoff=%us\r\n",
-           (unsigned int)cfg->trig_level_g,
-           (unsigned int)cfg->trig_post_sec,
-           (unsigned int)cfg->trig_holdoff_sec);
-  }
-  else
-  {
-    g_evt_mode  = 0U;
-    g_evt_state = EVT_OFF;
-  }
-}
-
-/* 采集停止时调用。 */
-static void AppEvtEndSession(void)
-{
-  g_evt_mode  = 0U;
-  g_evt_state = EVT_OFF;
-}
-
-/* 本次采集是否为阈值模式(供 auto-stop / LED 判定)。 */
-static uint8_t AppEvtThresholdMode(void) { return g_evt_mode; }
-/* 阈值模式下是否正在录制事件(REC)。布防/死区返回 0。 */
-static uint8_t AppEvtIsRecording(void)
-{
-  return (uint8_t)((g_evt_mode != 0U) && (g_evt_state == EVT_REC));
-}
-
-/* H3 采集任务每样本调用:带迟滞的合矢量越限检测。整数运算,~400Hz,可忽略。
- * 上升越过"触发阈值"→ 新触发(seq++)且置 over;跌回"释放阈值"(0.8×)以下 → 清 over。
- * 中间带内保持状态,避免在阈值附近抖动反复触发/反复收尾。 */
-static void AppEvtH3Sample(float mx, float my, float mz)
-{
-  if (g_evt_mode == 0U) return;
-  int64_t ix = (int64_t)mx, iy = (int64_t)my, iz = (int64_t)mz;
-  uint64_t mag2 = (uint64_t)(ix * ix + iy * iy + iz * iz);
-  if (g_evt_over == 0U)
-  {
-    if (mag2 > g_evt_level_mg2)      /* 上升越过触发阈值 → 新触发 */
-    {
-      g_evt_over     = 1U;
-      g_evt_trig_seq++;              /* 唯一写者(H3),logger 只读 */
-    }
-  }
-  else
-  {
-    if (mag2 < g_evt_release_mg2)    /* 跌回释放阈值之下 → 本次活跃结束 */
-    {
-      g_evt_over = 0U;
-    }
-  }
-}
-
-/* logger 任务每轮调用:推进状态机,返回 1=此刻应开 SD 会话(REC),0=否(ARMED/HOLDOFF)。
- * 非阈值模式不应调用本函数(返回 1 兜底)。 */
-static uint8_t AppEvtSdGate(void)
-{
-  if (g_evt_mode == 0U) return 1U;
-
-  uint32_t seq      = g_evt_trig_seq;
-  uint8_t  new_trig = (uint8_t)(seq != g_evt_last_seen_seq);
-  g_evt_last_seen_seq = seq;
-  /* 用 tick(ms) 计时,不用 AppTime_GetEpochUs:后者带 __disable_irq+DWT 维护,被本
-   * gate 每个 logger 循环高频调用会拖垮吞吐并致 apptime 错乱(实测 CKBX0412)。
-   * tick 比真实慢 ~19%,3s post 实际约 3.6s,对事件录制完全够用。 */
-  uint32_t now = osKernelGetTickCount();
-
-  switch (g_evt_state)
-  {
-    case EVT_ARMED:
-      if (new_trig)
-      {
-        g_evt_deadline_ms = now + g_evt_post_ms;
-        g_evt_state = EVT_REC;
-        printf("[Evt] 触发! 开始录制事件\r\n");
-        return 1U;
-      }
-      return 0U;
-
-    case EVT_REC:
-      /* 信号仍在阈值之上(over)或又有新上升触发 → 持续录,刷新 post 截止;
-       * 跌回释放阈值之下并安静满 post_ms 才收尾(迟滞,防止抖动无限延长)。 */
-      if ((g_evt_over != 0U) || new_trig) { g_evt_deadline_ms = now + g_evt_post_ms; }
-      if ((int32_t)(now - g_evt_deadline_ms) >= 0)
-      {
-        g_evt_deadline_ms = now + g_evt_holdoff_ms;
-        g_evt_state = EVT_HOLDOFF;
-        printf("[Evt] 事件录制结束,进入死区\r\n");
-        return 0U;
-      }
-      return 1U;
-
-    case EVT_HOLDOFF:
-      if ((int32_t)(now - g_evt_deadline_ms) >= 0) { g_evt_state = EVT_ARMED; }
-      return 0U;   /* 死区内忽略触发(new_trig 已被吞掉) */
-
-    default:
-      return 0U;
-  }
-}
-
-/* ARMED/HOLDOFF 期消费者侧裁剪:每条 ring 只留最近 ~size/2(预触发),丢弃更旧字节。
- * 仅 logger(消费者)动 rd_idx,生产者不变,SPSC 不破。按字节裁剪可能在头部留半帧,
- * 事件预触发首条记录可能不完整(BIN 由 CRC 跳过/CSV 跳首行),属可接受的边界瑕疵。 */
-static void AppEvtTrimRing(AppRingBuffer_t *rb)
-{
-  uint32_t avail = RingBuf_Available(rb);
-  uint32_t keep  = rb->size / 2U;
-  if (avail > keep) { RingBuf_Consume(rb, avail - keep); }
-}
-
-static void AppEvtTrimRings(void)
-{
-  AppEvtTrimRing(&g_ring_lsm_imu);
-  AppEvtTrimRing(&g_ring_qma_acc);
-  AppEvtTrimRing(&g_ring_h3_acc);
-  AppEvtTrimRing(&g_ring_mic);
-  AppEvtTrimRing(&g_ring_aht_env);
-  AppEvtTrimRing(&g_ring_mag);
-}
-
 void StartLoggerTask(void *argument)
 {
   FRESULT result;
@@ -2771,7 +2596,6 @@ void StartLoggerTask(void *argument)
   HAL_NVIC_EnableIRQ(SDMMC1_IRQn);
   printf("[Logger] SDMMC POLLING mode (corruption-free SD writes)\r\n");
 
-  static uint8_t s_prev_sd_acq = 0U;   /* 上一轮 SD 采集是否活跃,用于检测起止沿 */
   for (;;)
   {
     AppAcqControl_t acq;
@@ -2784,30 +2608,8 @@ void StartLoggerTask(void *argument)
 
     uint8_t sd_acq_active = (uint8_t)((acq_running != 0U) && (acq.sink == APP_ACQ_SINK_SD));
 
-    /* 事件门控生命周期:SD 采集起/止沿驱动 BeginSession/EndSession */
-    if (sd_acq_active != 0U && s_prev_sd_acq == 0U)
-    {
-      AcqConfig_t ecfg; AcqConfig_GetCopy(&ecfg);
-      AppEvtBeginSession(&ecfg);
-    }
-    else if (sd_acq_active == 0U && s_prev_sd_acq != 0U)
-    {
-      AppEvtEndSession();
-    }
-    s_prev_sd_acq = sd_acq_active;
-
-    if (g_evt_mode != 0U && sd_acq_active != 0U)
-    {
-      /* 阈值模式:gate 决定此刻是否开 SD 会话;未录时维持预触发裁剪 */
-      uint8_t gate = AppEvtSdGate();
-      sd_session_active = gate;
-      if (gate == 0U) { AppEvtTrimRings(); }
-    }
-    else
-    {
-      /* 非阈值模式:维持原行为 */
-      sd_session_active = sd_acq_active;
-    }
+    /* 非阈值模式:直接按采集状态决定是否开 SD 会话 */
+    sd_session_active = sd_acq_active;
 
     if (sd_session_active == 0U)
     {
@@ -2850,22 +2652,18 @@ void StartLoggerTask(void *argument)
         }
 
         /* Discard data buffered between sessions so each file starts clean
-         * and frame_id/tick_ms in the new session align with real samples.
-         * 阈值模式例外:ring 里是要落盘的预触发段,绝不能清;帧号跨事件保持连续。 */
-        if (g_evt_mode == 0U)
-        {
-          RingBuf_Reset(&g_ring_lsm_imu);
-          RingBuf_Reset(&g_ring_qma_acc);
-          RingBuf_Reset(&g_ring_h3_acc);
-          RingBuf_Reset(&g_ring_mic);
-          RingBuf_Reset(&g_ring_aht_env);
-          RingBuf_Reset(&g_ring_mag);
-          g_lsm_frame_id_counter = 0U;
-          g_qma_frame_id_counter = 0U;
-          g_h3_frame_id_counter  = 0U;
-          g_aht_frame_id_counter = 0U;
-          g_mag_frame_id_counter = 0U;
-        }
+         * and frame_id/tick_ms in the new session align with real samples. */
+        RingBuf_Reset(&g_ring_lsm_imu);
+        RingBuf_Reset(&g_ring_qma_acc);
+        RingBuf_Reset(&g_ring_h3_acc);
+        RingBuf_Reset(&g_ring_mic);
+        RingBuf_Reset(&g_ring_aht_env);
+        RingBuf_Reset(&g_ring_mag);
+        g_lsm_frame_id_counter = 0U;
+        g_qma_frame_id_counter = 0U;
+        g_h3_frame_id_counter  = 0U;
+        g_aht_frame_id_counter = 0U;
+        g_mag_frame_id_counter = 0U;
         g_h3_irq_count = 0U;        /* H3 DRDY 中断测试统计，按会话清零 */
         g_h3_timeout_count = 0U;
 
