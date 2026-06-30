@@ -42,12 +42,6 @@
 #include "boot_mode.h"
 #include "sd_diskio.h"
 #include "sdmmc.h"
-#include "usbd_wcid_app.h"
-#include "usbd_wcid_streaming.h"
-#include "usbd_core.h"
-#include "usbd_conf.h"
-#include "usbd_desc.h"
-#include "usb_otg.h"
 #include "app_acq.h"
 #include "user_ctrl.h"
 #include "board_io.h"
@@ -68,10 +62,6 @@
 #define SAMPLE_PERIOD_MS         APP_SENSOR_SAMPLE_PERIOD_MS
 #define LOGGER_RETRY_DELAY_MS    1000U
 
-/* Route command responses to USB EP4 IN via UsbWcidApp_Write. */
-#define UsbCdcService_Write(buf, len)  UsbWcidApp_Write((buf), (len))
-#define UsbCdcService_IsReady()        (1U)
-#define USB_UPLOAD_PERIOD_MS     5U
 #define APP_ACQ_IDLE_DELAY_MS    10U
 /* USER CODE END PD */
 
@@ -93,7 +83,6 @@ volatile uint8_t g_system_error = 0U;  /* 1 = 系统异常(SD写失败/传感器
 
 static osMutexId_t spi2_mutex;
 static osMutexId_t snapshot_mutex;
-static volatile uint8_t s_usb_done_armed;
 static osMutexId_t frame_buffer_mutex;
 static osMutexId_t acq_ctrl_mutex;
 SemaphoreHandle_t s_sdmmc_dma_sem;  /* signaled by HAL SD DMA completion ISR */
@@ -276,20 +265,6 @@ const osThreadAttr_t lis2mdlTask_attributes = {
   .stack_size = 1024 * 2  /* 2KB */
 };
 
-osThreadId_t usbCdcTaskHandle;
-const osThreadAttr_t usbCdcTask_attributes = {
-  .name = "usbCdcTask",
-  .priority = (osPriority_t)osPriorityAboveNormal,  /* 提高优先级测试 */
-  .stack_size = 1536 * 4  /* 6KB */
-};
-
-osThreadId_t usbUploadTaskHandle;
-const osThreadAttr_t usbUploadTask_attributes = {
-  .name = "usbUploadTask",
-  .priority = (osPriority_t)osPriorityNormal,
-  .stack_size = 256 * 4  /* 1KB — idle shell (only osDelay); shrunk from 4KB to free heap (L7) */
-};
-
 /* Private function prototypes -----------------------------------------------*/
 /* USER CODE BEGIN FunctionPrototypes */
 
@@ -303,6 +278,9 @@ static uint32_t RingBuf_PeekContiguous(AppRingBuffer_t *rb, const uint8_t **out_
 static void     RingBuf_Consume(AppRingBuffer_t *rb, uint32_t len);
 static int      LoggerDrainRing(AppRingBuffer_t *rb, uint8_t file_idx, uint32_t min_flush,
                                 uint32_t *rows_since_sync, FRESULT *out_res);
+static void     AppEvtH3Sample(float mx, float my, float mz);  /* 阈值检测:定义在 StartLoggerTask 前,调用在 H3 支路(更靠前),需前置声明 */
+static uint8_t  AppEvtThresholdMode(void);  /* 同上,供 AppAcqCheckAutoStop/AppCaptureActive 提前调用 */
+static uint8_t  AppEvtIsRecording(void);
 static inline uint32_t AppU32ToDec(char *out, uint32_t v);
 static inline uint32_t AppI32ToDec(char *out, int32_t v);
 static inline uint32_t AppU64ToDec(char *out, uint64_t v);
@@ -317,9 +295,7 @@ static uint8_t AppAcqParseSink(const char *text, uint8_t *sink_out);
 static void AppAcqGetCopy(AppAcqControl_t *ctrl);
 uint32_t AppAcqIsRunning(void);
 static uint32_t AppAcqCurrentPeriodMs(void);
-static uint8_t AppAcqIsUsbSinkActive(void);
 static uint8_t AppAcqIsSdSessionActive(void);
-static uint8_t AppUsbRawStreamingActive(void);
 static void AppFlowStatsSetMode(uint8_t usb_active, uint8_t sd_active);
 static void AppLoggerStopSdSession(uint8_t *sd_file_open, uint32_t *rows_since_sync);
 static void AppAcqStopInternal(uint32_t now_ms);
@@ -328,9 +304,6 @@ static void AppAcqResetSessionTimer(void);
 uint32_t AppAcqStart(uint8_t sink, uint32_t duration_ms);
 uint32_t AppAcqStop(void);
 static uint32_t AppAcqDrainPendingStop(void);
-static void UsbCmd_AcqStatus(void);
-static void UsbCmd_AcqStart(const char *cmd);
-static void UsbCmd_AcqStop(void);
 
 
 void StartLsm6dsoxTask(void *argument);
@@ -340,8 +313,6 @@ void StartLoggerTask(void *argument);
 void StartMicTask(void *argument);
 void StartAht20Task(void *argument);
 void StartLis2mdlTask(void *argument);
-void StartUsbCdcTask(void *argument);
-void StartUsbUploadTask(void *argument);
 
 void MX_FREERTOS_Init(void);
 
@@ -384,7 +355,6 @@ void MX_FREERTOS_Init(void)
   acq_ctrl_mutex = osMutexNew(&acq_ctrl_mutex_attr);
   i2c1_mutex     = osMutexNew(&i2c1_mutex_attr);
   i2c2_mutex     = osMutexNew(&i2c2_mutex_attr);
-  UsbWcidApp_InitRtos();   /* 串行化 0x85 响应端点（命令响应 + AHT + MAG 共用） */
   /* Always create spi2_mutex (was guarded by a test-target #if). The QMA/H3
    * SPI2 acquire sites have no NULL guard, so unconditional creation avoids a
    * silent osMutexAcquire(NULL) = no protection in any build (L3). */
@@ -433,15 +403,11 @@ void MX_FREERTOS_Init(void)
   micTaskHandle       = osThreadNew(StartMicTask,       NULL, &micTask_attributes);
   aht20TaskHandle   = osThreadNew(StartAht20Task,   NULL, &aht20Task_attributes);
   lis2mdlTaskHandle = osThreadNew(StartLis2mdlTask, NULL, &lis2mdlTask_attributes);
-  usbCdcTaskHandle = osThreadNew(StartUsbCdcTask, NULL, &usbCdcTask_attributes);
-  usbUploadTaskHandle = osThreadNew(StartUsbUploadTask, NULL, &usbUploadTask_attributes);
   printf("[RTOS] lsm6dsoxTask created: %s\r\n", (lsm6dsoxTaskHandle != NULL) ? "ok" : "FAILED");
   printf("[RTOS] h3lis100dlTask created: %s\r\n", (h3lis100dlTaskHandle != NULL) ? "ok" : "FAILED");
   printf("[RTOS] qma6100pTask created: %s\r\n", (qma6100pTaskHandle != NULL) ? "ok" : "FAILED");
   printf("[RTOS] loggerTask created: %s\r\n", (loggerTaskHandle != NULL) ? "ok" : "FAILED");
   printf("[RTOS] micTask created: %s\r\n", (micTaskHandle != NULL) ? "ok" : "FAILED");
-  printf("[RTOS] usbCdcTask created: %s\r\n", (usbCdcTaskHandle != NULL) ? "ok" : "FAILED");
-  printf("[RTOS] usbUploadTask created: %s\r\n", (usbUploadTaskHandle != NULL) ? "ok" : "FAILED");
   printf("[RTOS] aht20Task created: %s\r\n", (aht20TaskHandle != NULL) ? "ok" : "FAILED");
   printf("[RTOS] lis2mdlTask created: %s\r\n", (lis2mdlTaskHandle != NULL) ? "ok" : "FAILED");
 #endif
@@ -749,6 +715,9 @@ uint32_t AppAcqIsRunning(void)
 uint8_t AppCaptureActive(void)
 {
   if (AppAcqIsRunning() == 0U) { return 0U; }
+  /* 阈值模式:只有真正在录制事件(REC)时才算"采集中"。布防/死区返回 0 → LED 灭,
+   * 这样灯灭=守候、灯闪=正在录事件,肉眼可区分。 */
+  if (AppEvtThresholdMode() != 0U) { return AppEvtIsRecording(); }
   AcqConfig_t c;
   AcqConfig_GetCopy(&c);
   if ((c.es8311.enabled != 0U) && (s_mic_capturing == 0U)) { return 0U; }
@@ -773,19 +742,6 @@ static uint32_t AppAcqCurrentPeriodMs(void)
   return period_ms;
 }
 
-static uint8_t AppAcqIsUsbSinkActive(void)
-{
-  AppAcqControl_t ctrl;
-
-  AppAcqGetCopy(&ctrl);
-  /* USB 推流必须用户选了 USB 出口才做。否则 SD-only 模式下只要 USB 连着(看串口),
-   * 就会对每个样本(LSM 6664Hz)逐字节灌没人读的 WCID 端点,抢光 logger/mic 的 CPU
-   * → SD 文件丢失/残缺、mic 崩、apptime 乱(回归根因，3993f6d 误删此门）。 */
-  return (uint8_t)((ctrl.running != 0U) &&
-                   (ctrl.sink == APP_ACQ_SINK_USB) &&
-                   (AppUsbRawStreamingActive() != 0U));
-}
-
 static uint8_t AppAcqIsSdSessionActive(void)
 {
   AppAcqControl_t ctrl;
@@ -803,14 +759,12 @@ static uint8_t AppAcqIsSdSessionActive(void)
  *            and a near-full wrap is where any index/overlap bug would surface. */
 static void AppPrintRuntimeDiag(void)
 {
-  printf("[Stack] lsm=%lu h3=%lu qma=%lu log=%lu mic=%lu cdc=%lu up=%lu (min free bytes)\r\n",
+  printf("[Stack] lsm=%lu h3=%lu qma=%lu log=%lu mic=%lu (min free bytes)\r\n",
          (unsigned long)osThreadGetStackSpace(lsm6dsoxTaskHandle),
          (unsigned long)osThreadGetStackSpace(h3lis100dlTaskHandle),
          (unsigned long)osThreadGetStackSpace(qma6100pTaskHandle),
          (unsigned long)osThreadGetStackSpace(loggerTaskHandle),
-         (unsigned long)osThreadGetStackSpace(micTaskHandle),
-         (unsigned long)osThreadGetStackSpace(usbCdcTaskHandle),
-         (unsigned long)osThreadGetStackSpace(usbUploadTaskHandle));
+         (unsigned long)osThreadGetStackSpace(micTaskHandle));
   printf("[Ring] lsm drop=%lu hwm=%lu/%lu | h3 drop=%lu hwm=%lu/%lu | qma drop=%lu hwm=%lu/%lu | mic drop=%lu hwm=%lu/%lu\r\n",
          (unsigned long)g_ring_lsm_imu.dropped, (unsigned long)g_ring_lsm_imu.high_watermark, (unsigned long)g_ring_lsm_imu.size,
          (unsigned long)g_ring_h3_acc.dropped,  (unsigned long)g_ring_h3_acc.high_watermark,  (unsigned long)g_ring_h3_acc.size,
@@ -889,12 +843,6 @@ static void AppAcqStopInternal(uint32_t now_ms)
     g_acq_ctrl.stop_pending = 1U;
   }
   osMutexRelease(acq_ctrl_mutex);
-
-  /* WCID Bulk: stop USB streaming. */
-  if (g_boot_mode == BOOT_MODE_WCID_BULK)
-  {
-    UsbWcidApp_StopStreaming();
-  }
 }
 
 static uint32_t AppAcqDrainPendingStop(void)
@@ -921,6 +869,12 @@ static void AppAcqCheckAutoStop(void)
 
   AppAcqGetCopy(&ctrl);
   if ((ctrl.running == 0U) || (ctrl.duration_ms == 0U) || (ctrl.timer_armed == 0U))
+  {
+    return;
+  }
+  /* 阈值模式:不按 duration 自动停(每个事件会重置会话计时器,duration 永不到点;
+   * 且语义是"布防守候到手动停/断电")。事件录制时长由 trig_post_sec 控制。 */
+  if (AppEvtThresholdMode() != 0U)
   {
     return;
   }
@@ -1094,19 +1048,6 @@ uint32_t AppAcqStart(uint8_t sink, uint32_t duration_ms)
   AppFlowStatsSetMode((uint8_t)((sink == APP_ACQ_SINK_USB) ? 1U : 0U),
                       (uint8_t)((sink == APP_ACQ_SINK_SD) ? 1U : 0U));
 
-  /* WCID Bulk: start USB streaming when sink is USB.
-   * Pass per-channel ODR so each USB half-buffer is sized to its data rate
-   * (high-ODR LSM needs a big half to avoid overrun; low-ODR H3 needs a small
-   * half so it still fills/flushes within the capture). */
-  if (g_boot_mode == BOOT_MODE_WCID_BULK && sink == APP_ACQ_SINK_USB)
-  {
-    AcqConfig_t scfg;
-    AcqConfig_GetCopy(&scfg);
-    uint32_t h3_odr = (scfg.h3lis100dl.odr_hz > 0U) ? (uint32_t)scfg.h3lis100dl.odr_hz : 400U;
-    UsbWcidApp_StartStreaming((uint32_t)scfg.lsm6dsox.odr_hz, h3_odr,
-                              (uint32_t)scfg.qma6100p.odr_hz);
-  }
-
   return 1U;
 }
 
@@ -1156,114 +1097,6 @@ void AppBootAcquireIfConfigured(void)
          (unsigned long)cfg.duration_ms);
 
   (void)AppAcqStart(sink, cfg.duration_ms);
-}
-
-static void UsbCmd_AcqStatus(void)
-{
-  char line[160];
-  int len;
-  uint32_t now_ms = osKernelGetTickCount();
-  AppAcqControl_t ctrl;
-  uint32_t elapsed_ms = 0U;
-  uint32_t remaining_ms = 0U;
-
-  AppAcqCheckAutoStop();
-  AppAcqGetCopy(&ctrl);
-
-  if (ctrl.start_tick_ms != 0U)
-  {
-    uint32_t end_tick = (ctrl.running != 0U) ? now_ms : ctrl.last_stop_tick_ms;
-    elapsed_ms = end_tick - ctrl.start_tick_ms;
-  }
-
-  if ((ctrl.running != 0U) && (ctrl.duration_ms > elapsed_ms))
-  {
-    remaining_ms = ctrl.duration_ms - elapsed_ms;
-  }
-
-#define USB_ACQ_LINE(fmt, ...) \
-  do { \
-    len = snprintf(line, sizeof(line), fmt, ##__VA_ARGS__); \
-    if (len > 0 && (uint32_t)len < sizeof(line)) { \
-      UsbCdcService_Write((const uint8_t *)line, (uint32_t)len); \
-    } \
-  } while (0)
-
-  if (ctrl.running != 0U)
-  {
-    if (ctrl.duration_ms == 0U)
-      USB_ACQ_LINE("running  sink=%s\r\n", AppAcqSinkToString(ctrl.sink));
-    else
-      USB_ACQ_LINE("running  sink=%s  elapsed=%lums  remaining=%lums\r\n",
-                   AppAcqSinkToString(ctrl.sink),
-                   (unsigned long)elapsed_ms,
-                   (unsigned long)remaining_ms);
-  }
-  else
-  {
-    USB_ACQ_LINE("stopped\r\n");
-  }
-
-#undef USB_ACQ_LINE
-}
-
-static void UsbCmd_AcqStart(const char *cmd)
-{
-  char sink_text[8] = {0};
-  unsigned long duration_ms = 0UL;
-  uint8_t sink = 0U;
-
-  /* 手动解析 —— 不能用 sscanf 的 %lu：本工程用 Keil microLIB，其精简版 sscanf
-   * 不支持 %lu，会把 "acq_start sd 44000" 的 44000 丢掉、duration_ms 恒为 0，
-   * 导致定时采集失效（变成无限手动停）。改用 token 切分 + strtoul（microLIB 支持）。
-   * 调用前已 strncmp("acq_start ",10) 命中，故 cmd+10 起为参数。 */
-  {
-    const char *p = cmd + 10;                 /* 跳过 "acq_start " */
-    int i = 0;
-    while (*p == ' ') { p++; }                /* 跳过前导空格 */
-    while ((*p != '\0') && (*p != ' ') && (i < 7)) { sink_text[i++] = *p++; }  /* sink */
-    sink_text[i] = '\0';
-    while (*p == ' ') { p++; }                /* 跳到 duration */
-    if ((*p >= '0') && (*p <= '9')) { duration_ms = strtoul(p, NULL, 10); }
-  }
-
-  if (sink_text[0] == '\0')
-  {
-    const char *msg = "Usage: acq_start <usb|sd> [duration_ms]\r\n";
-    UsbCdcService_Write((const uint8_t *)msg, strlen(msg));
-    return;
-  }
-
-  printf("[Acq] acq_start sink=%s duration_ms=%lu\r\n", sink_text, duration_ms);
-
-  if (AppAcqParseSink(sink_text, &sink) == 0U)
-  {
-    const char *msg = "ERR invalid sink (use usb or sd)\r\n";
-    UsbCdcService_Write((const uint8_t *)msg, strlen(msg));
-    return;
-  }
-
-  if (AppAcqStart(sink, (uint32_t)duration_ms) == 0U)
-  {
-    const char *msg = "ERR acq_start failed\r\n";
-    UsbCdcService_Write((const uint8_t *)msg, strlen(msg));
-    return;
-  }
-
-  if ((sink == APP_ACQ_SINK_USB) && (duration_ms > 0UL))
-    s_usb_done_armed = 1U;
-
-  UsbCdcService_Write((const uint8_t *)"start\r\n", 7U);
-}
-
-static void UsbCmd_AcqStop(void)
-{
-  const char *msg;
-
-  AppAcqStop();
-  s_usb_done_armed = 0U;
-  msg = "stop\r\n";
-  UsbCdcService_Write((const uint8_t *)msg, strlen(msg));
 }
 
 static void AppFlowStatsUpdateBufferStatsLocked(void)
@@ -1603,11 +1436,6 @@ static uint32_t AppSnapshotComputeMaxDeltaMs(const AppSensorSnapshot_t *snapshot
   return max_ts - min_ts;
 }
 
-static uint8_t AppUsbRawStreamingActive(void)
-{
-  return UsbCdcService_IsReady();
-}
-
 static void AppFlowStatsSetMode(uint8_t usb_active, uint8_t sd_active)
 {
   if (snapshot_mutex == NULL)
@@ -1671,498 +1499,6 @@ static void AppFlowStatsRecordUsbSent(uint32_t sample_seq)
   g_flow_stats.usb_frames_sent++;
   g_flow_stats.last_log_seq = sample_seq;
   osMutexRelease(snapshot_mutex);
-}
-
-static void UsbCmd_Ping(void)
-{
-  const char *msg = "pong\r\n";
-  UsbCdcService_Write((const uint8_t *)msg, strlen(msg));
-}
-
-static void UsbCmd_Help(void)
-{
-  const char *msg = "Commands: ping, help, status, acq_start, acq_stop, s <lsm|h3|qma|aht|mag> <odr|range|en> <val>, s mic <gain|sr|en> <val>, set_time YYYY-MM-DDTHH:MM:SS, boot_msc\r\n";
-  UsbCdcService_Write((const uint8_t *)msg, strlen(msg));
-}
-
-static void UsbCmd_SetSensor(const char *cmd)
-{
-  char sensor[8] = {0};
-  char param[8]  = {0};
-  unsigned long val = 0UL;
-  char line[80];
-  int len;
-  int updated = 0;
-
-  /* 手动解析 —— microLIB 的 sscanf 不支持 %lu(同 acq_start 的坑)：原 sscanf 会把
-   * value 丢掉、val 为乱值/0，导致 s 命令实际改不动配置。格式 "s <sensor> <param> <value>"。 */
-  {
-    const char *p = cmd + 1;                  /* 跳过 's' */
-    int i;
-    while (*p == ' ') { p++; }
-    i = 0; while ((*p != '\0') && (*p != ' ') && (i < 7)) { sensor[i++] = *p++; } sensor[i] = '\0';
-    while (*p == ' ') { p++; }
-    i = 0; while ((*p != '\0') && (*p != ' ') && (i < 7)) { param[i++] = *p++; } param[i] = '\0';
-    while (*p == ' ') { p++; }
-    if ((sensor[0] == '\0') || (param[0] == '\0') || (*p < '0') || (*p > '9'))
-    {
-      const char *msg = "Usage: s <lsm|h3|qma|aht|mag> <odr|range|en> <value> | s mic <gain|sr|en> <value>\r\n";
-      UsbCdcService_Write((const uint8_t *)msg, strlen(msg));
-      return;
-    }
-    val = strtoul(p, NULL, 10);
-  }
-  printf("[Acq] set sensor=%s param=%s val=%lu\r\n", sensor, param, val);
-
-  /* 麦克风(ES8311)配置：s mic <gain|sr|en> <val>。参数与传感器的 odr/range/en 不同，
-   * 单独处理后提前返回。AcqConfig_SetMic 一次写全部三项，故先读当前值、只改目标项；
-   * sr 传 0 表示保持当前采样率。配置在下次会话 Mic_Start 时生效（与 acq_start 配合）。 */
-  if (strcmp(sensor, "mic") == 0)
-  {
-    AcqConfig_t mcfg;
-    AcqConfig_GetCopy(&mcfg);
-    uint8_t  m_en   = mcfg.es8311.enabled;
-    uint32_t m_sr   = 0U;                 /* 0 = 保持当前采样率 */
-    uint16_t m_gain = mcfg.es8311.gain_db;
-    int ok = 1;
-
-    if      (strcmp(param, "gain") == 0) { m_gain = (uint16_t)val; }       /* 0..42 */
-    else if (strcmp(param, "sr")   == 0) { m_sr   = (uint32_t)val; }       /* 8000/16000/48000/96000 */
-    else if (strcmp(param, "en")   == 0) { m_en   = (val != 0U) ? 1U : 0U; }
-    else                                 { ok = 0; }
-
-    if (!ok)
-    {
-      len = snprintf(line, sizeof(line), "ERR: use gain, sr, or en\r\n");
-    }
-    else if (AcqConfig_SetMic(m_en, m_sr, m_gain) == 0)
-    {
-      AcqConfig_GetCopy(&mcfg);          /* 读回实际生效值 */
-      len = snprintf(line, sizeof(line), "OK mic en=%u sr=%lu gain=%u\r\n",
-                     (unsigned)mcfg.es8311.enabled,
-                     (unsigned long)mcfg.es8311.sample_rate_hz,
-                     (unsigned)mcfg.es8311.gain_db);
-      (void)DeviceCfg_WriteCurrentToSD();
-    }
-    else
-    {
-      len = snprintf(line, sizeof(line), "ERR: sr=8000/16000/48000/96000, gain<=42\r\n");
-    }
-    UsbCdcService_Write((const uint8_t *)line, (uint32_t)len);
-    return;
-  }
-
-  uint8_t which;
-  if      (strcmp(sensor, "lsm") == 0) which = 0U;
-  else if (strcmp(sensor, "h3")  == 0) which = 1U;
-  else if (strcmp(sensor, "qma") == 0) which = 2U;
-  else if (strcmp(sensor, "aht") == 0) which = 3U;
-  else if (strcmp(sensor, "mag") == 0) which = 4U;
-  else
-  {
-    len = snprintf(line, sizeof(line), "ERR: use lsm/h3/qma/aht/mag\r\n");
-    UsbCdcService_Write((const uint8_t *)line, (uint32_t)len);
-    return;
-  }
-
-  AcqConfig_t cfg;
-  AcqConfig_GetCopy(&cfg);
-
-  if (strcmp(param, "odr") == 0)
-  {
-    /* Snap to nearest supported ODR so CONFIG.JSN matches actual hardware */
-    uint16_t snapped = (uint16_t)val;
-    switch (which)
-    {
-      case 0U: {
-        static const uint16_t lsm_odrs[] = {12,26,52,104,208,416,833,1666,3332,6664};
-        snapped = lsm_odrs[0];
-        for (unsigned i = 1; i < sizeof(lsm_odrs)/sizeof(lsm_odrs[0]); i++)
-          if (abs((int)val - (int)lsm_odrs[i]) < abs((int)val - (int)snapped))
-            snapped = lsm_odrs[i];
-        cfg.lsm6dsox.odr_hz = snapped;
-        break;
-      }
-      case 1U: {
-        static const uint16_t h3_odrs[] = {50,100,400};
-        snapped = h3_odrs[0];
-        for (unsigned i = 1; i < sizeof(h3_odrs)/sizeof(h3_odrs[0]); i++)
-          if (abs((int)val - (int)h3_odrs[i]) < abs((int)val - (int)snapped))
-            snapped = h3_odrs[i];
-        cfg.h3lis100dl.odr_hz = snapped;
-        break;
-      }
-      case 2U: {
-        /* QST datasheet working points (12=12.5Hz); all 8 BW codes 0x00-0x07. */
-        static const uint16_t qma_odrs[] = {12,25,50,80,200,400,800,1600};
-        snapped = qma_odrs[0];
-        for (unsigned i = 1; i < sizeof(qma_odrs)/sizeof(qma_odrs[0]); i++)
-          if (abs((int)val - (int)qma_odrs[i]) < abs((int)val - (int)snapped))
-            snapped = qma_odrs[i];
-        cfg.qma6100p.odr_hz = snapped;
-        break;
-      }
-      case 3U: {
-        cfg.aht20.odr_hz = 1U;   /* AHT20 固定 1Hz */
-        snapped = 1U;
-        break;
-      }
-      case 4U: {
-        static const uint16_t mag_odrs[] = {10,20,50,100};
-        snapped = mag_odrs[0];
-        for (unsigned i = 1; i < sizeof(mag_odrs)/sizeof(mag_odrs[0]); i++)
-          if (abs((int)val - (int)mag_odrs[i]) < abs((int)val - (int)snapped))
-            snapped = mag_odrs[i];
-        cfg.lis2mdl.odr_hz = snapped;
-        break;
-      }
-    }
-    if (AcqConfig_Set(&cfg) == 0)
-    {
-      len = snprintf(line, sizeof(line), "OK %s odr=%u\r\n", sensor, (unsigned)snapped);
-      updated = 1;
-    }
-    else
-      len = snprintf(line, sizeof(line), "ERR\r\n");
-  }
-  else if (strcmp(param, "range") == 0)
-  {
-    switch (which)
-    {
-      case 0U: cfg.lsm6dsox.range   = (uint16_t)val; break;
-      case 1U: cfg.h3lis100dl.range = (uint16_t)val; break;
-      case 2U: cfg.qma6100p.range   = (uint16_t)val; break;
-    }
-    if (AcqConfig_Set(&cfg) == 0)
-    {
-      len = snprintf(line, sizeof(line), "OK %s range=%lu\r\n", sensor, val);
-      updated = 1;
-    }
-    else
-      len = snprintf(line, sizeof(line), "ERR\r\n");
-  }
-  else if (strcmp(param, "en") == 0)
-  {
-    uint8_t en = (val != 0U) ? 1U : 0U;
-    switch (which)
-    {
-      case 0U: cfg.lsm6dsox.enabled   = en; break;
-      case 1U: cfg.h3lis100dl.enabled = en; break;
-      case 2U: cfg.qma6100p.enabled   = en; break;
-      case 3U: cfg.aht20.enabled      = en; break;
-      case 4U: cfg.lis2mdl.enabled    = en; break;
-    }
-    if (AcqConfig_Set(&cfg) == 0)
-    {
-      len = snprintf(line, sizeof(line), "OK %s en=%u\r\n", sensor, (unsigned)en);
-      updated = 1;
-    }
-    else
-      len = snprintf(line, sizeof(line), "ERR\r\n");
-  }
-  else
-  {
-    len = snprintf(line, sizeof(line), "ERR: use odr, range, or en\r\n");
-  }
-  UsbCdcService_Write((const uint8_t *)line, (uint32_t)len);
-
-  /* 同步写回 SD 卡 + 立即配置传感器硬件 */
-  if (updated)
-  {
-    (void)DeviceCfg_WriteCurrentToSD();
-    AppApplySensorConfig();
-  }
-}
-
-static void UsbCmd_Status(void)
-{
-  char line[128];
-  int len;
-  AcqConfig_t cfg;
-  AcqConfig_GetCopy(&cfg);
-
-#define STATUS_LINE(fmt, ...) \
-  do { \
-    len = snprintf(line, sizeof(line), fmt, ##__VA_ARGS__); \
-    if (len > 0 && (uint32_t)len < sizeof(line)) \
-      UsbCdcService_Write((const uint8_t *)line, (uint32_t)len); \
-  } while (0)
-
-  STATUS_LINE("lsm  en=%u  odr=%uHz  xl=+-%ug  gyro=+-%udps\r\n",
-              (unsigned)cfg.lsm6dsox.enabled,
-              (unsigned)cfg.lsm6dsox.odr_hz,
-              (unsigned)cfg.lsm6dsox.range,
-              (unsigned)cfg.lsm6dsox.range2);
-  STATUS_LINE("h3   en=%u  odr=%uHz  range=+-%ug\r\n",
-              (unsigned)cfg.h3lis100dl.enabled,
-              (unsigned)cfg.h3lis100dl.odr_hz,
-              (unsigned)cfg.h3lis100dl.range);
-  STATUS_LINE("qma  en=%u  odr=%uHz  range=+-%ug\r\n",
-              (unsigned)cfg.qma6100p.enabled,
-              (unsigned)cfg.qma6100p.odr_hz,
-              (unsigned)cfg.qma6100p.range);
-  STATUS_LINE("mic  en=%u  sr=%luHz  gain=%udB\r\n",
-              (unsigned)cfg.es8311.enabled,
-              (unsigned long)cfg.es8311.sample_rate_hz,
-              (unsigned)cfg.es8311.gain_db);
-  STATUS_LINE("aht  en=%u  odr=%uHz\r\n",
-              (unsigned)cfg.aht20.enabled,
-              (unsigned)cfg.aht20.odr_hz);
-  STATUS_LINE("mag  en=%u  odr=%uHz  range=+-%ugauss\r\n",
-              (unsigned)cfg.lis2mdl.enabled,
-              (unsigned)cfg.lis2mdl.odr_hz,
-              (unsigned)cfg.lis2mdl.range);
-
-#undef STATUS_LINE
-}
-
-static void UsbCmd_Process(const char *cmd)
-{
-  if (strcmp(cmd, "ping") == 0)
-  {
-    UsbCmd_Ping();
-  }
-  else if (strcmp(cmd, "help") == 0)
-  {
-    UsbCmd_Help();
-  }
-  else if (strcmp(cmd, "status") == 0)
-  {
-    UsbCmd_Status();
-  }
-  else if (strncmp(cmd, "acq_start ", 10U) == 0)
-  {
-    UsbCmd_AcqStart(cmd);
-  }
-  else if (strcmp(cmd, "acq_stop") == 0)
-  {
-    UsbCmd_AcqStop();
-  }
-  else if (strcmp(cmd, "acq_status") == 0)
-  {
-    UsbCmd_AcqStatus();
-  }
-  else if (cmd[0] == 's' && cmd[1] == ' ')
-  {
-    UsbCmd_SetSensor(cmd);
-  }
-  else if (strcmp(cmd, "boot_msc") == 0)
-  {
-    printf("Switching to USB MSC mode...\r\n");
-    UsbCmd_AcqStop();
-    osDelay(500U);
-    (void)DeviceCfg_WriteCurrentToSD();
-    BootMode_Write(BOOT_MODE_USB_MSC);
-    boot_mode_t verify = BootMode_Read();
-    printf("BootMode flag written, readback=%d, resetting...\r\n", (int)verify);
-    osDelay(200U);
-    NVIC_SystemReset();
-  }
-  else if (strncmp(cmd, "set_time ", 9U) == 0)
-  {
-    /* 格式: set_time YYYY-MM-DDTHH:MM:SS（从偏移 9 开始，共 19 字符）
-     * 位置：0123456789012345678
-     *       YYYY-MM-DDTHH:MM:SS
-     * p[0..3]=年, p[5..6]=月, p[8..9]=日, p[11..12]=时, p[14..15]=分, p[17..18]=秒 */
-    const char *p = cmd + 9U;
-    if (strlen(p) < 19U)
-    {
-      UsbCdcService_Write((const uint8_t *)"ERR set_time: parse fail\r\n", 26U);
-    }
-    else
-    {
-      uint32_t yr = (uint32_t)(p[2] - '0') * 10U + (uint32_t)(p[3] - '0'); /* 年后两位 */
-      uint32_t mo = (uint32_t)(p[5] - '0') * 10U + (uint32_t)(p[6] - '0');
-      uint32_t dy = (uint32_t)(p[8] - '0') * 10U + (uint32_t)(p[9] - '0');
-      uint32_t hr = (uint32_t)(p[11] - '0') * 10U + (uint32_t)(p[12] - '0');
-      uint32_t mn = (uint32_t)(p[14] - '0') * 10U + (uint32_t)(p[15] - '0');
-      uint32_t sc = (uint32_t)(p[17] - '0') * 10U + (uint32_t)(p[18] - '0');
-      if (mo >= 1U && mo <= 12U && dy >= 1U && dy <= 31U &&
-          hr <= 23U && mn <= 59U && sc <= 59U)
-      {
-        Pcf85063_Time_t t;
-        t.year = (uint8_t)yr;  t.month  = (uint8_t)mo; t.day    = (uint8_t)dy;
-        t.hour = (uint8_t)hr;  t.minute = (uint8_t)mn; t.second = (uint8_t)sc;
-        /* Lock only the RTC write here; AppTime_Sync() below self-locks I2C2, so
-         * wrapping it too would double-lock the non-recursive mutex (M1). */
-        AppI2c2Lock();
-        uint8_t _set_ok = (Pcf85063_SetTime(&t) == PCF85063_OK);
-        AppI2c2Unlock();
-        if (_set_ok)
-        {
-          AppTime_Sync();
-          char _line[48];
-          int _n = snprintf(_line, sizeof(_line), "OK set_time %04u-%02u-%02uT%02u:%02u:%02u\r\n",
-                            2000U + yr, mo, dy, hr, mn, sc);
-          UsbCdcService_Write((const uint8_t *)_line, (uint32_t)_n);
-        }
-        else
-        {
-          UsbCdcService_Write((const uint8_t *)"ERR set_time: RTC write fail\r\n", 30U);
-        }
-      }
-      else { UsbCdcService_Write((const uint8_t *)"ERR set_time: parse fail\r\n", 26U); }
-    }
-  }
-  else
-  {
-    UsbCdcService_Write((const uint8_t *)"ERR: unknown cmd\r\n", 18U);
-  }
-}
-
-
-/* Deferred command state: ISR writes here, WCID task reads in task context. */
-static volatile uint8_t s_wcid_cmd_pending;
-static char             s_wcid_cmd_buf[64];
-
-/* Command callback for WCID Bulk mode — called from USB class driver Receive (ISR context).
- * Must NOT call any RTOS blocking function. Only copy + flag; task loop processes it. */
-static void WcidCmdCallback(const char *cmd, uint32_t len)
-{
-  uint32_t n = (len < sizeof(s_wcid_cmd_buf) - 1U) ? len : sizeof(s_wcid_cmd_buf) - 1U;
-  memcpy(s_wcid_cmd_buf, cmd, n);
-  s_wcid_cmd_buf[n] = '\0';
-  while (n > 0U && (s_wcid_cmd_buf[n - 1U] == '\r' ||
-                    s_wcid_cmd_buf[n - 1U] == '\n' ||
-                    s_wcid_cmd_buf[n - 1U] == ' '))
-  {
-    s_wcid_cmd_buf[--n] = '\0';
-  }
-  if (n > 0U)
-  {
-    s_wcid_cmd_pending = 1U;
-  }
-}
-
-extern USBD_HandleTypeDef hUSB_Device;
-
-void StartUsbCdcTask(void *argument)
-{
-  (void)argument;
-
-  printf("[WCID] task entered, boot_mode=%d\r\n", (int)g_boot_mode);
-
-  if (g_boot_mode == BOOT_MODE_WCID_BULK)
-  {
-    /* WCID Bulk mode: PCD already init'd in main, just start Classic USBD core. */
-    printf("[WCID] calling USBD_Init...\r\n");
-    USBD_StatusTypeDef st = USBD_Init(&hUSB_Device, &MSC_Desc, 0U);
-    printf("[WCID] USBD_Init returned %d\r\n", (int)st);
-    if (st == USBD_OK)
-    {
-      printf("[WCID] calling USBD_RegisterClass...\r\n");
-      st = USBD_RegisterClass(&hUSB_Device, USBD_WCID_STREAMING_CLASS);
-      printf("[WCID] USBD_RegisterClass returned %d\r\n", (int)st);
-      if (st == USBD_OK)
-      {
-        printf("[WCID] calling UsbWcidApp_Init...\r\n");
-        UsbWcidApp_Init(&hUSB_Device);
-        printf("[WCID] calling UsbWcidApp_SetCmdHandler...\r\n");
-        UsbWcidApp_SetCmdHandler(WcidCmdCallback);
-        HAL_NVIC_EnableIRQ(OTG_FS_IRQn); /* stack ready, re-enable USB ISR */
-        printf("[WCID] calling USBD_Start...\r\n");
-        st = USBD_Start(&hUSB_Device);
-        printf("[WCID] USBD_Start returned %d\r\n", (int)st);
-        if (st == USBD_OK)
-        {
-          printf("[WCID] init ok — 4 data IN (LSM/H3/MIC/QMA) + resp IN + 1 OUT (cmd)\r\n");
-        }
-        else { printf("[WCID] USBD_Start FAIL\r\n"); }
-      }
-      else { printf("[WCID] RegisterClass FAIL\r\n"); }
-    }
-    else { printf("[WCID] USBD_Init FAIL\r\n"); }
-
-    /* WCID mode: WcidCmdCallback (ISR) sets s_wcid_cmd_pending.
-     * Process commands here in task context where RTOS mutexes are safe. */
-    /* USB connect management via PC7 (USB_DET, VBUS divider) — battery boot only.
-     * USB-first boot: USBD_Start already connected D+ to the present host, leave
-     * it. Battery boot: keep D+ disconnected until the cable is detected (PC7
-     * HIGH), then connect so the host sees a clean insertion and enumerates.
-     * This is the board's intended VBUS-detect design. */
-    uint8_t  s_usb_present_prev = 0xFFU;   /* 0xFF forces initial sync */
-    uint32_t s_usb_connect_tick = 0U;
-    for (;;)
-    {
-      osDelay(20U);
-
-      uint32_t now = osKernelGetTickCount();
-
-      /* Battery boot: drive D+ connect/disconnect from the USB_DET pin (PC7). */
-      if (BoardIO_IsBatteryLatched())
-      {
-        uint8_t usb_now = UsbDet_IsPresent();
-        if (usb_now != s_usb_present_prev)
-        {
-          s_usb_present_prev = usb_now;
-          if (usb_now != 0U)
-          {
-            HAL_PCD_DevConnect(&hpcd_USB_OTG_FS);    /* cable in: advertise */
-            s_usb_connect_tick = now;
-            printf("[USB] cable detected (PC7 HIGH) -> connect D+\r\n");
-          }
-          else
-          {
-            HAL_PCD_DevDisconnect(&hpcd_USB_OTG_FS); /* cable out: stop adv */
-            printf("[USB] cable removed (PC7 LOW) -> disconnect D+\r\n");
-          }
-        }
-        else if ((usb_now != 0U) &&
-                 (hUSB_Device.dev_state != USBD_STATE_CONFIGURED) &&
-                 ((int32_t)(now - (s_usb_connect_tick + 1500U)) >= 0))
-        {
-          /* Cable present but enumeration stalled: re-pulse D+ once. */
-          HAL_PCD_DevDisconnect(&hpcd_USB_OTG_FS);
-          osDelay(80U);
-          HAL_PCD_DevConnect(&hpcd_USB_OTG_FS);
-          s_usb_connect_tick = now;
-          printf("[USB] re-advertise (PC7 HIGH, not configured)\r\n");
-        }
-      }
-
-      if (s_usb_done_armed != 0U)
-      {
-        AppAcqControl_t acq;
-        AppAcqGetCopy(&acq);
-        if (acq.running == 0U)
-        {
-          s_usb_done_armed = 0U;
-          osDelay(500U);
-          UsbCdcService_Write((const uint8_t *)"DONE\r\n", 6U);
-        }
-      }
-
-      if (s_wcid_cmd_pending != 0U)
-      {
-        char local_cmd[64];
-        /* s_wcid_cmd_buf is written by WcidCmdCallback in the OTG_FS ISR. Mask
-         * that ISR across the snapshot so a newly-arrived command cannot overwrite
-         * the buffer mid-copy and tear the command (L2). 64-byte copy → µs-scale.
-         * Save/restore the enable state so we never wrongly enable it. */
-        uint32_t otg_was_enabled = NVIC_GetEnableIRQ(OTG_FS_IRQn);
-        HAL_NVIC_DisableIRQ(OTG_FS_IRQn);
-        s_wcid_cmd_pending = 0U;
-        memcpy(local_cmd, s_wcid_cmd_buf, sizeof(local_cmd));
-        if (otg_was_enabled != 0U) { HAL_NVIC_EnableIRQ(OTG_FS_IRQn); }
-        printf("[WCID] cmd: %s\r\n", local_cmd);
-        UsbCmd_Process(local_cmd);
-      }
-    }
-  }
-
-  /* Non-WCID boot modes skip the block above and fall through here. A FreeRTOS
-   * task must never return — it would hit prvTaskExitError → configASSERT →
-   * (with H2) a system reset / boot loop. Terminate this task cleanly (L6). */
-  osThreadExit();
-}
-
-void StartUsbUploadTask(void *argument)
-{
-  /* CDC removed — in WCID mode sensors write directly via UsbWcidApp_SendCsv.
-   * Idle shell kept only so the handle/diag stays valid; stack shrunk to 1KB
-   * (was 4KB) since it does nothing but sleep (L7). */
-  (void)argument;
-  for (;;) { osDelay(10000U); }
 }
 
 #if APP_SENSOR_TEST_TARGET == APP_SENSOR_TEST_LSM6DSOX
@@ -2584,11 +1920,6 @@ void StartLsm6dsoxTask(void *argument)
               if (nc == 7U)
               {
                 RingBuf_Write(&g_ring_lsm_imu, (const uint8_t *)rowbuf, off);
-                /* WCID Bulk: write CSV directly to USB endpoint double-buffer. */
-                if (g_boot_mode == BOOT_MODE_WCID_BULK && AppAcqIsUsbSinkActive() != 0U)
-                {
-                  UsbWcidApp_SendCsv(WCID_CH_LSM_IMU, rowbuf, off);
-                }
               }
             }
           }
@@ -2748,6 +2079,9 @@ void StartH3lis100dlTask(void *argument)
 
     if (ret == 0)
     {
+      /* 阈值事件门控:每样本判合矢量越限(仅阈值模式生效,非阈值模式立即返回)。 */
+      AppEvtH3Sample(data.acc_mg[0], data.acc_mg[1], data.acc_mg[2]);
+
       /* Monotonic timestamp: seed with DWT on first sample, then +interval per sample. */
       static uint32_t h3_ts_us = 0U;
       static uint8_t h3_ts_init = 0U;
@@ -2787,31 +2121,6 @@ void StartH3lis100dlTask(void *argument)
         rowbuf[off++] = '\r';
         rowbuf[off++] = '\n';
         RingBuf_Write(&g_ring_h3_acc, (const uint8_t *)rowbuf, off);
-
-        /* WCID Bulk: write CSV directly to USB endpoint double-buffer. */
-        if (g_boot_mode == BOOT_MODE_WCID_BULK && AppAcqIsUsbSinkActive() != 0U)
-        {
-          UsbWcidApp_SendCsv(WCID_CH_H3_ACCEL, rowbuf, off);
-        }
-      }
-
-      if (AppAcqIsUsbSinkActive() != 0U)
-      {
-        AppSensorFrame_t tmp;
-        uint32_t now_ms = osKernelGetTickCount();
-        memset(&tmp, 0, sizeof(tmp));
-        AppFramePopulateH3lis100dl(&tmp, &data, now_ms);
-
-        AppSensorFrame_t push_frame;
-        osMutexAcquire(frame_buffer_mutex, osWaitForever);
-        g_composite_frame.h3lis100dl = tmp.h3lis100dl;
-        g_composite_frame.present_mask |= APP_SENSOR_MASK_H3LIS100DL;
-        g_composite_frame.enabled_mask = APP_SENSOR_MASK_ALL;
-        g_composite_frame.tick_ms = now_ms;
-        g_composite_frame.frame_id = ++g_flow_stats.frame_id;
-        push_frame = g_composite_frame;
-        osMutexRelease(frame_buffer_mutex);
-        (void)AppFrameBufferPush(&push_frame);
       }
     }
 
@@ -3017,57 +2326,6 @@ void StartQma6100pTask(void *argument)
         rowbuf[off++] = '\r';
         rowbuf[off++] = '\n';
         RingBuf_Write(&g_ring_qma_acc, (const uint8_t *)rowbuf, off);
-
-        /* WCID Bulk: write CSV directly to USB endpoint double-buffer. */
-        if (g_boot_mode == BOOT_MODE_WCID_BULK && AppAcqIsUsbSinkActive() != 0U)
-        {
-          UsbWcidApp_SendCsv(WCID_CH_QMA_ACCEL, rowbuf, off);
-        }
-      }
-    }
-
-    if (AppAcqIsUsbSinkActive() != 0U && fifo_level > 0U)
-    {
-      uint8_t *last = &fifo_buf[(fifo_level - 1U) * 6U];
-      int16_t lrx = (int16_t)(((int16_t)((uint16_t)last[1] << 8 | last[0])) >> 2);
-      int16_t lry = (int16_t)(((int16_t)((uint16_t)last[3] << 8 | last[2])) >> 2);
-      int16_t lrz = (int16_t)(((int16_t)((uint16_t)last[5] << 8 | last[4])) >> 2);
-
-      AcqConfig_t qcfg;
-      AcqConfig_GetCopy(&qcfg);
-      uint32_t qma_lsb1g;
-      switch (qcfg.qma6100p.range)
-      {
-        case 4:  qma_lsb1g = 2048U; break;
-        case 8:  qma_lsb1g = 1024U; break;
-        case 16: qma_lsb1g = 512U;  break;
-        case 32: qma_lsb1g = 256U;  break;
-        default: qma_lsb1g = 4096U; break;
-      }
-      float qma_scale = 1000.0f / (float)qma_lsb1g;
-
-      QMA6100P_Data_t qdata;
-      qdata.raw[0] = lrx; qdata.raw[1] = lry; qdata.raw[2] = lrz;
-      qdata.acc_mg[0] = (float)lrx * qma_scale;
-      qdata.acc_mg[1] = (float)lry * qma_scale;
-      qdata.acc_mg[2] = (float)lrz * qma_scale;
-
-      AppSensorFrame_t tmp;
-      uint32_t now_ms = osKernelGetTickCount();
-      memset(&tmp, 0, sizeof(tmp));
-      AppFramePopulateQma6100p(&tmp, &qdata, now_ms);
-
-      {
-        AppSensorFrame_t push_frame;
-        osMutexAcquire(frame_buffer_mutex, osWaitForever);
-        g_composite_frame.qma6100p = tmp.qma6100p;
-        g_composite_frame.present_mask |= APP_SENSOR_MASK_QMA6100P;
-        g_composite_frame.enabled_mask = APP_SENSOR_MASK_ALL;
-        g_composite_frame.tick_ms = now_ms;
-        g_composite_frame.frame_id = ++g_flow_stats.frame_id;
-        push_frame = g_composite_frame;
-        osMutexRelease(frame_buffer_mutex);
-        (void)AppFrameBufferPush(&push_frame);
       }
     }
   }
@@ -3145,16 +2403,6 @@ void StartAht20Task(void *argument)
       off += AppF1ToDec(&rowbuf[off], hum);
       rowbuf[off++] = '\r'; rowbuf[off++] = '\n';
       RingBuf_Write(&g_ring_aht_env, (const uint8_t *)rowbuf, off);
-
-      /* WCID Bulk: AHT 数据没有独立 IN 端点，复用命令响应端点 0x85，行首加 "aht,"
-       * 供上位机在该端点上与命令响应文本分流。整行一次发出（≤64B，不截断）。 */
-      if (g_boot_mode == BOOT_MODE_WCID_BULK && AppAcqIsUsbSinkActive() != 0U)
-      {
-        char usbrow[56];
-        usbrow[0] = 'a'; usbrow[1] = 'h'; usbrow[2] = 't'; usbrow[3] = ',';
-        memcpy(&usbrow[4], rowbuf, off);
-        (void)UsbWcidApp_Write((const uint8_t *)usbrow, off + 4U);
-      }
     }
 
     osDelay(1000U);   /* ~1Hz（手册要求采集周期≥1s） */
@@ -3268,17 +2516,6 @@ void StartLis2mdlTask(void *argument)
       off += AppF1ToDec(&rowbuf[off], mg[2]);
       rowbuf[off++] = '\r'; rowbuf[off++] = '\n';
       RingBuf_Write(&g_ring_mag, (const uint8_t *)rowbuf, off);
-
-      /* WCID Bulk: MAG 数据没有独立 IN 端点，复用命令响应端点 0x85，行首加 "mag,"
-       * 供上位机分流。整行 ≤56B，单次发出不截断。100Hz × ~56B ≈ 5.6KB/s，对 0x85
-       * 可忽略；与命令响应/AHT 的并发由 UsbWcidApp_Write 内的互斥锁串行化。 */
-      if (g_boot_mode == BOOT_MODE_WCID_BULK && AppAcqIsUsbSinkActive() != 0U)
-      {
-        char usbrow[72];
-        usbrow[0] = 'm'; usbrow[1] = 'a'; usbrow[2] = 'g'; usbrow[3] = ',';
-        memcpy(&usbrow[4], rowbuf, off);
-        (void)UsbWcidApp_Write((const uint8_t *)usbrow, off + 4U);
-      }
     }
   }
 }
@@ -3334,30 +2571,171 @@ void StartMicTask(void *argument)
       printf("[Mic] stopped (dropped=%lu)\r\n", (unsigned long)Mic_GetDropped());
     }
 
-    /* USB streaming mode: pump raw PCM from g_ring_mic into the USB MIC channel
-     * (EP3). In SD mode the logger drains the ring to MIC.WAV instead, so we only
-     * consume here when the USB sink is active — keeps the ring single-consumer.
-     * Feed in small chunks (<= the SOF half) and poll fast so the 2x2048 double-
-     * buffer never overruns the in-flight half; the 64KB ring absorbs jitter. */
-    if (running && (AppAcqIsUsbSinkActive() != 0U))
+    /* SD path: the logger drains g_ring_mic to MIC.WAV — this task only handles
+     * the mic start/stop edges, no USB PCM pump. */
+    osDelay(20U);
+  }
+}
+
+/* ============================================================================
+ *  H3 阈值触发事件门控控制器
+ *  - H3 采集任务每样本调 AppEvtH3Sample()，越限则自增 g_evt_trig_seq(唯一写者)。
+ *  - logger 任务每轮调 AppEvtSdGate() 推进状态机，返回"此刻是否应开 SD 会话"。
+ *  - ARMED/HOLDOFF 期 logger 调 AppEvtTrimRings() 在消费者侧裁剪各 ring，只留最近
+ *    ~size/2 作预触发(不碰 RingBuf_Write/生产者，SPSC 不破)。
+ *  时间基准用 AppTime_GetEpochUs()(RTOS tick 慢~19%，定时不可用 tick)；logger 每轮
+ *  仅调用一次，频率低，符合 AppTime 限流要求。
+ * ========================================================================= */
+typedef enum { EVT_OFF = 0, EVT_ARMED, EVT_REC, EVT_HOLDOFF } AppEvtState_t;
+
+static volatile uint32_t g_evt_trig_seq = 0U;   /* H3 在"上升越过触发阈值"时自增(唯一写者) */
+static volatile uint8_t  g_evt_over     = 0U;    /* H3 迟滞态:1=当前在触发阈值之上(唯一写者 H3) */
+static uint32_t  g_evt_last_seen_seq = 0U;       /* logger 上次观察到的 seq */
+static uint64_t  g_evt_level_mg2     = 0U;       /* 触发阈值平方(mg²) */
+static uint64_t  g_evt_release_mg2   = 0U;       /* 释放阈值平方(mg²)=0.8×触发,迟滞防抖 */
+static uint32_t  g_evt_post_ms       = 0U;       /* 后触发窗口(ms,用 tick 计时) */
+static uint32_t  g_evt_holdoff_ms    = 0U;       /* 死区(ms) */
+static uint32_t  g_evt_deadline_ms   = 0U;       /* REC:post 截止 / HOLDOFF:死区截止(tick ms) */
+static AppEvtState_t g_evt_state      = EVT_OFF;
+static uint8_t   g_evt_mode          = 0U;       /* 1=本次采集为阈值模式 */
+
+/* 采集启动时调用：按配置决定是否进入阈值模式并预算阈值/窗口。 */
+static void AppEvtBeginSession(const AcqConfig_t *cfg)
+{
+  if (cfg != NULL && cfg->trigger_mode == ACQ_TRIGGER_THRESHOLD)
+  {
+    uint64_t mg = (uint64_t)cfg->trig_level_g * 1000U;   /* g → mg */
+    g_evt_level_mg2   = mg * mg;
+    uint64_t rmg = (mg * 8U) / 10U;                      /* 释放阈值 = 触发的 0.8 倍 */
+    g_evt_release_mg2 = rmg * rmg;
+    g_evt_post_ms    = (uint32_t)cfg->trig_post_sec    * 1000U;
+    g_evt_holdoff_ms = (uint32_t)cfg->trig_holdoff_sec * 1000U;
+    g_evt_last_seen_seq = g_evt_trig_seq;   /* 丢弃布防前的历史触发 */
+    g_evt_over  = 0U;
+    g_evt_state = EVT_ARMED;
+    g_evt_mode  = 1U;
+    if (cfg->h3lis100dl.enabled == 0U)
     {
-      uint32_t fed = 0U;
-      const uint8_t *p;
-      uint32_t n;
-      while ((fed < 1024U) && (RingBuf_PeekContiguous(&g_ring_mic, &p, &n) != 0U))
-      {
-        uint32_t chunk = (n > 512U) ? 512U : n;
-        if (UsbWcidApp_SendRaw(WCID_CH_MIC, p, chunk) != 0U) { break; }
-        RingBuf_Consume(&g_ring_mic, chunk);
-        fed += chunk;
-      }
-      osDelay(1U);
+      printf("[Evt] 警告：阈值模式但 H3 未启用，将永不触发！请在 DEVCFG.JSN 启用 h3lis100dl\r\n");
     }
-    else
+    printf("[Evt] 阈值模式布防: level=%ug post=%us holdoff=%us\r\n",
+           (unsigned int)cfg->trig_level_g,
+           (unsigned int)cfg->trig_post_sec,
+           (unsigned int)cfg->trig_holdoff_sec);
+  }
+  else
+  {
+    g_evt_mode  = 0U;
+    g_evt_state = EVT_OFF;
+  }
+}
+
+/* 采集停止时调用。 */
+static void AppEvtEndSession(void)
+{
+  g_evt_mode  = 0U;
+  g_evt_state = EVT_OFF;
+}
+
+/* 本次采集是否为阈值模式(供 auto-stop / LED 判定)。 */
+static uint8_t AppEvtThresholdMode(void) { return g_evt_mode; }
+/* 阈值模式下是否正在录制事件(REC)。布防/死区返回 0。 */
+static uint8_t AppEvtIsRecording(void)
+{
+  return (uint8_t)((g_evt_mode != 0U) && (g_evt_state == EVT_REC));
+}
+
+/* H3 采集任务每样本调用:带迟滞的合矢量越限检测。整数运算,~400Hz,可忽略。
+ * 上升越过"触发阈值"→ 新触发(seq++)且置 over;跌回"释放阈值"(0.8×)以下 → 清 over。
+ * 中间带内保持状态,避免在阈值附近抖动反复触发/反复收尾。 */
+static void AppEvtH3Sample(float mx, float my, float mz)
+{
+  if (g_evt_mode == 0U) return;
+  int64_t ix = (int64_t)mx, iy = (int64_t)my, iz = (int64_t)mz;
+  uint64_t mag2 = (uint64_t)(ix * ix + iy * iy + iz * iz);
+  if (g_evt_over == 0U)
+  {
+    if (mag2 > g_evt_level_mg2)      /* 上升越过触发阈值 → 新触发 */
     {
-      osDelay(20U);
+      g_evt_over     = 1U;
+      g_evt_trig_seq++;              /* 唯一写者(H3),logger 只读 */
     }
   }
+  else
+  {
+    if (mag2 < g_evt_release_mg2)    /* 跌回释放阈值之下 → 本次活跃结束 */
+    {
+      g_evt_over = 0U;
+    }
+  }
+}
+
+/* logger 任务每轮调用:推进状态机,返回 1=此刻应开 SD 会话(REC),0=否(ARMED/HOLDOFF)。
+ * 非阈值模式不应调用本函数(返回 1 兜底)。 */
+static uint8_t AppEvtSdGate(void)
+{
+  if (g_evt_mode == 0U) return 1U;
+
+  uint32_t seq      = g_evt_trig_seq;
+  uint8_t  new_trig = (uint8_t)(seq != g_evt_last_seen_seq);
+  g_evt_last_seen_seq = seq;
+  /* 用 tick(ms) 计时,不用 AppTime_GetEpochUs:后者带 __disable_irq+DWT 维护,被本
+   * gate 每个 logger 循环高频调用会拖垮吞吐并致 apptime 错乱(实测 CKBX0412)。
+   * tick 比真实慢 ~19%,3s post 实际约 3.6s,对事件录制完全够用。 */
+  uint32_t now = osKernelGetTickCount();
+
+  switch (g_evt_state)
+  {
+    case EVT_ARMED:
+      if (new_trig)
+      {
+        g_evt_deadline_ms = now + g_evt_post_ms;
+        g_evt_state = EVT_REC;
+        printf("[Evt] 触发! 开始录制事件\r\n");
+        return 1U;
+      }
+      return 0U;
+
+    case EVT_REC:
+      /* 信号仍在阈值之上(over)或又有新上升触发 → 持续录,刷新 post 截止;
+       * 跌回释放阈值之下并安静满 post_ms 才收尾(迟滞,防止抖动无限延长)。 */
+      if ((g_evt_over != 0U) || new_trig) { g_evt_deadline_ms = now + g_evt_post_ms; }
+      if ((int32_t)(now - g_evt_deadline_ms) >= 0)
+      {
+        g_evt_deadline_ms = now + g_evt_holdoff_ms;
+        g_evt_state = EVT_HOLDOFF;
+        printf("[Evt] 事件录制结束,进入死区\r\n");
+        return 0U;
+      }
+      return 1U;
+
+    case EVT_HOLDOFF:
+      if ((int32_t)(now - g_evt_deadline_ms) >= 0) { g_evt_state = EVT_ARMED; }
+      return 0U;   /* 死区内忽略触发(new_trig 已被吞掉) */
+
+    default:
+      return 0U;
+  }
+}
+
+/* ARMED/HOLDOFF 期消费者侧裁剪:每条 ring 只留最近 ~size/2(预触发),丢弃更旧字节。
+ * 仅 logger(消费者)动 rd_idx,生产者不变,SPSC 不破。按字节裁剪可能在头部留半帧,
+ * 事件预触发首条记录可能不完整(BIN 由 CRC 跳过/CSV 跳首行),属可接受的边界瑕疵。 */
+static void AppEvtTrimRing(AppRingBuffer_t *rb)
+{
+  uint32_t avail = RingBuf_Available(rb);
+  uint32_t keep  = rb->size / 2U;
+  if (avail > keep) { RingBuf_Consume(rb, avail - keep); }
+}
+
+static void AppEvtTrimRings(void)
+{
+  AppEvtTrimRing(&g_ring_lsm_imu);
+  AppEvtTrimRing(&g_ring_qma_acc);
+  AppEvtTrimRing(&g_ring_h3_acc);
+  AppEvtTrimRing(&g_ring_mic);
+  AppEvtTrimRing(&g_ring_aht_env);
+  AppEvtTrimRing(&g_ring_mag);
 }
 
 void StartLoggerTask(void *argument)
@@ -3393,6 +2771,7 @@ void StartLoggerTask(void *argument)
   HAL_NVIC_EnableIRQ(SDMMC1_IRQn);
   printf("[Logger] SDMMC POLLING mode (corruption-free SD writes)\r\n");
 
+  static uint8_t s_prev_sd_acq = 0U;   /* 上一轮 SD 采集是否活跃,用于检测起止沿 */
   for (;;)
   {
     AppAcqControl_t acq;
@@ -3402,26 +2781,44 @@ void StartLoggerTask(void *argument)
     AppAcqCheckAutoStop();
     AppAcqGetCopy(&acq);
     acq_running = acq.running;
-    sd_session_active = (uint8_t)((acq_running != 0U) && (acq.sink == APP_ACQ_SINK_SD));
+
+    uint8_t sd_acq_active = (uint8_t)((acq_running != 0U) && (acq.sink == APP_ACQ_SINK_SD));
+
+    /* 事件门控生命周期:SD 采集起/止沿驱动 BeginSession/EndSession */
+    if (sd_acq_active != 0U && s_prev_sd_acq == 0U)
+    {
+      AcqConfig_t ecfg; AcqConfig_GetCopy(&ecfg);
+      AppEvtBeginSession(&ecfg);
+    }
+    else if (sd_acq_active == 0U && s_prev_sd_acq != 0U)
+    {
+      AppEvtEndSession();
+    }
+    s_prev_sd_acq = sd_acq_active;
+
+    if (g_evt_mode != 0U && sd_acq_active != 0U)
+    {
+      /* 阈值模式:gate 决定此刻是否开 SD 会话;未录时维持预触发裁剪 */
+      uint8_t gate = AppEvtSdGate();
+      sd_session_active = gate;
+      if (gate == 0U) { AppEvtTrimRings(); }
+    }
+    else
+    {
+      /* 非阈值模式:维持原行为 */
+      sd_session_active = sd_acq_active;
+    }
 
     if (sd_session_active == 0U)
     {
       if (sd_file_open != 0U)
       {
-        char done_dir[48];
-        const char *dir = FatFs_SD_GetSessionDir();
-        strncpy(done_dir, (dir != NULL) ? dir : "?", sizeof(done_dir) - 1U);
-        done_dir[sizeof(done_dir) - 1U] = '\0';
-        AppFlowStatsSetMode(AppAcqIsUsbSinkActive(), 0U);
+        AppFlowStatsSetMode(0U, 0U);
         AppLoggerStopSdSession(&sd_file_open, &rows_since_sync);
-        /* 仅在主机已连接时回 DONE：SD-only 无人值守 session 不往 USB 留陈旧状态行 */
-        if (UsbWcidApp_IsConfigured() != 0U)
-        { char _d[64]; int _n = snprintf(_d, sizeof(_d), "DONE dir=%s\r\n", done_dir);
-          UsbWcidApp_Write((const uint8_t*)_d, (uint32_t)_n); }
       }
       else
       {
-        AppFlowStatsSetMode(AppAcqIsUsbSinkActive(), 0U);
+        AppFlowStatsSetMode(0U, 0U);
       }
       osDelay(10U);
       continue;
@@ -3453,18 +2850,22 @@ void StartLoggerTask(void *argument)
         }
 
         /* Discard data buffered between sessions so each file starts clean
-         * and frame_id/tick_ms in the new session align with real samples. */
-        RingBuf_Reset(&g_ring_lsm_imu);
-        RingBuf_Reset(&g_ring_qma_acc);
-        RingBuf_Reset(&g_ring_h3_acc);
-        RingBuf_Reset(&g_ring_mic);
-        RingBuf_Reset(&g_ring_aht_env);
-        RingBuf_Reset(&g_ring_mag);
-        g_lsm_frame_id_counter = 0U;
-        g_qma_frame_id_counter = 0U;
-        g_h3_frame_id_counter  = 0U;
-        g_aht_frame_id_counter = 0U;
-        g_mag_frame_id_counter = 0U;
+         * and frame_id/tick_ms in the new session align with real samples.
+         * 阈值模式例外:ring 里是要落盘的预触发段,绝不能清;帧号跨事件保持连续。 */
+        if (g_evt_mode == 0U)
+        {
+          RingBuf_Reset(&g_ring_lsm_imu);
+          RingBuf_Reset(&g_ring_qma_acc);
+          RingBuf_Reset(&g_ring_h3_acc);
+          RingBuf_Reset(&g_ring_mic);
+          RingBuf_Reset(&g_ring_aht_env);
+          RingBuf_Reset(&g_ring_mag);
+          g_lsm_frame_id_counter = 0U;
+          g_qma_frame_id_counter = 0U;
+          g_h3_frame_id_counter  = 0U;
+          g_aht_frame_id_counter = 0U;
+          g_mag_frame_id_counter = 0U;
+        }
         g_h3_irq_count = 0U;        /* H3 DRDY 中断测试统计，按会话清零 */
         g_h3_timeout_count = 0U;
 
@@ -3630,16 +3031,8 @@ void StartLoggerTask(void *argument)
       }
 
       {
-        char done_dir[48];
-        const char *dir = FatFs_SD_GetSessionDir();
-        strncpy(done_dir, (dir != NULL) ? dir : "?", sizeof(done_dir) - 1U);
-        done_dir[sizeof(done_dir) - 1U] = '\0';
         AppLoggerStopSdSession(&sd_file_open, &rows_since_sync);
-        AppFlowStatsSetMode(AppAcqIsUsbSinkActive(), 0U);
-        /* 仅在主机已连接时回 DONE：SD-only 无人值守 session 不往 USB 留陈旧状态行 */
-        if (UsbWcidApp_IsConfigured() != 0U)
-        { char _d[64]; int _n = snprintf(_d, sizeof(_d), "DONE dir=%s\r\n", done_dir);
-          UsbWcidApp_Write((const uint8_t*)_d, (uint32_t)_n); }
+        AppFlowStatsSetMode(0U, 0U);
       }
       osDelay(10U);
       continue;
@@ -3652,7 +3045,7 @@ void StartLoggerTask(void *argument)
       strncpy(done_dir, (dir != NULL) ? dir : "?", sizeof(done_dir) - 1U);
       done_dir[sizeof(done_dir) - 1U] = '\0';
       AppLoggerStopSdSession(&sd_file_open, &rows_since_sync);
-      AppFlowStatsSetMode(AppAcqIsUsbSinkActive(), 0U);
+      AppFlowStatsSetMode(0U, 0U);
       printf("DONE dir=%s\r\n", done_dir);
       osDelay(10U);
       continue;

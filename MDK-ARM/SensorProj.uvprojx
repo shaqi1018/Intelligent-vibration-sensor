@@ -439,11 +439,6 @@
               <FilePath>..\Core\Src\key_adc.c</FilePath>
             </File>
             <File>
-              <FileName>usb_cdc_service.c</FileName>
-              <FileType>1</FileType>
-              <FilePath>../Core/Src/usb_cdc_service.c</FilePath>
-            </File>
-            <File>
               <FileName>dma_sampling.c</FileName>
               <FileType>1</FileType>
               <FilePath>../Core/Src/dma_sampling.c</FilePath>
@@ -452,11 +447,6 @@
               <FileName>key_adc.h</FileName>
               <FileType>5</FileType>
               <FilePath>..\Core\Inc\key_adc.h</FilePath>
-            </File>
-            <File>
-              <FileName>usb_cdc_service.h</FileName>
-              <FileType>5</FileType>
-              <FilePath>../Core/Inc/usb_cdc_service.h</FilePath>
             </File>
             <File>
               <FileName>dma_sampling.h</FileName>
@@ -682,16 +672,6 @@
               <FileName>usbd_desc.h</FileName>
               <FileType>5</FileType>
               <FilePath>../Core/Inc/usbd_desc.h</FilePath>
-            </File>
-            <File>
-              <FileName>usbd_wcid_app.c</FileName>
-              <FileType>1</FileType>
-              <FilePath>../Core/Src/usbd_wcid_app.c</FilePath>
-            </File>
-            <File>
-              <FileName>usbd_wcid_app.h</FileName>
-              <FileType>5</FileType>
-              <FilePath>../Core/Inc/usbd_wcid_app.h</FilePath>
             </File>
             <File>
               <FileName>usbd_storage_if.c</FileName>
