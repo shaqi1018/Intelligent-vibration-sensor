@@ -126,71 +126,28 @@ int main(void)
    * (set_time fail、时间戳 F6)。这里开机即拉低 PA_EN 给 PAVCC 供电,保证 RTC 常在线。 */
   PaEn_Set(1);
 
-  /* Boot mode is decided by a TAMP backup register written by the previous session.
-   * MSC mode = bare-metal U-disk (SD as block device), exits via USB unplug.
-   * WCID mode = RTOS path with WCID Bulk USB.
-   * Read first, then clear MSC flag so a bare reset always falls back to WCID. */
-  g_boot_mode = BootMode_Read();
-  if (g_boot_mode == BOOT_MODE_USB_MSC)
-  {
-    BootMode_Write(BOOT_MODE_DATA_LOG);
-  }
-
-  if (g_boot_mode == BOOT_MODE_USB_MSC)
-  {
-    /* No hardware detect pin on HW-v2. Try init; failure = no card. */
-    if (MX_SDMMC1_SD_Init() != HAL_OK)
-    {
-      BootMode_Write(BOOT_MODE_DATA_LOG);
-      NVIC_SystemReset();
-    }
-
-    MX_USB_OTG_FS_PCD_Init();
-
-    if (UsbMsc_App_Start() == 0U)
-    {
-      BootMode_Write(BOOT_MODE_DATA_LOG);
-      NVIC_SystemReset();
-    }
-
-    /* Bare polling loop: when host disconnects (was configured, now not),
-     * arm LOG flag and reset so next boot resumes data logging. */
-    uint8_t was_configured = 0U;
-    for (;;)
-    {
-      if (UsbMsc_App_IsConfigured() != 0U)
-      {
-        was_configured = 1U;
-      }
-      else if (was_configured != 0U)
-      {
-        HAL_Delay(50U);
-        BootMode_Write(BOOT_MODE_DATA_LOG);
-        NVIC_SystemReset();
-      }
-      HAL_Delay(20U);
-    }
-    /* not reached */
-  }
+  /* path/usb: boot mode logic removed — always WCID Bulk streaming */
+  g_boot_mode = BOOT_MODE_WCID_BULK;
+  printf("[BOOT] path/usb — WCID Bulk only (no MSC)\r\n");
 
   printf("[初始化] GPIO/ICACHE/UART1 初始化完成\r\n");
-  printf("[BOOT] mode=%d (0=WCID, 1=MSC)\r\n", (int)g_boot_mode);
 
-  /* Push-type slot: no hardware card detect. Always try init; result tells us if card is present. */
+  /* path/usb: SD card optional — used only to read DEVCFG.JSN at boot for default
+   * sensor config. Runtime config comes from USB commands and overrides defaults. */
   {
     HAL_StatusTypeDef sd_st = MX_SDMMC1_SD_Init();
     if (sd_st == HAL_OK)
     {
-      printf("[初始化] SDMMC1 初始化完成 (SD卡已就绪)\r\n");
+      printf("[初始化] SDMMC1 初始化完成 (SD 可用 — 读取 DEVCFG.JSN)\r\n");
       FatFs_SD_RunPhaseBSmokeTest();
     }
     else
     {
-      printf("[初始化] 未检测到SD卡 (init err=0x%02X)\r\n", (unsigned)sd_st);
+      printf("[初始化] 未检测到 SD 卡 (跳过默认配置，使用内置默认值)\r\n");
     }
   }
 
-  /* 暂时跳过KEY_ADC初始化（硬件问题待排查） */
+  /* path/usb: 按键/电池管理已删除 — USB 总线供电，上位机指令驱动 */
 
   MX_USB_OTG_FS_PCD_Init();
   HAL_NVIC_DisableIRQ(OTG_FS_IRQn); /* ISR off until USBD stack is fully initialised */
