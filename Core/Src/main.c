@@ -31,7 +31,7 @@
 
 #include <stdio.h>
 #include "bsp_spi.h"
-#include "key_adc.h"
+/* key_adc.h removed in path/usb — no button/battery */
 #include "dma_sampling.h"
 #include "boot_mode.h"
 #include "usb_pcd_dispatch.h"
@@ -126,11 +126,54 @@ int main(void)
    * (set_time fail、时间戳 F6)。这里开机即拉低 PA_EN 给 PAVCC 供电,保证 RTC 常在线。 */
   PaEn_Set(1);
 
-  /* path/usb: boot mode logic removed — always WCID Bulk streaming */
-  g_boot_mode = BOOT_MODE_WCID_BULK;
-  printf("[BOOT] path/usb — WCID Bulk only (no MSC)\r\n");
+  /* path/usb: 上位机发 boot_msc 命令 → 写 TAMP 标志 + 复位 → 这里进 MSC(U盘)。
+   * MSC 退出(USB 拔出)或无卡/枚举失败 → 复位回 WCID 流式采集。
+   * 读一次后即清标志,裸复位总是回落到 WCID。 */
+  g_boot_mode = BootMode_Read();
+  if (g_boot_mode == BOOT_MODE_USB_MSC)
+  {
+    BootMode_Write(BOOT_MODE_WCID_BULK);
+  }
+
+  if (g_boot_mode == BOOT_MODE_USB_MSC)
+  {
+    /* No hardware detect pin on HW-v2. Try init; failure = no card. */
+    if (MX_SDMMC1_SD_Init() != HAL_OK)
+    {
+      BootMode_Write(BOOT_MODE_WCID_BULK);
+      NVIC_SystemReset();
+    }
+
+    MX_USB_OTG_FS_PCD_Init();
+
+    if (UsbMsc_App_Start() == 0U)
+    {
+      BootMode_Write(BOOT_MODE_WCID_BULK);
+      NVIC_SystemReset();
+    }
+
+    /* Bare polling loop: when host disconnects (was configured, now not),
+     * arm WCID flag and reset so next boot resumes streaming. */
+    uint8_t was_configured = 0U;
+    for (;;)
+    {
+      if (UsbMsc_App_IsConfigured() != 0U)
+      {
+        was_configured = 1U;
+      }
+      else if (was_configured != 0U)
+      {
+        HAL_Delay(50U);
+        BootMode_Write(BOOT_MODE_WCID_BULK);
+        NVIC_SystemReset();
+      }
+      HAL_Delay(20U);
+    }
+    /* not reached */
+  }
 
   printf("[初始化] GPIO/ICACHE/UART1 初始化完成\r\n");
+  printf("[BOOT] path/usb mode=%d (0=WCID Bulk, 1=MSC U-disk)\r\n", (int)g_boot_mode);
 
   /* path/usb: SD card optional — used only to read DEVCFG.JSN at boot for default
    * sensor config. Runtime config comes from USB commands and overrides defaults. */

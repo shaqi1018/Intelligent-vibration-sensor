@@ -272,7 +272,11 @@ const osThreadAttr_t aht20Task_attributes = {
 osThreadId_t lis2mdlTaskHandle;
 const osThreadAttr_t lis2mdlTask_attributes = {
   .name = "lis2mdlTask",
-  .priority = (osPriority_t)osPriorityAboveNormal,  /* 100Hz DRDY 驱动 */
+  /* High(从 AboveNormal 提):USB 满载时 LSM/H3(均 High)持续占 CPU,MAG 在 AboveNormal
+   * 即使 DRDY 已唤醒也抢不到 CPU 执行,任务实际只跑 ~75 轮/秒 → 掉到 ~69%(USB路径实测,
+   * 只开MAG时 102% 证明是 CPU 竞争非采集问题)。MAG 仅 100Hz、每轮读 6B I2C 很快,提到
+   * High 与 LSM/H3 共存不会饿到它们(LSM 是 FIFO 批量、H3 同 High)。 */
+  .priority = (osPriority_t)osPriorityHigh,
   .stack_size = 1024 * 2  /* 2KB */
 };
 
@@ -3192,7 +3196,10 @@ void StartLis2mdlTask(void *argument)
       }
     }
 
-    /* DRDY 硬件节拍（不靠 tick 计时）；20ms 超时自愈。 */
+    /* DRDY 硬件节拍:阻塞等信号量。DRDY 上升沿 ISR release 信号量 → 本任务被立即
+     * 唤醒并抢占调度(不像 osDelay 轮询要等下个 tick 才被调度)。满载下 osDelay(1)
+     * 主动睡眠会让 MAG 任务被推迟,每轮实际 ~13ms → 掉到 ~75Hz(实测);信号量阻塞唤醒
+     * 无此延迟。20ms 超时兜底自愈。 */
     osStatus_t sem_st = osOK;
     if (s_mag_drdy_sem != NULL)
     {
@@ -3204,14 +3211,13 @@ void StartLis2mdlTask(void *argument)
     osMutexAcquire(i2c1_mutex, osWaitForever);
     if (sem_st == osOK)
     {
-      /* DRDY 中断已确保新数据就绪：跳过冗余的 STATUS 读，直接读 6 字节，
-       * 每周期省一次 I2C 往返(~0.3ms)，降低满载下错过 10ms 窗口的概率。
-       * (BDU 已置位，保证 H/L 一致，无需再查 Zyxda。) */
+      /* DRDY 中断已确保新数据就绪:跳过冗余 STATUS 读,直接读 6 字节。
+       * (BDU 已置位,保证 H/L 一致,无需再查 Zyxda。) */
       rr = LIS2MDL_ReadMag(raw, mg);
     }
     else
     {
-      /* 超时回退(无 DRDY)：先查就绪再读，避免读到陈旧/重复数据。 */
+      /* 超时回退(无 DRDY):先查就绪再读,避免读到陈旧/重复数据。 */
       rr = LIS2MDL_DataReady() ? LIS2MDL_ReadMag(raw, mg) : HAL_BUSY;
     }
     osMutexRelease(i2c1_mutex);
@@ -3257,14 +3263,16 @@ void StartLis2mdlTask(void *argument)
       RingBuf_Write(&g_ring_mag, (const uint8_t *)rowbuf, off);
 
       /* WCID Bulk: MAG 数据没有独立 IN 端点，复用命令响应端点 0x85，行首加 "mag,"
-       * 供上位机分流。整行 ≤56B，单次发出不截断。100Hz × ~56B ≈ 5.6KB/s，对 0x85
-       * 可忽略；与命令响应/AHT 的并发由 UsbWcidApp_Write 内的互斥锁串行化。 */
+       * 供上位机分流。整行 ≤56B。用【非阻塞】写:MAG 走 DRDY 二值信号量的 10ms 热路径,
+       * 若用阻塞版 UsbWcidApp_Write,端点忙时 osDelay(1U) 重试会阻塞采集节拍,期间到达的
+       * DRDY 边沿被二值信号量合并丢弃 → 掉到 ~70% 并丢帧(USB 路径实测)。非阻塞版拥塞即
+       * 丢当前行,保住 100Hz 节拍。 */
       if (g_boot_mode == BOOT_MODE_WCID_BULK && AppAcqIsUsbSinkActive() != 0U)
       {
         char usbrow[72];
         usbrow[0] = 'm'; usbrow[1] = 'a'; usbrow[2] = 'g'; usbrow[3] = ',';
         memcpy(&usbrow[4], rowbuf, off);
-        (void)UsbWcidApp_Write((const uint8_t *)usbrow, off + 4U);
+        (void)UsbWcidApp_WriteNonBlocking((const uint8_t *)usbrow, off + 4U);
       }
     }
   }

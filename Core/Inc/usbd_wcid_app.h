@@ -62,6 +62,12 @@ uint8_t UsbWcidApp_RespSend(void);
  * single response buffer inside USBD_WCID_STREAMING_SendResponse. */
 uint8_t UsbWcidApp_Write(const uint8_t *buf, uint32_t len);
 
+/* 非阻塞版 0x85 写：给高频生产者(MAG @100Hz)用。端点忙/锁竞争即丢帧立即返回，
+ * 绝不 osDelay 重试。MAG 走 DRDY 二值信号量的 10ms 热路径，任何 tick 级阻塞都会
+ * 拖慢采集并静默丢样本(USB 路径实测掉到 ~70%)；拥塞时丢个别 USB 行远比拖垮 100Hz
+ * 节拍划算。mic/LSM/H3/QMA 走各自双缓冲端点,不受影响。 */
+uint8_t UsbWcidApp_WriteNonBlocking(const uint8_t *buf, uint32_t len);
+
 /* 1 = USB 主机已连接并配置（设备处于 CONFIGURED 态），0 = 无主机。
  * 用于避免无主机时把状态行(如 DONE dir=)塞进端点 FIFO，等主机接入被陈旧顶出。 */
 uint8_t UsbWcidApp_IsConfigured(void);

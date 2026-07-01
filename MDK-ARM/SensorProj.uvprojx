@@ -434,11 +434,6 @@
               <FilePath>..\Core\Src\usart.c</FilePath>
             </File>
             <File>
-              <FileName>key_adc.c</FileName>
-              <FileType>1</FileType>
-              <FilePath>..\Core\Src\key_adc.c</FilePath>
-            </File>
-            <File>
               <FileName>usb_cdc_service.c</FileName>
               <FileType>1</FileType>
               <FilePath>../Core/Src/usb_cdc_service.c</FilePath>
@@ -447,11 +442,6 @@
               <FileName>dma_sampling.c</FileName>
               <FileType>1</FileType>
               <FilePath>../Core/Src/dma_sampling.c</FilePath>
-            </File>
-            <File>
-              <FileName>key_adc.h</FileName>
-              <FileType>5</FileType>
-              <FilePath>..\Core\Inc\key_adc.h</FilePath>
             </File>
             <File>
               <FileName>usb_cdc_service.h</FileName>
@@ -507,11 +497,6 @@
               <FileName>mic_capture.c</FileName>
               <FileType>1</FileType>
               <FilePath>../Core/Src/mic_capture.c</FilePath>
-            </File>
-            <File>
-              <FileName>battery_adc.c</FileName>
-              <FileType>1</FileType>
-              <FilePath>..\Core\Src\battery_adc.c</FilePath>
             </File>
           </Files>
         </Group>
@@ -634,11 +619,6 @@
               <FilePath>../Core/Src/board_io.c</FilePath>
             </File>
             <File>
-              <FileName>user_ctrl.c</FileName>
-              <FileType>1</FileType>
-              <FilePath>../Core/Src/user_ctrl.c</FilePath>
-            </File>
-            <File>
               <FileName>boot_mode.h</FileName>
               <FileType>5</FileType>
               <FilePath>../Core/Inc/boot_mode.h</FilePath>
@@ -652,16 +632,6 @@
               <FileName>usb_pcd_dispatch.h</FileName>
               <FileType>5</FileType>
               <FilePath>../Core/Inc/usb_pcd_dispatch.h</FilePath>
-            </File>
-            <File>
-              <FileName>usb_msc_app.c</FileName>
-              <FileType>1</FileType>
-              <FilePath>../Core/Src/usb_msc_app.c</FilePath>
-            </File>
-            <File>
-              <FileName>usb_msc_app.h</FileName>
-              <FileType>5</FileType>
-              <FilePath>../Core/Inc/usb_msc_app.h</FilePath>
             </File>
             <File>
               <FileName>usbd_conf.c</FileName>
@@ -694,14 +664,14 @@
               <FilePath>../Core/Inc/usbd_wcid_app.h</FilePath>
             </File>
             <File>
-              <FileName>usbd_storage_if.c</FileName>
+              <FileName>usb_msc_app.c</FileName>
               <FileType>1</FileType>
-              <FilePath>../Core/Src/usbd_storage_if.c</FilePath>
+              <FilePath>..\Core\Src\usb_msc_app.c</FilePath>
             </File>
             <File>
-              <FileName>usbd_storage_if.h</FileName>
-              <FileType>5</FileType>
-              <FilePath>../Core/Inc/usbd_storage_if.h</FilePath>
+              <FileName>usbd_storage_if.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\Core\Src\usbd_storage_if.c</FilePath>
             </File>
           </Files>
         </Group>

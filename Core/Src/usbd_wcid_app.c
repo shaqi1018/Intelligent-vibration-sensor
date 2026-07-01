@@ -199,6 +199,31 @@ uint8_t UsbWcidApp_Write(const uint8_t *buf, uint32_t len)
   return r;
 }
 
+/* Non-blocking 0x85 write for high-rate producers (MAG @100Hz). Unlike
+ * UsbWcidApp_Write, it NEVER osDelay-retries: if the endpoint is busy or the
+ * mutex is contended it drops the frame immediately and returns non-zero.
+ * Rationale: MAG runs on a 10ms DRDY-driven hot loop with a *binary* semaphore
+ * that cannot accumulate missed edges; any tick-level block here stalls capture
+ * and silently drops samples (~70% rate, CKBX USB path). Dropping the occasional
+ * USB row under congestion is far cheaper than stalling the 100Hz cadence.
+ * The mic/LSM/H3/QMA use dedicated double-buffered endpoints and are unaffected. */
+uint8_t UsbWcidApp_WriteNonBlocking(const uint8_t *buf, uint32_t len)
+{
+  if (s_pdev == NULL) { return 1U; }
+  if (len == 0U)      { return 0U; }
+  if (len > 0xFFFFU)  { len = 0xFFFFU; }
+
+  /* try-lock: contended → drop this frame, don't wait */
+  if (s_resp_mutex != NULL)
+  {
+    if (osMutexAcquire(s_resp_mutex, 0U) != osOK) { return 1U; }
+  }
+  /* single attempt, no osDelay retry */
+  uint8_t r = USBD_WCID_STREAMING_SendResponse(s_pdev, buf, (uint16_t)len);
+  if (s_resp_mutex != NULL) { (void)osMutexRelease(s_resp_mutex); }
+  return r;
+}
+
 void UsbWcidApp_InitRtos(void)
 {
   if (s_resp_mutex == NULL)
