@@ -23,23 +23,25 @@ virtualFolder:
                 - path: ../Core/Src/main.c
                 - path: ../Core/Src/gpio.c
                 - path: ../Core/Src/app_freertos.c
-                - path: ../Core/Src/app_time.c
-                - path: ../Core/Src/i2c.c
-                - path: ../Core/Src/rtc_pcf85063.c
                 - path: ../Core/Src/icache.c
                 - path: ../Core/Src/stm32u5xx_it.c
                 - path: ../Core/Src/stm32u5xx_hal_msp.c
                 - path: ../Core/Src/stm32u5xx_hal_timebase_tim.c
                 - path: ../Core/Src/usart.c
                 - path: ../Core/Src/key_adc.c
-                - path: ../Core/Src/usb_cdc_service.c
                 - path: ../Core/Src/dma_sampling.c
                 - path: ../Core/Inc/key_adc.h
-                - path: ../Core/Inc/usb_cdc_service.h
                 - path: ../Core/Inc/dma_sampling.h
                 - path: ../Core/Src/acq_config.c
                 - path: ../Core/Src/sensor_bin.c
                 - path: ../Core/Src/frame_ring.c
+                - path: ../Core/Src/i2c.c
+                - path: ../Core/Src/app_time.c
+                - path: ../Core/Src/rtc_pcf85063.c
+                - path: ../Core/Src/sai.c
+                - path: ../Core/Src/es8311.c
+                - path: ../Core/Src/mic_capture.c
+                - path: ../Core/Src/battery_adc.c
               folders: []
             - name: Storage
               files:
@@ -78,8 +80,6 @@ virtualFolder:
                 - path: ../Core/Inc/usbd_conf.h
                 - path: ../Core/Src/usbd_desc.c
                 - path: ../Core/Inc/usbd_desc.h
-                - path: ../Core/Src/usbd_wcid_app.c
-                - path: ../Core/Inc/usbd_wcid_app.h
                 - path: ../Core/Src/usbd_storage_if.c
                 - path: ../Core/Inc/usbd_storage_if.h
               folders: []
@@ -261,6 +261,8 @@ virtualFolder:
             - path: ../Drivers/STM32U5xx_HAL_Driver/Src/stm32u5xx_hal_pcd.c
             - path: ../Drivers/STM32U5xx_HAL_Driver/Src/stm32u5xx_hal_pcd_ex.c
             - path: ../Drivers/STM32U5xx_HAL_Driver/Src/stm32u5xx_ll_usb.c
+            - path: ../Drivers/STM32U5xx_HAL_Driver/Src/stm32u5xx_hal_sai.c
+            - path: ../Drivers/STM32U5xx_HAL_Driver/Src/stm32u5xx_hal_sai_ex.c
           folders: []
         - name: CMSIS
           files:
@@ -275,6 +277,8 @@ virtualFolder:
             - path: ../BSP/Sensor/Src/lsm6dsox.c
             - path: ../BSP/Sensor/Src/qma6100p.c
             - path: ../BSP/Sensor/Src/h3lis100dl.c
+            - path: ../BSP/Sensor/Src/lis2mdl.c
+            - path: ../BSP/Sensor/Src/aht20.c
           folders: []
     - name: ::CMSIS
       files: []

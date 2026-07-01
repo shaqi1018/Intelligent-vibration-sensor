@@ -69,40 +69,36 @@ static void BatLed_Flash(uint8_t count)
   }
 }
 
-/* path/sd: USB 插入即进 MSC(把 SD 卡当 U 盘给电脑读录制文件)。
- * 触发条件:自开机起至少观测到一次 USB 未插(PC7 LOW)之后,再出现 PC7 上升沿才触发。
- *   —— 这样"USB 上电启动"或"MSC 因无卡弹回 DATA_LOG 后 USB 仍插着"这两种开机即 HIGH 的
- *      情形不会立刻重进 MSC,根除 normal↔MSC 复位死循环;电池运行后用户插 USB 的正常读卡
- *      场景照常触发。逻辑自包含,不改 fatfs_sd.c 等共享文件(保 cherry-pick)。
- * 进 MSC 前先优雅停采、等 logger 关文件 flush,保证刚录的数据完整(用户要求)。 */
-static uint8_t s_usb_seen_low = 0U;
-static uint8_t s_usb_prev     = 0U;
+/* path/sd: 只要识别到 USB 接入就进 MSC(把 SD 卡当 U 盘给电脑读录制文件)。
+ * 触发条件:任何时刻发现 PC7 HIGH(USB 已插) 即触发 —— 包括"USB 上电开机即 HIGH"
+ *   和"电池运行中插入 USB"两种场景,本次开机只触发一次(s_msc_triggered)。
+ *   防 normal↔MSC 复位死循环:MSC 因无卡/枚举失败弹回时,main.c 在进 RTOS 前就直接
+ *   复位回 DATA_LOG(不会运行到本任务);正常 USB 拔出弹回时 PC7 已 LOW,不会重触发。
+ * 进 MSC 前先优雅停采、等 logger 关文件 flush,保证刚录的数据完整(用户要求)。
+ * 逻辑自包含,不改 fatfs_sd.c 等共享文件(保 cherry-pick)。 */
+static uint8_t s_msc_triggered = 0U;
 
 static void Uc_CheckUsbToMsc(void)
 {
-  uint8_t usb_now = UsbDet_IsPresent();
-  if (usb_now == 0U) { s_usb_seen_low = 1U; }
+  if (s_msc_triggered != 0U) { return; }       /* 本次开机已触发过,不重入 */
+  if (UsbDet_IsPresent() == 0U) { return; }    /* USB 未插,不动作 */
 
-  if ((s_usb_seen_low != 0U) && (usb_now != 0U) && (s_usb_prev == 0U))
+  /* 识别到 USB 接入 → 进 MSC */
+  s_msc_triggered = 1U;
+  if (AppAcqIsRunning() != 0U)
   {
-    /* USB 插入上升沿 → 进 MSC */
-    if (AppAcqIsRunning() != 0U)
+    AppAcqStop();
+    /* 等采集真正收尾(logger 关闭并 flush 文件),最多 ~3s */
+    for (uint32_t i = 0U; i < 150U; i++)
     {
-      AppAcqStop();
-      /* 等采集真正收尾(logger 关闭并 flush 文件),最多 ~3s */
-      for (uint32_t i = 0U; i < 150U; i++)
-      {
-        if (AppAcqIsRunning() == 0U) { break; }
-        osDelay(20U);
-      }
-      osDelay(300U);  /* 余量:确保 f_close/f_sync 落盘 */
+      if (AppAcqIsRunning() == 0U) { break; }
+      osDelay(20U);
     }
-    LED_Set(1U);                        /* 灭灯 */
-    BootMode_Write(BOOT_MODE_USB_MSC);  /* 写 TAMP 标志 */
-    NVIC_SystemReset();                 /* 复位 → 开机枚举为 U 盘(MSC) */
+    osDelay(300U);  /* 余量:确保 f_close/f_sync 落盘 */
   }
-
-  s_usb_prev = usb_now;
+  LED_Set(1U);                        /* 灭灯 */
+  BootMode_Write(BOOT_MODE_USB_MSC);  /* 写 TAMP 标志 */
+  NVIC_SystemReset();                 /* 复位 → 开机枚举为 U 盘(MSC) */
 }
 
 void UserCtrl_Init(void) { /* no RTOS objects needed */ }
@@ -110,6 +106,10 @@ void UserCtrl_Init(void) { /* no RTOS objects needed */ }
 void StartUserCtrlTask(void *argument)
 {
   (void)argument;
+
+  /* 开机即查 USB:若上电时 USB 已插着,立刻进 MSC,不先启动采集(避免无谓开录又
+   * 马上停)。Uc_CheckUsbToMsc 内部已防重入,USB 未插则直接返回。 */
+  Uc_CheckUsbToMsc();
 
   /* 开机即采：等系统稳定（传感器/SD 已在 main 初始化、各任务已就绪）后触发一次。
    * boot_acquire=0 时为空操作，行为同既往。MSC 模式不进 RTOS，不会到这里。 */
