@@ -54,7 +54,11 @@ HAL_StatusTypeDef MX_SDMMC1_SD_Init(void)
   hsd1.Init.ClockEdge = SDMMC_CLOCK_EDGE_RISING;
   hsd1.Init.ClockPowerSave = SDMMC_CLOCK_POWER_SAVE_DISABLE;
   hsd1.Init.BusWide = SDMMC_BUS_WIDE_1B;
-  hsd1.Init.HardwareFlowControl = SDMMC_HARDWARE_FLOW_CONTROL_DISABLE;
+  /* 硬件流控 HWFC_EN:FIFO 将欠载(TX)/溢出(RX)时硬件自动暂停 SDMMC_CK,从根上防 TXUNDERR。
+   * 开了它,轮询写就不必再 __disable_irq(见 sd_diskio.c)→ 传输期间中断全开 → H3(无FIFO、
+   * DRDY不锁存)每个边沿都能被及时读走 → SD 路径 H3 满采。U5 用新一代 SDMMC IP(非 F4 SDIO 的
+   * 流控毛刺 errata),U-Boot/Zephyr 均在用。仍纯轮询不碰 DMA,IDMA 损坏不会回来。 */
+  hsd1.Init.HardwareFlowControl = SDMMC_HARDWARE_FLOW_CONTROL_ENABLE;
   hsd1.Init.ClockDiv = 24U;  /* 48 MHz / (24+2) ≈ 1.85 MHz — faster identification */
 
   HAL_StatusTypeDef st = HAL_SD_Init(&hsd1);

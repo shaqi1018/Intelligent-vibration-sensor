@@ -176,6 +176,13 @@ DRESULT SD_disk_read(BYTE pdrv, BYTE *buff, DWORD sector, UINT count)
   return RES_ERROR;
 }
 
+/* 【回退方案专用,当前未启用】现走 SDMMC 硬件流控(HWFC)+不关中断的单次写(见下方 else 分支)。
+ * 若 U5 HWFC 实测有坏行需回退到"__disable_irq + 子块"方案,本宏是那时每子块最大块数。
+ * H3LIS100DL 无 FIFO,关中断窗口 > 其采样周期(2.5ms@400Hz)就丢样本;切 ≤K 块、块间开中断+yield
+ * 使窗口 < 周期。实测(满配含96kHz MIC):K=8→H3 93.5%/LSM 101%;K=4→H3 97.5% 但 LSM 溢出掉30%
+ * (卡 PROGRAMMING 翻倍、吞吐撑不住)。故回退时以 8 为安全底线。 */
+#define SD_WRITE_IRQOFF_MAX_BLOCKS  8U
+
 DRESULT SD_disk_write(BYTE pdrv, const BYTE *buff, DWORD sector, UINT count)
 {
   uint8_t retries;
@@ -238,31 +245,27 @@ DRESULT SD_disk_write(BYTE pdrv, const BYTE *buff, DWORD sector, UINT count)
     }
     else
     {
-      __disable_irq();
+      /* 轮询写 + SDMMC 硬件流控(HWFC_EN,见 sdmmc.c)。HWFC 会在发送 FIFO 将欠载时自动暂停
+       * SDMMC_CK,硬件防 TXUNDERR —— 因此传输期间**不再 __disable_irq**。中断全开 → H3
+       * (无 FIFO、DRDY 不锁存)每个边沿都能被及时读走 → SD 路径 H3 满采(此前关中断窗口内被
+       * 覆盖丢 ~7-10%)。单次整块写:卡 PROGRAMMING 不增多,LSM 吞吐不受损。仍纯轮询、不碰
+       * DMA,故当年 IDMA 总线冒险的字节损坏不会回来。
+       * ⚠️ 回退路标:若实测出现坏行/间隙(U5 HWFC 有问题),恢复 __disable_irq + ≤K 块子传输
+       *    (git 上一版),并把 sdmmc.c 的 HardwareFlowControl 改回 DISABLE。 */
       if (HAL_SD_WriteBlocks(&hsd1, buff, (uint32_t)sector, (uint32_t)count, HAL_MAX_DELAY) != HAL_OK)
       {
-        __enable_irq();
         SD_CleanupAfterOp();
         HAL_SD_DeInit(&hsd1);
         MX_SDMMC1_SD_Init();
         HAL_NVIC_EnableIRQ(SDMMC1_IRQn);
         continue;
       }
-      /* The data transfer is done — re-enable IRQs BEFORE the card-PROGRAMMING
-       * wait. Only the transfer itself needs IRQs masked (the CPU must feed the
-       * SDMMC FIFO without an underrun); the flash-program wait does not. Keeping
-       * it masked blocked the LSM FIFO-watermark ISR and the sensor tasks for the
-       * whole program time → ~31% LSM undercapture at 6664 Hz. Yield while the
-       * card programs so the sensor tasks run (mirrors the DMA path). */
-      __enable_irq();
+      /* 等卡退出 PROGRAMMING(中断本就开着,yield 让 H3/LSM 等传感器任务运行)。 */
       {
         HAL_SD_CardStateTypeDef cs;
         do {
           cs = HAL_SD_GetCardState(&hsd1);
           if (cs == HAL_SD_CARD_TRANSFER) { break; }
-          /* Yield only once the scheduler is running. This polling path also runs
-           * pre-kernel (boot DeviceCfg / phase-B test) where vTaskDelay is illegal
-           * — there, busy-spin (no tasks to yield to anyway). */
           if (xTaskGetSchedulerState() == taskSCHEDULER_RUNNING) { vTaskDelay(1U); }
         } while (cs == HAL_SD_CARD_PROGRAMMING);
       }
