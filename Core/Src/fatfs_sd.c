@@ -7,12 +7,15 @@
 #include "sd_diskio.h"
 #include "sdmmc.h"
 #include "acq_config.h"  /* ACQ_OUTPUT_CSV / ACQ_OUTPUT_BIN */
+#include "app_time.h"       /* AppTime_GetEpochUs — 会话目录名的 RTC 时间来源 */
+#include "rtc_pcf85063.h"   /* Pcf85063_Time_t / Pcf85063_FromEpochSeconds */
 
-/* 会话目录前缀，8.3 格式：CKBX + 4 位数字 = 8 字符 */
-#define FATFS_SD_SESSION_PREFIX   "CKBX"
-#define FATFS_SD_SESSION_MAX      9999U
-#define FATFS_SD_DIR_PATH_MAX     24U   /* "0:/CKBOX0001" = 13 + NUL */
-#define FATFS_SD_FILE_PATH_MAX    32U   /* "0:/CKBOX0001/LSM_ACC.CSV" = 25 + NUL */
+/* 会话目录名：CTBX_YYYY-MM-DD-HH-MM(RTC 实时时间)，如 CTBX_2026-06-24-14-30。
+ * 21 字符超 8.3 短名上限，依赖 FatFs 长文件名(ffconf.h _USE_LFN=1)。
+ * 同一分钟内重复开会话时追加 _n(n=1..99)去重。 */
+#define FATFS_SD_SESSION_PREFIX   "CTBX"
+#define FATFS_SD_DIR_PATH_MAX     32U   /* "0:/CTBX_2026-06-24-14-30_99" = 27 + NUL */
+#define FATFS_SD_FILE_PATH_MAX    48U   /* dir(27) + "/IMU0002.CSV"(12) = 39 + NUL */
 
 /* 6 个 CSV 文件名（8.3 格式）.
  * LSM_IMU merges accel+gyro at 6664Hz; LSM_TMP holds the slow temperature
@@ -126,12 +129,34 @@ static FRESULT FatFs_SD_WriteExact(FIL *file, const void *buffer, UINT length)
 
 static FRESULT FatFs_SD_FindNextSessionDir(char *dir, size_t dir_size)
 {
-  unsigned int index;
+  Pcf85063_Time_t t;
   FILINFO info;
 
-  for (index = 1U; index <= FATFS_SD_SESSION_MAX; index++)
+  /* 用 RTC 实时时间命名会话目录。AppTime 在启动时以 RTC 为锚同步(DWT 计时,不受
+   * RTOS tick 慢 19% 影响),此处只读一次、不碰 I2C2(避免与 ES8311 抢总线)。
+   * 若 RTC 不可达,AppTime 锚为 0 → 时间落在 1970,目录日期不准但下面的 _n 去重
+   * 仍保证多会话不撞名(降级模式)。年份 = 2000 + BCD 年。 */
+  uint32_t epoch_s = (uint32_t)(AppTime_GetEpochUs() / 1000000ULL);
+  Pcf85063_FromEpochSeconds(epoch_s, &t);
+  unsigned int year = 2000U + (unsigned int)t.year;
+
+  for (unsigned int suffix = 0U; suffix <= 99U; suffix++)
   {
-    int len = snprintf(dir, dir_size, "0:/%s%04u", FATFS_SD_SESSION_PREFIX, index);
+    int len;
+    if (suffix == 0U)
+    {
+      len = snprintf(dir, dir_size, "0:/%s_%04u-%02u-%02u-%02u-%02u",
+                     FATFS_SD_SESSION_PREFIX, year,
+                     (unsigned int)t.month, (unsigned int)t.day,
+                     (unsigned int)t.hour,  (unsigned int)t.minute);
+    }
+    else
+    {
+      len = snprintf(dir, dir_size, "0:/%s_%04u-%02u-%02u-%02u-%02u_%u",
+                     FATFS_SD_SESSION_PREFIX, year,
+                     (unsigned int)t.month, (unsigned int)t.day,
+                     (unsigned int)t.hour,  (unsigned int)t.minute, suffix);
+    }
     if ((len < 0) || ((size_t)len >= dir_size))
     {
       return FR_INVALID_NAME;
@@ -146,7 +171,7 @@ static FRESULT FatFs_SD_FindNextSessionDir(char *dir, size_t dir_size)
     {
       return r;
     }
-    /* 目录已存在，尝试下一个序号 */
+    /* 目录已存在(同一分钟内重复开会话)，追加 _n 再试 */
   }
 
   return FR_DENIED;

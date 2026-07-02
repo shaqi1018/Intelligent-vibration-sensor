@@ -15,8 +15,13 @@
 #define _USE_FORWARD         0
 
 #define _CODE_PAGE           437
-#define _USE_LFN             0
-#define _MAX_LFN             12
+/* 长文件名(LFN)开启：会话目录用 RTC 时间命名 CTBX_YYYY-MM-DD-HH-MM(21 字符,
+ * 超 8.3 短名上限)。_USE_LFN=1=静态工作缓冲(仅 logger 任务在会话起止解析路径,
+ * 无并发,故 _FS_REENTRANT 保持 0 安全,与参考工程 DATALOG1 一致)。需把
+ * option/ccsbcs.c(CP437 码表,提供 ff_convert/ff_wtoupper)加入编译。
+ * _MAX_LFN=63：最长路径段 21 字符,63 富余;静态缓冲仅 (63+1)*2=128B。 */
+#define _USE_LFN             1
+#define _MAX_LFN             63
 #define _LFN_UNICODE         0
 #define _STRF_ENCODE         3
 #define _FS_RPATH            0

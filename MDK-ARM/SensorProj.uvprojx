@@ -1374,6 +1374,11 @@
               <FilePath>../Middlewares/Third_Party/FatFs/src/ff.c</FilePath>
             </File>
             <File>
+              <FileName>ccsbcs.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>../Middlewares/Third_Party/FatFs/src/option/ccsbcs.c</FilePath>
+            </File>
+            <File>
               <FileName>ff.h</FileName>
               <FileType>5</FileType>
               <FilePath>../Middlewares/Third_Party/FatFs/src/ff.h</FilePath>
