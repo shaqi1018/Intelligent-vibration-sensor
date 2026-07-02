@@ -152,12 +152,14 @@ static AppFrameBuffer_t g_frame_buffer;
 static AppSensorFrame_t g_composite_frame;  /* shared composite for USB upload */
 
 /* Static data backing for the SPSC ring buffers (.bss, no heap pressure). */
-static uint8_t s_lsm_imu_ringbuf[APP_RING_LSM_IMU_SIZE];
+static uint8_t s_lsm_acc_ringbuf[APP_RING_LSM_ACC_SIZE];
+static uint8_t s_lsm_gyr_ringbuf[APP_RING_LSM_GYR_SIZE];
 static uint8_t s_qma_acc_ringbuf[APP_RING_QMA_ACC_SIZE];
 static uint8_t s_h3_acc_ringbuf[APP_RING_H3_ACC_SIZE];
 static uint8_t s_aht_env_ringbuf[APP_RING_AHT_ENV_SIZE];
 static uint8_t s_mag_ringbuf[APP_RING_MAG_SIZE];
-static AppRingBuffer_t g_ring_lsm_imu;
+static AppRingBuffer_t g_ring_lsm_acc;   /* LSM 加速度 → LSM_ACC.CSV */
+static AppRingBuffer_t g_ring_lsm_gyr;   /* LSM 角速度 → LSM_GYR.CSV */
 static AppRingBuffer_t g_ring_qma_acc;
 static AppRingBuffer_t g_ring_h3_acc;
 static AppRingBuffer_t g_ring_aht_env;
@@ -372,7 +374,8 @@ void MX_FREERTOS_Init(void)
   (void)DeviceCfg_LoadFromSD();
 
   /* Initialise SPSC ring buffers (data arrays are static, no allocation). */
-  RingBuf_Init(&g_ring_lsm_imu, s_lsm_imu_ringbuf, APP_RING_LSM_IMU_SIZE);
+  RingBuf_Init(&g_ring_lsm_acc, s_lsm_acc_ringbuf, APP_RING_LSM_ACC_SIZE);
+  RingBuf_Init(&g_ring_lsm_gyr, s_lsm_gyr_ringbuf, APP_RING_LSM_GYR_SIZE);
   RingBuf_Init(&g_ring_qma_acc, s_qma_acc_ringbuf, APP_RING_QMA_ACC_SIZE);
   RingBuf_Init(&g_ring_h3_acc,  s_h3_acc_ringbuf,  APP_RING_H3_ACC_SIZE);
   RingBuf_Init(&g_ring_mic,     s_mic_ringbuf,     APP_RING_MIC_SIZE);
@@ -760,8 +763,9 @@ static void AppPrintRuntimeDiag(void)
          (unsigned long)osThreadGetStackSpace(qma6100pTaskHandle),
          (unsigned long)osThreadGetStackSpace(loggerTaskHandle),
          (unsigned long)osThreadGetStackSpace(micTaskHandle));
-  printf("[Ring] lsm drop=%lu hwm=%lu/%lu | h3 drop=%lu hwm=%lu/%lu | qma drop=%lu hwm=%lu/%lu | mic drop=%lu hwm=%lu/%lu\r\n",
-         (unsigned long)g_ring_lsm_imu.dropped, (unsigned long)g_ring_lsm_imu.high_watermark, (unsigned long)g_ring_lsm_imu.size,
+  printf("[Ring] lsmA drop=%lu hwm=%lu/%lu | lsmG drop=%lu hwm=%lu/%lu | h3 drop=%lu hwm=%lu/%lu | qma drop=%lu hwm=%lu/%lu | mic drop=%lu hwm=%lu/%lu\r\n",
+         (unsigned long)g_ring_lsm_acc.dropped, (unsigned long)g_ring_lsm_acc.high_watermark, (unsigned long)g_ring_lsm_acc.size,
+         (unsigned long)g_ring_lsm_gyr.dropped, (unsigned long)g_ring_lsm_gyr.high_watermark, (unsigned long)g_ring_lsm_gyr.size,
          (unsigned long)g_ring_h3_acc.dropped,  (unsigned long)g_ring_h3_acc.high_watermark,  (unsigned long)g_ring_h3_acc.size,
          (unsigned long)g_ring_qma_acc.dropped, (unsigned long)g_ring_qma_acc.high_watermark, (unsigned long)g_ring_qma_acc.size,
          (unsigned long)g_ring_mic.dropped,     (unsigned long)g_ring_mic.high_watermark,     (unsigned long)g_ring_mic.size);
@@ -801,7 +805,8 @@ static void AppLoggerStopSdSession(uint8_t *sd_file_open, uint32_t *rows_since_s
       int any;
       do {
         any = 0;
-        if (LoggerDrainRing(&g_ring_lsm_imu, 0U, 0U, &dummy_rss, &fr) > 0) { any = 1; }
+        if (LoggerDrainRing(&g_ring_lsm_acc, 0U, 0U, &dummy_rss, &fr) > 0) { any = 1; }
+        if (LoggerDrainRing(&g_ring_lsm_gyr, FATFS_SD_FILE_LSM_GYR, 0U, &dummy_rss, &fr) > 0) { any = 1; }
         if (LoggerDrainRing(&g_ring_qma_acc, 3U, 0U, &dummy_rss, &fr) > 0) { any = 1; }
         if (LoggerDrainRing(&g_ring_h3_acc,  2U, 0U, &dummy_rss, &fr) > 0) { any = 1; }
         if (LoggerDrainRing(&g_ring_mic, FATFS_SD_FILE_MIC_WAV, 0U, &dummy_rss, &fr) > 0) { any = 1; }
@@ -1865,7 +1870,8 @@ void StartLsm6dsoxTask(void *argument)
 
           if (output_format == ACQ_OUTPUT_BIN)
           {
-            /* BIN 模式:构建二进制帧 */
+            /* BIN 模式:合并帧不拆(acc+gyr 同一结构),写 acc 环 → LSM_ACC 文件。
+             * gyr 环在 BIN 模式不用。 */
             SensorBinFrame_LSM_t bin_frame;
             bin_frame.frame_id = fid;
             bin_frame.timestamp_us = lsm_ts_us;
@@ -1877,39 +1883,49 @@ void StartLsm6dsoxTask(void *argument)
             bin_frame.gyr_z = cur_gyr[2];
             bin_frame.crc32 = SensorBin_CalcCRC32(&bin_frame, sizeof(bin_frame) - 4U);
 
-            RingBuf_Write(&g_ring_lsm_imu, (const uint8_t *)&bin_frame, sizeof(bin_frame));
+            RingBuf_Write(&g_ring_lsm_acc, (const uint8_t *)&bin_frame, sizeof(bin_frame));
           }
           else
           {
-            /* CSV 模式:构建文本行 */
-            uint32_t off = 0;
-            off += AppU32ToDec(&rowbuf[off], fid);
-            rowbuf[off++] = ',';
-            memcpy(&rowbuf[off], dt_batch, 12U); off += 12U;
-            rowbuf[off++] = ',';
-            off += AppF1ToDec(&rowbuf[off], (float)cur_acc[0] * xl_s);
-            rowbuf[off++] = ',';
-            off += AppF1ToDec(&rowbuf[off], (float)cur_acc[1] * xl_s);
-            rowbuf[off++] = ',';
-            off += AppF1ToDec(&rowbuf[off], (float)cur_acc[2] * xl_s);
-            rowbuf[off++] = ',';
-            off += AppF1ToDec(&rowbuf[off], (float)cur_gyr[0] * g_s);
-            rowbuf[off++] = ',';
-            off += AppF1ToDec(&rowbuf[off], (float)cur_gyr[1] * g_s);
-            rowbuf[off++] = ',';
-            off += AppF1ToDec(&rowbuf[off], (float)cur_gyr[2] * g_s);
-            rowbuf[off++] = '\r';
-            rowbuf[off++] = '\n';
-            /* Guard: verify exactly 7 commas (8 columns) before writing.
-             * ~0.5% of rows have missing/extra commas from an unknown cause;
-             * silently dropping them is better than corrupting the CSV file. */
+            /* CSV 模式:acc/gyr 拆两行,共用同一 frame_id 做对齐键。
+             *   acc 行: frame_id,datetime,ax,ay,az   (4 逗号) → g_ring_lsm_acc
+             *   gyr 行: frame_id,gx,gy,gz             (3 逗号) → g_ring_lsm_gyr
+             * 只有两行逗号数都正确才双写,保证每个 frame_id 在两文件里成对出现
+             * (否则一坏一好会破坏 join 对齐)。 */
+            char gyrbuf[96];
+            uint32_t aoff = 0;
+            aoff += AppU32ToDec(&rowbuf[aoff], fid);
+            rowbuf[aoff++] = ',';
+            memcpy(&rowbuf[aoff], dt_batch, 12U); aoff += 12U;
+            rowbuf[aoff++] = ',';
+            aoff += AppF1ToDec(&rowbuf[aoff], (float)cur_acc[0] * xl_s);
+            rowbuf[aoff++] = ',';
+            aoff += AppF1ToDec(&rowbuf[aoff], (float)cur_acc[1] * xl_s);
+            rowbuf[aoff++] = ',';
+            aoff += AppF1ToDec(&rowbuf[aoff], (float)cur_acc[2] * xl_s);
+            rowbuf[aoff++] = '\r';
+            rowbuf[aoff++] = '\n';
+
+            uint32_t goff = 0;
+            goff += AppU32ToDec(&gyrbuf[goff], fid);
+            gyrbuf[goff++] = ',';
+            goff += AppF1ToDec(&gyrbuf[goff], (float)cur_gyr[0] * g_s);
+            gyrbuf[goff++] = ',';
+            goff += AppF1ToDec(&gyrbuf[goff], (float)cur_gyr[1] * g_s);
+            gyrbuf[goff++] = ',';
+            goff += AppF1ToDec(&gyrbuf[goff], (float)cur_gyr[2] * g_s);
+            gyrbuf[goff++] = '\r';
+            gyrbuf[goff++] = '\n';
+
+            /* Guard: acc 行须 4 逗号(5列)、gyr 行须 3 逗号(4列)。~0.5% 行会莫名多/
+             * 缺逗号,双写前都校验;任一坏则整对丢弃(宁可丢一对也不破坏对齐/文件)。 */
+            uint32_t anc = 0U, gnc = 0U;
+            for (uint32_t k = 0U; k < aoff - 2U; k++) { if (rowbuf[k] == ',') anc++; }
+            for (uint32_t k = 0U; k < goff - 2U; k++) { if (gyrbuf[k] == ',') gnc++; }
+            if (anc == 4U && gnc == 3U)
             {
-              uint32_t nc = 0U;
-              for (uint32_t k = 0U; k < off - 2U; k++) { if (rowbuf[k] == ',') nc++; }
-              if (nc == 7U)
-              {
-                RingBuf_Write(&g_ring_lsm_imu, (const uint8_t *)rowbuf, off);
-              }
+              RingBuf_Write(&g_ring_lsm_acc, (const uint8_t *)rowbuf, aoff);
+              RingBuf_Write(&g_ring_lsm_gyr, (const uint8_t *)gyrbuf, goff);
             }
           }
 
@@ -2653,7 +2669,8 @@ void StartLoggerTask(void *argument)
 
         /* Discard data buffered between sessions so each file starts clean
          * and frame_id/tick_ms in the new session align with real samples. */
-        RingBuf_Reset(&g_ring_lsm_imu);
+        RingBuf_Reset(&g_ring_lsm_acc);
+        RingBuf_Reset(&g_ring_lsm_gyr);
         RingBuf_Reset(&g_ring_qma_acc);
         RingBuf_Reset(&g_ring_h3_acc);
         RingBuf_Reset(&g_ring_mic);
@@ -2699,10 +2716,20 @@ void StartLoggerTask(void *argument)
         int dr;
         did_work = 0;
 
-        dr = LoggerDrainRing(&g_ring_lsm_imu, 0U, APP_RING_FLUSH_CHUNK, &rows_since_sync, &result);
+        dr = LoggerDrainRing(&g_ring_lsm_acc, 0U, APP_RING_FLUSH_CHUNK, &rows_since_sync, &result);
         if (dr < 0)
         {
-          printf("[Logger] LSM_IMU write fail %s (%d)\r\n",
+          printf("[Logger] LSM_ACC write fail %s (%d)\r\n",
+                 FatFs_SD_ResultToString(result), (int)result);
+          AppFlowStatsRecordWriteFailure();
+          break;
+        }
+        if (dr > 0) did_work = 1;
+
+        dr = LoggerDrainRing(&g_ring_lsm_gyr, FATFS_SD_FILE_LSM_GYR, APP_RING_FLUSH_CHUNK, &rows_since_sync, &result);
+        if (dr < 0)
+        {
+          printf("[Logger] LSM_GYR write fail %s (%d)\r\n",
                  FatFs_SD_ResultToString(result), (int)result);
           AppFlowStatsRecordWriteFailure();
           break;

@@ -100,7 +100,11 @@ typedef struct {
  * 排空硬件 FIFO，几乎消除 FIFO 层丢失)，代价是 logger 吞吐略降、ring 峰值更高:
  * 192KB 仍被填满(CKBX0299 hwm 满、drop 0.8%)。256KB(0.64s)给抢占后的 drain 延迟
  * 足够余量，配合攒批 + LSM High 实现 ~100% 真实捕获且 ring 不溢出。 */
-#define APP_RING_LSM_IMU_SIZE   (256U * 1024U)
+/* LSM 拆成 ACC/GYR 两个独立文件 → 两个独立文本环。原 256KB(合并行)按行长比例
+ * 重切:acc 行含 datetime(~43B)、gyr 行仅 frame_id(~29B),总量维持 256KB 不增 RAM。
+ * 各仍能缓冲 >3000 样本(≈0.45s@6664Hz),配合攒批+LSM High 不溢出。 */
+#define APP_RING_LSM_ACC_SIZE   (160U * 1024U)
+#define APP_RING_LSM_GYR_SIZE   (96U * 1024U)
 #define APP_RING_QMA_ACC_SIZE   (32U * 1024U)
 #define APP_RING_H3_ACC_SIZE    (16U * 1024U)   /* 400Hz × 14B/row × 5s ≈ 28KB cap, 16KB enough with logger drain */
 /* 96kHz×2B = 192KB/s；攒批下 32KB 会偶尔溢出(CKBX0297 mic drop)，64KB≈0.33s 余量 */

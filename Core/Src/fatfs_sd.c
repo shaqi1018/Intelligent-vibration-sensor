@@ -17,23 +17,25 @@
 #define FATFS_SD_DIR_PATH_MAX     32U   /* "0:/CTBX_2026-06-24-14-30_99" = 27 + NUL */
 #define FATFS_SD_FILE_PATH_MAX    48U   /* dir(27) + "/IMU0002.CSV"(12) = 39 + NUL */
 
-/* 6 个 CSV 文件名（8.3 格式）.
- * LSM_IMU merges accel+gyro at 6664Hz; LSM_TMP holds the slow temperature
- * channel; H3 and QMA are unchanged; AHT_ENV and MAG are new. */
-#define FATFS_SD_FNAME_LSM_IMU   "LSM_IMU.CSV"
+/* 7 个 CSV 文件名（8.3 格式）.
+ * LSM 加速度/角速度拆成两个文件:LSM_ACC(索引0,带 datetime) + LSM_GYR(索引6,仅
+ * frame_id,靠同一采样对的 frame_id 与 ACC 对齐);LSM_TMP 慢温度通道;H3/QMA 不变;
+ * AHT_ENV/MAG。 */
+#define FATFS_SD_FNAME_LSM_ACC   "LSM_ACC.CSV"
 #define FATFS_SD_FNAME_LSM_TMP   "LSM_TMP.CSV"
 #define FATFS_SD_FNAME_H3_ACC    "H3_ACC.CSV"
 #define FATFS_SD_FNAME_QMA_ACC   "QMA_ACC.CSV"
-#define FATFS_SD_FNAME_AHT_ENV   "AHT_ENV.CSV"   /* 新增：索引 4 */
-#define FATFS_SD_FNAME_MAG       "MAG.CSV"        /* 新增：索引 5 */
+#define FATFS_SD_FNAME_AHT_ENV   "AHT_ENV.CSV"   /* 索引 4 */
+#define FATFS_SD_FNAME_MAG       "MAG.CSV"        /* 索引 5 */
+#define FATFS_SD_FNAME_LSM_GYR   "LSM_GYR.CSV"    /* 索引 6：LSM 角速度 */
 #define FATFS_SD_FNAME_MIC_WAV   "MIC.WAV"
 
-#define FATFS_SD_FILE_LSM_IMU     0U
+#define FATFS_SD_FILE_LSM_ACC     0U
 #define FATFS_SD_FILE_LSM_TMP     1U
 #define FATFS_SD_FILE_H3_ACC      2U
 #define FATFS_SD_FILE_QMA_ACC     3U
 
-#define FATFS_SD_NUM_FILES        6U  /* 0..5 CSV; MIC_WAV 独立索引6 */
+#define FATFS_SD_NUM_FILES        7U  /* 0..6 CSV(含 LSM_GYR); MIC_WAV 独立索引7 */
 
 static FATFS g_sd_fatfs;
 static FIL g_log_files[FATFS_SD_NUM_FILES];
@@ -52,22 +54,25 @@ static uint32_t g_file_bytes[FATFS_SD_NUM_FILES] = {0};  /* 当前段已写字�
 static uint16_t g_file_seg[FATFS_SD_NUM_FILES]   = {0};  /* 当前段号(1 基) */
 
 static const char *const kLogFnames[FATFS_SD_NUM_FILES] = {
-  FATFS_SD_FNAME_LSM_IMU, FATFS_SD_FNAME_LSM_TMP,
+  FATFS_SD_FNAME_LSM_ACC, FATFS_SD_FNAME_LSM_TMP,
   FATFS_SD_FNAME_H3_ACC,  FATFS_SD_FNAME_QMA_ACC,
-  FATFS_SD_FNAME_AHT_ENV, FATFS_SD_FNAME_MAG
+  FATFS_SD_FNAME_AHT_ENV, FATFS_SD_FNAME_MAG,
+  FATFS_SD_FNAME_LSM_GYR
 };
 /* 续段短标签：≤4 字符，拼 4 位段号后 ≤8 字符，满足 8.3 */
 static const char *const kLogTags[FATFS_SD_NUM_FILES] = {
-  "IMU", "TMP", "H3_", "QMA", "ENV", "MAG"
+  "ACC", "TMP", "H3_", "QMA", "ENV", "MAG", "GYR"
 };
-/* CSV 表头（缩放后物理量 mg / mdps）。BIN 模式不写。*/
+/* CSV 表头（缩放后物理量 mg / mdps）。BIN 模式不写。
+ * LSM_ACC 带 datetime;LSM_GYR 仅 frame_id(与 ACC 同帧号对齐,不重复 datetime)。*/
 static const char *const kLogHeaders[FATFS_SD_NUM_FILES] = {
-  "frame_id,datetime,acc_x_mg,acc_y_mg,acc_z_mg,gyr_x_mdps,gyr_y_mdps,gyr_z_mdps\r\n",
+  "frame_id,datetime,acc_x_mg,acc_y_mg,acc_z_mg\r\n",
   "frame_id,tick_ms,temp_C\r\n",
   "frame_id,datetime,acc_x_mg,acc_y_mg,acc_z_mg\r\n",
   "frame_id,datetime,acc_x_mg,acc_y_mg,acc_z_mg\r\n",
   "frame_id,datetime,temp_C,humidity_pct\r\n",
-  "frame_id,datetime,mag_x_mG,mag_y_mG,mag_z_mG\r\n"
+  "frame_id,datetime,mag_x_mG,mag_y_mG,mag_z_mG\r\n",
+  "frame_id,gyr_x_mdps,gyr_y_mdps,gyr_z_mdps\r\n"
 };
 
 /* MIC.WAV —— 单独的 FIL + 字节计数器（区别于 CSV 的 g_log_files[]）。
