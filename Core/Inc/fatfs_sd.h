@@ -33,6 +33,8 @@ FRESULT FatFs_SD_WavFinalize(void);
 
 FRESULT FatFs_SD_LoggerSync(void);
 void FatFs_SD_LoggerStop(void);
+/* 1=logger 仍持有打开文件;0=全部文件已 finalize/sync/close(可安全断电/复位)。 */
+uint8_t FatFs_SD_IsLoggerActive(void);
 void FatFs_SD_RunPhaseBSmokeTest(void);
 
 #ifdef __cplusplus

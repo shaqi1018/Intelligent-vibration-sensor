@@ -316,6 +316,15 @@ const char *FatFs_SD_GetSessionDir(void)
   return g_session_dir;
 }
 
+/* logger 是否仍持有打开的文件。FatFs_SD_LoggerStop 在 finalize WAV(回填头)+ 对全部
+ * 文件 f_sync/f_close 之后才清 0 —— 关机/进 MSC 前应轮询此值为 0,确保文件已完整落盘
+ * 再断电/复位,避免写到一半掉电损坏(注意 AppAcqIsRunning 在停采瞬间即 0,但文件是
+ * logger 任务随后异步关的,不能用它判断"已落盘")。 */
+uint8_t FatFs_SD_IsLoggerActive(void)
+{
+  return g_logger_active;
+}
+
 FRESULT FatFs_SD_LoggerStart(void)
 {
   FRESULT result;

@@ -3,6 +3,7 @@
 #include "app_acq.h"
 #include "battery_adc.h"
 #include "boot_mode.h"
+#include "fatfs_sd.h"   /* FatFs_SD_IsLoggerActive — 等文件真正关好再断电/复位 */
 #include "cmsis_os2.h"
 
 /* 外部声明系统异常标志(定义在 app_freertos.c) */
@@ -16,6 +17,18 @@ extern volatile uint8_t g_system_error;
 /* Require this many consecutive non-pressed polls to reset the 3s power-off
  * timer — prevents mechanical button bounce from restarting the countdown. */
 #define UC_PWR_RELEASE_DEBOUNCE  3U
+
+/* 低电量保护:电压持续低于阈值 → 优雅关机(停采→关文件+f_sync→断电),避免电池
+ * 保护板/稳压器在写卡途中硬切导致 SD 文件系统损坏(续航测试实测问题)。阈值写死
+ * 3.4V(高于常见硬切点 2.4~3.0V,留足关文件时间);每 UC_BAT_CHECK_MS 读一次电压,
+ * 连续 UC_BAT_LOW_CONFIRM 次低于才触发(去抖:满载写卡瞬间电压会下陷,防误触发中断
+ * 有效录制)。容量无关——按带载电压触发,400mAh/2000mAh 通用。 */
+#define UC_BAT_LOW_MV        3400U
+#define UC_BAT_CHECK_MS      2000U
+#define UC_BAT_LOW_CONFIRM   4U
+/* 有效电压下限:低于此值视为 ADC 读失败(返回0/异常低)而非真实低电量——真到这么低
+ * 保护板早已硬切、系统跑不到这里。用它滤掉 ADC 抖动误触发,避免中断有效录制。 */
+#define UC_BAT_MIN_VALID_MV  2500U
 
 /* 电量显示：短按电源键后的 LED 快闪参数 */
 #define UC_BAT_FLASH_ON_MS    80U   /* 每次闪亮持续时间 */
@@ -39,6 +52,8 @@ static uint32_t   s_user_tick      = 0U;
 static uint32_t   s_pwr_tick       = 0U;
 static uint32_t   s_led_next       = 0U;
 static uint8_t    s_pwr_release_ct = 0U; /* release debounce counter */
+static uint32_t   s_bat_next_check = 0U; /* 下次电池电压检查的 tick */
+static uint8_t    s_bat_low_ct     = 0U; /* 连续低于阈值计数(去抖) */
 
 /* 根据电量百分比决定闪烁次数
  * ≥80% → 5次, ≥60% → 4次, ≥40% → 3次, ≥20% → 2次, <20% → 1次 */
@@ -78,6 +93,21 @@ static void BatLed_Flash(uint8_t count)
  * 逻辑自包含,不改 fatfs_sd.c 等共享文件(保 cherry-pick)。 */
 static uint8_t s_msc_triggered = 0U;
 
+/* 等 logger 真正把文件关好落盘。关键:AppAcqStop() 会让 AppAcqIsRunning() 立即变 0,
+ * 但文件是 logger 任务【随后异步】关的(finalize WAV 头 + 对全部文件 f_sync/f_close),
+ * 完成时才清 g_logger_active。所以断电/复位前必须等 FatFs_SD_IsLoggerActive()==0,
+ * 否则会在写文件系统途中掉电 → WAV 头没回填、CSV 末行截断(实测 CTBX_..19-24 损坏根因)。
+ * 停采后传感器不再产数,logger 只需排空少量积压+关文件,通常 1~3s;最多等 ~5s 兜底。 */
+static void Uc_WaitLoggerClosed(void)
+{
+  for (uint32_t i = 0U; i < 250U; i++)
+  {
+    if (FatFs_SD_IsLoggerActive() == 0U) { break; }
+    osDelay(20U);
+  }
+  osDelay(100U);  /* 小余量,确保最后一次 f_sync 落盘 */
+}
+
 static void Uc_CheckUsbToMsc(void)
 {
   if (s_msc_triggered != 0U) { return; }       /* 本次开机已触发过,不重入 */
@@ -88,17 +118,35 @@ static void Uc_CheckUsbToMsc(void)
   if (AppAcqIsRunning() != 0U)
   {
     AppAcqStop();
-    /* 等采集真正收尾(logger 关闭并 flush 文件),最多 ~3s */
-    for (uint32_t i = 0U; i < 150U; i++)
-    {
-      if (AppAcqIsRunning() == 0U) { break; }
-      osDelay(20U);
-    }
-    osDelay(300U);  /* 余量:确保 f_close/f_sync 落盘 */
+    Uc_WaitLoggerClosed();  /* 等文件真正关好再复位进 MSC,保证卡上文件完整 */
   }
   LED_Set(1U);                        /* 灭灯 */
   BootMode_Write(BOOT_MODE_USB_MSC);  /* 写 TAMP 标志 */
   NVIC_SystemReset();                 /* 复位 → 开机枚举为 U 盘(MSC) */
+}
+
+/* 优雅关机:停采集 → 轮询等 logger 真正收尾(关闭全部文件 + f_sync 刷 FAT 元数据)
+ * → 断电锁存自关机(电池)/复位(USB)。电源键长按 3s 与低电量保护共用此路径,保证
+ * SD 文件系统一致后再掉电。轮询等待(而非固定延时)确保文件确实关好才断电。 */
+static void Uc_SafeShutdown(void)
+{
+  if (AppAcqIsRunning() != 0U)
+  {
+    AppAcqStop();
+  }
+  Uc_WaitLoggerClosed();  /* 等文件真正关好(WAV finalize + f_sync/f_close)再断电 */
+  LED_Set(1U);  /* 灭灯(active-low:高=灭) */
+  if (BoardIO_IsBatteryLatched())
+  {
+    /* 电池供电:断电锁存,设备真正关机 */
+    PowerCtl_Set(0U);
+    for (;;) { __WFI(); }
+  }
+  else
+  {
+    /* USB 供电:无法断开 USB,重启 MCU */
+    NVIC_SystemReset();
+  }
 }
 
 void UserCtrl_Init(void) { /* no RTOS objects needed */ }
@@ -122,6 +170,27 @@ void StartUserCtrlTask(void *argument)
 
     /* path/sd: USB 插入 → 优雅停采收尾 → 复位进 MSC 读卡(优先于按键逻辑) */
     Uc_CheckUsbToMsc();
+
+    /* ── 低电量保护:带载电压持续 < 3.4V → 优雅关机(存好数据再掉电) ──
+     * 仅电池供电时生效(USB 供电不会低电量);每 2s 读一次,连续 4 次(≈8s)
+     * 低于阈值才触发,滤掉满载写卡的瞬时电压下陷。触发即走 Uc_SafeShutdown,不返回。 */
+    if (BoardIO_IsBatteryLatched() && ((int32_t)(now - s_bat_next_check) >= 0))
+    {
+      s_bat_next_check = now + UC_BAT_CHECK_MS;
+      uint32_t mv = BatteryADC_ReadMillivolts();
+      if ((mv >= UC_BAT_MIN_VALID_MV) && (mv < UC_BAT_LOW_MV))
+      {
+        if (s_bat_low_ct < 255U) { s_bat_low_ct++; }
+        if (s_bat_low_ct >= UC_BAT_LOW_CONFIRM)
+        {
+          Uc_SafeShutdown();  /* 停采→关文件+sync→断电,不返回 */
+        }
+      }
+      else
+      {
+        s_bat_low_ct = 0U;  /* 电压回升或读数无效,清除去抖计数 */
+      }
+    }
 
     /* ── 用户按键：按住 2s 切换采集开/停 ── */
     uint8_t user_dn = UserBtn_IsPressed();
@@ -174,25 +243,9 @@ void StartUserCtrlTask(void *argument)
       {
         if ((now - s_pwr_tick) >= UC_PWR_OFF_MS)
         {
-          /* 长按 3s → 关机 */
+          /* 长按 3s → 关机(与低电量保护共用同一优雅关机路径) */
           s_pwr_state = UC_BTN_HANDLED;
-          if (AppAcqIsRunning() != 0U)
-          {
-            AppAcqStop();
-            osDelay(1200U);
-          }
-          LED_Set(0U);
-          if (BoardIO_IsBatteryLatched())
-          {
-            /* 电池供电：断电锁存，设备真正关机 */
-            PowerCtl_Set(0U);
-            for (;;) { __WFI(); }
-          }
-          else
-          {
-            /* USB 供电：无法断开 USB，重启 MCU 让 USB 重新枚举 */
-            NVIC_SystemReset();
-          }
+          Uc_SafeShutdown();  /* 停采→等关文件+sync→断电,不返回 */
         }
       }
     }
