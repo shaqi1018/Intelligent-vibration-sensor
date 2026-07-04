@@ -17,12 +17,12 @@ const char *FatFs_SD_GetSessionDir(void);
 FRESULT FatFs_SD_LoggerStart(void);
 FRESULT FatFs_SD_LoggerAppendFrame(const AppSensorFrame_t *frame);
 /* Write a raw byte stream to log file `idx`
- *   0=LSM_ACC, 1=LSM_TMP, 2=H3_ACC, 3=QMA_ACC, 4=AHT_ENV, 5=MAG, 6=LSM_GYR
- * Used by the ring buffer flush path in StartLoggerTask. */
+ *   0=ACC_LOW, 1=TMP_LOW, 2=ACC_HIGH, 3=ACC_MID, 4=ENV, 5=MAG, 6=GYR_LOW
+ * 实际文件名带 3 位段号(如 ACC_LOW001.CSV)。Used by the ring buffer flush path. */
 FRESULT FatFs_SD_LoggerWriteFileIndex(uint8_t idx, const uint8_t *data, uint32_t len);
 
-/* LSM6DSOX 加速度/角速度拆两个文件:索引 0=LSM_ACC(frame_id,datetime,acc_xyz)、
- * 6=LSM_GYR(frame_id,gyr_xyz),同一采样对共用 frame_id 做对齐键。 */
+/* 低量程六轴的加速度/角速度拆两个文件:索引 0=ACC_LOW(frame_id,datetime,acc_xyz)、
+ * 6=GYR_LOW(frame_id,gyr_xyz),同一采样对共用 frame_id 做对齐键。 */
 #define FATFS_SD_FILE_LSM_GYR   6U
 
 /* MIC.WAV —— 文件索引 7。因需开头占位头、停止时回填大小，单独用一个
