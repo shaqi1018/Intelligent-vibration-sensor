@@ -17,7 +17,7 @@ const char *FatFs_SD_GetSessionDir(void);
 FRESULT FatFs_SD_LoggerStart(void);
 FRESULT FatFs_SD_LoggerAppendFrame(const AppSensorFrame_t *frame);
 /* Write a raw byte stream to log file `idx`
- *   0=LSM_IMU, 1=LSM_TMP, 2=H3_ACC, 3=QMA_ACC, 4=AHT_ENV, 5=MAG
+ *   0=ACC_LOW, 1=TMP_LOW, 2=ACC_HIGH, 3=ACC_MID, 4=ENV, 5=MAG
  * Used by the ring buffer flush path in StartLoggerTask. */
 FRESULT FatFs_SD_LoggerWriteFileIndex(uint8_t idx, const uint8_t *data, uint32_t len);
 

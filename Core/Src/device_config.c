@@ -55,10 +55,10 @@ static const char kCfgTemplate[] =
 "  \"_doc_duration_ms\": \"单次采集时长(ms)，到点自动停；0=一直采到关机或手动停\",\r\n"
 "\r\n"
 "  \"seg_size_mb\": 512,\r\n"
-"  \"_doc_seg_size_mb\": \"SD每个数据文件分段大小(MB)：单文件写满即新建续段(如 LSM_IMU.BIN→IMU0002.BIN→...)，各文件独立计数；0=不分段(单文件)。麦克风MIC.WAV不分段\",\r\n"
+"  \"_doc_seg_size_mb\": \"SD每个数据文件分段大小(MB)：单文件写满即新建续段(如 ACC_LOW.BIN→ACLO0002.BIN→...)，各文件独立计数；0=不分段(单文件)。麦克风MIC.WAV不分段\",\r\n"
 "\r\n"
-"  \"_s2\": \"==================== LSM6DSOX 六轴IMU ====================\",\r\n"
-"  \"lsm6dsox\": {\r\n"
+"  \"_s2\": \"==================== 低量程加速度(六轴:加速度+角速度) ====================\",\r\n"
+"  \"accel_low\": {\r\n"
 "    \"enabled\": 1,\r\n"
 "    \"range_g\": 4,\r\n"
 "    \"_options_range_g\": [2, 4, 8, 16],\r\n"
@@ -68,8 +68,8 @@ static const char kCfgTemplate[] =
 "    \"_options_odr_hz\": [12, 26, 52, 104, 208, 416, 833, 1666, 3332, 6664]\r\n"
 "  },\r\n"
 "\r\n"
-"  \"_s3\": \"==================== H3LIS100DL 高量程加速度 ====================\",\r\n"
-"  \"h3lis100dl\": {\r\n"
+"  \"_s3\": \"==================== 高量程加速度 ====================\",\r\n"
+"  \"accel_high\": {\r\n"
 "    \"enabled\": 1,\r\n"
 "    \"range_g\": 100,\r\n"
 "    \"_options_range_g\": [100],\r\n"
@@ -77,8 +77,8 @@ static const char kCfgTemplate[] =
 "    \"_options_odr_hz\": [50, 100, 400]\r\n"
 "  },\r\n"
 "\r\n"
-"  \"_s4\": \"==================== QMA6100P 加速度 ====================\",\r\n"
-"  \"qma6100p\": {\r\n"
+"  \"_s4\": \"==================== 中量程加速度 ====================\",\r\n"
+"  \"accel_mid\": {\r\n"
 "    \"enabled\": 1,\r\n"
 "    \"range_g\": 4,\r\n"
 "    \"_options_range_g\": [2, 4, 8, 16, 32],\r\n"
@@ -86,8 +86,8 @@ static const char kCfgTemplate[] =
 "    \"_options_odr_hz\": [100, 200, 400, 800, 1600]\r\n"
 "  },\r\n"
 "\r\n"
-"  \"_s5\": \"==================== ES8311 麦克风 ====================\",\r\n"
-"  \"es8311\": {\r\n"
+"  \"_s5\": \"==================== 麦克风 ====================\",\r\n"
+"  \"mic\": {\r\n"
 "    \"enabled\": 1,\r\n"
 "    \"sample_rate_hz\": 16000,\r\n"
 "    \"_options_sample_rate_hz\": [8000, 16000, 48000, 96000],\r\n"
@@ -96,15 +96,15 @@ static const char kCfgTemplate[] =
 "    \"_doc_gain_db\": \"麦克风增益 0..42 dB\"\r\n"
 "  },\r\n"
 "\r\n"
-"  \"_s6\": \"==================== AHT20 温湿度 ====================\",\r\n"
-"  \"aht20\": {\r\n"
+"  \"_s6\": \"==================== 温湿度 ====================\",\r\n"
+"  \"env\": {\r\n"
 "    \"enabled\": 1,\r\n"
 "    \"odr_hz\": 1,\r\n"
 "    \"_doc_odr_hz\": \"1Hz\"\r\n"
 "  },\r\n"
 "\r\n"
-"  \"_s7\": \"==================== LIS2MDL 磁力计 ====================\",\r\n"
-"  \"lis2mdl\": {\r\n"
+"  \"_s7\": \"==================== 磁力计 ====================\",\r\n"
+"  \"mag\": {\r\n"
 "    \"enabled\": 1,\r\n"
 "    \"odr_hz\": 100,\r\n"
 "    \"_options_odr_hz\": [10, 20, 50, 100]\r\n"
@@ -272,6 +272,21 @@ static FRESULT DeviceCfg_WriteTemplate(void)
  *  JSON 解析并应用到运行时配置
  * ========================================================================= */
 
+/* 判断配置文件是否为「新格式」：只要出现任一新命名的传感器键即认为是新格式。
+ * 用于老卡自动迁移——旧文件(键名为芯片型号)一个新键都没有，返回 0，调用者据此
+ * 用新模板覆盖。仅比对新键字符串，固件里不含任何旧型号键名。 */
+static int DeviceCfg_HasNewKeys(const char *buf)
+{
+    static const char *const kNewKeys[] = {
+        "accel_low", "accel_high", "accel_mid", "mic", "env", "mag"
+    };
+    for (size_t i = 0U; i < (sizeof(kNewKeys) / sizeof(kNewKeys[0])); i++)
+    {
+        if (json_find_value(buf, kNewKeys[i]) != NULL) { return 1; }
+    }
+    return 0;
+}
+
 /* 返回位掩码：bit0=文件已有 battery 字段，bit1=已有 seg_size_mb 字段。
  * 缺失的位由调用者补写进配置文件。 */
 static int DeviceCfg_ParseAndApply(const char *buf)
@@ -329,8 +344,8 @@ static int DeviceCfg_ParseAndApply(const char *buf)
         }
     }
 
-    /* ---- lsm6dsox 子对象 ---- */
-    if (json_extract_object(buf, "lsm6dsox", s_obj, sizeof(s_obj)))
+    /* ---- accel_low 子对象(低量程六轴:加速度+角速度) ---- */
+    if (json_extract_object(buf, "accel_low", s_obj, sizeof(s_obj)))
     {
         p = json_find_value(s_obj, "enabled");
         if (json_parse_uint(p, &v))
@@ -349,8 +364,8 @@ static int DeviceCfg_ParseAndApply(const char *buf)
             cfg.lsm6dsox.odr_hz = (uint16_t)v;
     }
 
-    /* ---- h3lis100dl 子对象 ---- */
-    if (json_extract_object(buf, "h3lis100dl", s_obj, sizeof(s_obj)))
+    /* ---- accel_high 子对象(高量程加速度) ---- */
+    if (json_extract_object(buf, "accel_high", s_obj, sizeof(s_obj)))
     {
         p = json_find_value(s_obj, "enabled");
         if (json_parse_uint(p, &v))
@@ -365,8 +380,8 @@ static int DeviceCfg_ParseAndApply(const char *buf)
             cfg.h3lis100dl.odr_hz = (uint16_t)v;
     }
 
-    /* ---- qma6100p 子对象 ---- */
-    if (json_extract_object(buf, "qma6100p", s_obj, sizeof(s_obj)))
+    /* ---- accel_mid 子对象(中量程加速度) ---- */
+    if (json_extract_object(buf, "accel_mid", s_obj, sizeof(s_obj)))
     {
         p = json_find_value(s_obj, "enabled");
         if (json_parse_uint(p, &v))
@@ -381,8 +396,8 @@ static int DeviceCfg_ParseAndApply(const char *buf)
             cfg.qma6100p.odr_hz = (uint16_t)v;
     }
 
-    /* ---- es8311 子对象（麦克风） ---- */
-    if (json_extract_object(buf, "es8311", s_obj, sizeof(s_obj)))
+    /* ---- mic 子对象（麦克风） ---- */
+    if (json_extract_object(buf, "mic", s_obj, sizeof(s_obj)))
     {
         p = json_find_value(s_obj, "enabled");
         if (json_parse_uint(p, &v))
@@ -401,8 +416,8 @@ static int DeviceCfg_ParseAndApply(const char *buf)
             cfg.es8311.gain_db = (uint16_t)v;
     }
 
-    /* ---- aht20 子对象 ---- */
-    if (json_extract_object(buf, "aht20", s_obj, sizeof(s_obj)))
+    /* ---- env 子对象(温湿度) ---- */
+    if (json_extract_object(buf, "env", s_obj, sizeof(s_obj)))
     {
         p = json_find_value(s_obj, "enabled");
         if (json_parse_uint(p, &v))
@@ -413,8 +428,8 @@ static int DeviceCfg_ParseAndApply(const char *buf)
             cfg.aht20.odr_hz = (uint16_t)v;
     }
 
-    /* ---- lis2mdl 子对象 ---- */
-    if (json_extract_object(buf, "lis2mdl", s_obj, sizeof(s_obj)))
+    /* ---- mag 子对象(磁力计) ---- */
+    if (json_extract_object(buf, "mag", s_obj, sizeof(s_obj)))
     {
         p = json_find_value(s_obj, "enabled");
         if (json_parse_uint(p, &v))
@@ -516,6 +531,16 @@ FRESULT DeviceCfg_LoadFromSD(void)
     printf("[DevCfg] 已读取 %s (%u bytes)\r\n",
            DEV_CFG_PATH, (unsigned int)read_len);
 
+    /* 老卡自动迁移：旧格式(键名为芯片型号)或损坏文件不含任何新键 → 用新模板覆盖，
+     * 重置为默认。行为等同新卡首启(本次开机用运行时默认，下次开机读新模板生效)。 */
+    if (DeviceCfg_HasNewKeys(s_buf) == 0)
+    {
+        printf("[DevCfg] 旧/无效配置(无新键名)，覆盖为新模板\r\n");
+        (void)DeviceCfg_WriteTemplate();
+        FatFs_SD_Unmount();
+        return FR_OK;
+    }
+
     int present = DeviceCfg_ParseAndApply(s_buf);  /* bit0=battery, bit1=seg */
 
     /* 旧配置文件可能缺少 seg_size_mb / battery：在末尾的 } 前一次性补齐缺失项 */
@@ -549,7 +574,7 @@ FRESULT DeviceCfg_LoadFromSD(void)
                 adv = snprintf(w, cap,
                     "%s\r\n"
                     "  \"seg_size_mb\": %lu,\r\n"
-                    "  \"_doc_seg_size_mb\": \"SD每个数据文件分段大小(MB)：单文件写满即新建续段(LSM_IMU.BIN→IMU0002.BIN...)，各文件独立计数；0=不分段。MIC.WAV不分段\"",
+                    "  \"_doc_seg_size_mb\": \"SD每个数据文件分段大小(MB)：单文件写满即新建续段(ACC_LOW.BIN→ACLO0002.BIN...)，各文件独立计数；0=不分段。MIC.WAV不分段\"",
                     first ? "" : ",\r\n", (unsigned long)cfg2.seg_size_mb);
                 if (adv > 0 && (size_t)adv < cap) { w += adv; cap -= (size_t)adv; first = 0; }
             }
@@ -639,10 +664,10 @@ FRESULT DeviceCfg_WriteCurrentToSD(void)
         "  \"_doc_duration_ms\": \"单次采集时长(ms)，到点自动停；0=一直采到关机或手动停\",\r\n"
         "\r\n"
         "  \"seg_size_mb\": %lu,\r\n"
-        "  \"_doc_seg_size_mb\": \"SD每个数据文件分段大小(MB)：单文件写满即新建续段(LSM_IMU.BIN→IMU0002.BIN...)，各文件独立计数；0=不分段。MIC.WAV不分段\",\r\n"
+        "  \"_doc_seg_size_mb\": \"SD每个数据文件分段大小(MB)：单文件写满即新建续段(ACC_LOW.BIN→ACLO0002.BIN...)，各文件独立计数；0=不分段。MIC.WAV不分段\",\r\n"
         "\r\n"
-        "  \"_s2\": \"==================== LSM6DSOX 六轴IMU ====================\",\r\n"
-        "  \"lsm6dsox\": {\r\n"
+        "  \"_s2\": \"==================== 低量程加速度(六轴:加速度+角速度) ====================\",\r\n"
+        "  \"accel_low\": {\r\n"
         "    \"enabled\": %u,\r\n"
         "    \"range_g\": %u,\r\n"
         "    \"_options_range_g\": [2, 4, 8, 16],\r\n"
@@ -652,8 +677,8 @@ FRESULT DeviceCfg_WriteCurrentToSD(void)
         "    \"_options_odr_hz\": [12, 26, 52, 104, 208, 416, 833, 1666, 3332, 6664]\r\n"
         "  },\r\n"
         "\r\n"
-        "  \"_s3\": \"==================== H3LIS100DL 高量程加速度 ====================\",\r\n"
-        "  \"h3lis100dl\": {\r\n"
+        "  \"_s3\": \"==================== 高量程加速度 ====================\",\r\n"
+        "  \"accel_high\": {\r\n"
         "    \"enabled\": %u,\r\n"
         "    \"range_g\": %u,\r\n"
         "    \"_options_range_g\": [100],\r\n"
@@ -661,8 +686,8 @@ FRESULT DeviceCfg_WriteCurrentToSD(void)
         "    \"_options_odr_hz\": [50, 100, 400]\r\n"
         "  },\r\n"
         "\r\n"
-        "  \"_s4\": \"==================== QMA6100P 加速度 ====================\",\r\n"
-        "  \"qma6100p\": {\r\n"
+        "  \"_s4\": \"==================== 中量程加速度 ====================\",\r\n"
+        "  \"accel_mid\": {\r\n"
         "    \"enabled\": %u,\r\n"
         "    \"range_g\": %u,\r\n"
         "    \"_options_range_g\": [2, 4, 8, 16, 32],\r\n"
@@ -670,8 +695,8 @@ FRESULT DeviceCfg_WriteCurrentToSD(void)
         "    \"_options_odr_hz\": [100, 200, 400, 800, 1600]\r\n"
         "  },\r\n"
         "\r\n"
-        "  \"_s5\": \"==================== ES8311 麦克风 ====================\",\r\n"
-        "  \"es8311\": {\r\n"
+        "  \"_s5\": \"==================== 麦克风 ====================\",\r\n"
+        "  \"mic\": {\r\n"
         "    \"enabled\": %u,\r\n"
         "    \"sample_rate_hz\": %lu,\r\n"
         "    \"_options_sample_rate_hz\": [8000, 16000, 48000, 96000],\r\n"
@@ -680,15 +705,15 @@ FRESULT DeviceCfg_WriteCurrentToSD(void)
         "    \"_doc_gain_db\": \"麦克风增益 0..42 dB\"\r\n"
         "  },\r\n"
         "\r\n"
-        "  \"_s6\": \"==================== AHT20 温湿度 ====================\",\r\n"
-        "  \"aht20\": {\r\n"
+        "  \"_s6\": \"==================== 温湿度 ====================\",\r\n"
+        "  \"env\": {\r\n"
         "    \"enabled\": %u,\r\n"
         "    \"odr_hz\": %u,\r\n"
         "    \"_doc_odr_hz\": \"1Hz\"\r\n"
         "  },\r\n"
         "\r\n"
-        "  \"_s7\": \"==================== LIS2MDL 磁力计 ====================\",\r\n"
-        "  \"lis2mdl\": {\r\n"
+        "  \"_s7\": \"==================== 磁力计 ====================\",\r\n"
+        "  \"mag\": {\r\n"
         "    \"enabled\": %u,\r\n"
         "    \"odr_hz\": %u,\r\n"
         "    \"_options_odr_hz\": [10, 20, 50, 100]\r\n"
@@ -767,33 +792,33 @@ FRESULT DeviceCfg_WriteConfigToDir(const char *dir)
     line_len = snprintf(
         s_line, sizeof(s_line),
         "{\r\n"
-        "  \"lsm6dsox\": {\r\n"
+        "  \"accel_low\": {\r\n"
         "    \"enabled\": %u,\r\n"
         "    \"range_g\": %u,\r\n"
         "    \"range_dps\": %u,\r\n"
         "    \"odr_hz\": %u\r\n"
         "  },\r\n"
-        "  \"h3lis100dl\": {\r\n"
+        "  \"accel_high\": {\r\n"
         "    \"enabled\": %u,\r\n"
         "    \"range_g\": %u,\r\n"
         "    \"odr_hz\": %u\r\n"
         "  },\r\n"
-        "  \"qma6100p\": {\r\n"
+        "  \"accel_mid\": {\r\n"
         "    \"enabled\": %u,\r\n"
         "    \"range_g\": %u,\r\n"
         "    \"odr_hz\": %u\r\n"
         "  },\r\n"
-        "  \"es8311\": {\r\n"
+        "  \"mic\": {\r\n"
         "    \"enabled\": %u,\r\n"
         "    \"sample_rate_hz\": %lu,\r\n"
         "    \"bits\": %u,\r\n"
         "    \"gain_db\": %u\r\n"
         "  },\r\n"
-        "  \"aht20\": {\r\n"
+        "  \"env\": {\r\n"
         "    \"enabled\": %u,\r\n"
         "    \"odr_hz\": %u\r\n"
         "  },\r\n"
-        "  \"lis2mdl\": {\r\n"
+        "  \"mag\": {\r\n"
         "    \"enabled\": %u,\r\n"
         "    \"odr_hz\": %u\r\n"
         "  }\r\n"

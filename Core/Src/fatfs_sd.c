@@ -12,17 +12,18 @@
 #define FATFS_SD_SESSION_PREFIX   "CKBX"
 #define FATFS_SD_SESSION_MAX      9999U
 #define FATFS_SD_DIR_PATH_MAX     24U   /* "0:/CKBOX0001" = 13 + NUL */
-#define FATFS_SD_FILE_PATH_MAX    32U   /* "0:/CKBOX0001/LSM_ACC.CSV" = 25 + NUL */
+#define FATFS_SD_FILE_PATH_MAX    32U   /* "0:/CKBX0001/ACC_HIGH.CSV" = 24 + NUL */
 
-/* 6 个 CSV 文件名（8.3 格式）.
- * LSM_IMU merges accel+gyro at 6664Hz; LSM_TMP holds the slow temperature
- * channel; H3 and QMA are unchanged; AHT_ENV and MAG are new. */
-#define FATFS_SD_FNAME_LSM_IMU   "LSM_IMU.CSV"
-#define FATFS_SD_FNAME_LSM_TMP   "LSM_TMP.CSV"
-#define FATFS_SD_FNAME_H3_ACC    "H3_ACC.CSV"
-#define FATFS_SD_FNAME_QMA_ACC   "QMA_ACC.CSV"
-#define FATFS_SD_FNAME_AHT_ENV   "AHT_ENV.CSV"   /* 新增：索引 4 */
-#define FATFS_SD_FNAME_MAG       "MAG.CSV"        /* 新增：索引 5 */
+/* 6 个 CSV 文件名（8.3 格式）. 命名按功能通用化(不暴露芯片型号):后缀 _LOW/_MID/_HIGH
+ * 为加速度量程档(低/中/高),前缀 ACC/TMP 为信号类型。
+ * ACC_LOW 为低量程六轴,加速度+角速度合并在一个文件;TMP_LOW 慢温度通道;
+ * ACC_HIGH/ACC_MID 高/中量程加速度;ENV 温湿度;MAG 磁力。 */
+#define FATFS_SD_FNAME_ACC_LOW   "ACC_LOW.CSV"    /* 索引 0：低量程六轴(加速度+角速度) */
+#define FATFS_SD_FNAME_TMP_LOW   "TMP_LOW.CSV"    /* 索引 1：低量程模块温度 */
+#define FATFS_SD_FNAME_ACC_HIGH  "ACC_HIGH.CSV"   /* 索引 2：高量程加速度 */
+#define FATFS_SD_FNAME_ACC_MID   "ACC_MID.CSV"    /* 索引 3：中量程加速度 */
+#define FATFS_SD_FNAME_ENV       "ENV.CSV"        /* 索引 4：温湿度 */
+#define FATFS_SD_FNAME_MAG       "MAG.CSV"        /* 索引 5：磁力 */
 #define FATFS_SD_FNAME_MIC_WAV   "MIC.WAV"
 
 #define FATFS_SD_FILE_LSM_IMU     0U
@@ -41,7 +42,7 @@ static uint32_t g_logger_rows_written = 0U;
 
 /* ---- 文件分段(segmentation) ----
  * 6 个传感器数据文件(索引 0..5)各自独立按字节数滚动；MIC.WAV(索引6)不分段。
- * 段1沿用原文件名(如 LSM_IMU.CSV)；续段用短标签+4位段号(如 IMU0002.CSV)，
+ * 段1沿用原文件名(如 ACC_LOW.CSV)；续段用短标签+4位段号(如 ACLO0002.CSV)，
  * 满足 8.3 短名限制(_USE_LFN=0)。CSV 续段重写表头，BIN 续段无头(同首段)。*/
 static uint32_t g_seg_max_bytes = 0U;                    /* 0=不分段；否则每段字节上限 */
 static uint8_t  g_log_format    = ACQ_OUTPUT_CSV;        /* LoggerStart 时缓存的输出格式 */
@@ -49,13 +50,13 @@ static uint32_t g_file_bytes[FATFS_SD_NUM_FILES] = {0};  /* 当前段已写字�
 static uint16_t g_file_seg[FATFS_SD_NUM_FILES]   = {0};  /* 当前段号(1 基) */
 
 static const char *const kLogFnames[FATFS_SD_NUM_FILES] = {
-  FATFS_SD_FNAME_LSM_IMU, FATFS_SD_FNAME_LSM_TMP,
-  FATFS_SD_FNAME_H3_ACC,  FATFS_SD_FNAME_QMA_ACC,
-  FATFS_SD_FNAME_AHT_ENV, FATFS_SD_FNAME_MAG
+  FATFS_SD_FNAME_ACC_LOW, FATFS_SD_FNAME_TMP_LOW,
+  FATFS_SD_FNAME_ACC_HIGH, FATFS_SD_FNAME_ACC_MID,
+  FATFS_SD_FNAME_ENV,     FATFS_SD_FNAME_MAG
 };
 /* 续段短标签：≤4 字符，拼 4 位段号后 ≤8 字符，满足 8.3 */
 static const char *const kLogTags[FATFS_SD_NUM_FILES] = {
-  "IMU", "TMP", "H3_", "QMA", "ENV", "MAG"
+  "ACLO", "TMLO", "ACHI", "ACMD", "ENV", "MAG"
 };
 /* CSV 表头（缩放后物理量 mg / mdps）。BIN 模式不写。*/
 static const char *const kLogHeaders[FATFS_SD_NUM_FILES] = {
@@ -396,11 +397,10 @@ FRESULT FatFs_SD_LoggerAppendFrame(const AppSensorFrame_t *frame)
     return FR_NOT_READY;
   }
 
-  /* LSM6DSOX acc/gyr now go through the LSM_IMU ring buffer (raw int16),
-   * QMA acc through the QMA_ACC ring buffer (raw int14). The per-frame path
-   * here only handles the slow LSM temperature and the H3LIS samples. */
+  /* 低量程六轴加速度/角速度经 ACC_LOW ring buffer(raw int16)写出,中量程加速度经其
+   * ring(raw int14)。此逐帧路径仅处理慢速的低量程模块温度与高量程加速度样本。 */
 
-  /* LSM6DSOX temp — 文件索引 LSM_TMP */
+  /* 低量程模块温度 — 文件索引 TMP_LOW */
   if (frame->lsm6dsox.valid != 0U)
   {
     len = snprintf(line, sizeof(line), "%lu,%lu,%.1f\r\n",
@@ -412,7 +412,7 @@ FRESULT FatFs_SD_LoggerAppendFrame(const AppSensorFrame_t *frame)
     if (result != FR_OK) return result;
   }
 
-  /* H3LIS100DL acc and QMA6100P acc now write via their own ring buffers,
+  /* 高量程与中量程加速度经各自的 ring buffer 写出,
    * see RingBuf_PeekContiguous + LoggerWriteFileIndex in StartLoggerTask. */
 
   g_logger_rows_written++;
@@ -462,7 +462,7 @@ FRESULT FatFs_SD_WavCreate(uint32_t sample_rate_hz, uint16_t bits)
 }
 
 /* Generic single-file log write — used by the ring buffer flush path
- * (LSM_IMU and QMA_ACC both come through here from the logger task).
+ * (低量程六轴与中量程加速度都经此路径从 logger 任务写出)。
  * idx==FATFS_SD_FILE_MIC_WAV(6) 路由到独立的 g_wav_file 并累加字节数。 */
 FRESULT FatFs_SD_LoggerWriteFileIndex(uint8_t idx, const uint8_t *data, uint32_t len)
 {
