@@ -107,8 +107,12 @@ typedef struct {
 #define APP_RING_LSM_GYR_SIZE   (96U * 1024U)
 #define APP_RING_QMA_ACC_SIZE   (32U * 1024U)
 #define APP_RING_H3_ACC_SIZE    (16U * 1024U)   /* 400Hz × 14B/row × 5s ≈ 28KB cap, 16KB enough with logger drain */
-/* 96kHz×2B = 192KB/s；攒批下 32KB 会偶尔溢出(CKBX0297 mic drop)，64KB≈0.33s 余量 */
-#define APP_RING_MIC_SIZE       (64U * 1024U)
+/* 麦克风 PCM 环。48kHz×2B=96KB/s(96kHz 配置则 192KB/s)。满配长录时 logger 在分段
+ * 滚动(关旧段/开新段)/ card PROGRAMMING 卡顿期间来不及排空 → 溢出丢音频(实测 20-53
+ * 满配 52min 丢 12.6%,约 6.6min)。丢帧是突发性的(SD 平均带宽够),故扩大缓冲有效:
+ * 64KB(48k≈0.66s) → 192KB(48k≈2s/96k≈1s),吸收卡顿。RAM:U575 768KB,+128KB 后仍余
+ * ~80KB。若仍丢,再考虑 logger 优先排空 mic 或降 SD 负载。 */
+#define APP_RING_MIC_SIZE       (192U * 1024U)
 #define APP_RING_AHT_ENV_SIZE   (4U * 1024U)    /* 温湿度 1Hz，~32B/行 → 4KB≈2min */
 #define APP_RING_MAG_SIZE       (16U * 1024U)   /* 磁力 100Hz，~40B/行 → 16KB≈4s */
 /* Largest contiguous chunk handed to f_write per call. Bigger = fewer FAT
