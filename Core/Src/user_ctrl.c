@@ -21,14 +21,25 @@ extern volatile uint8_t g_system_error;
 /* 低电量保护:电压持续低于阈值 → 优雅关机(停采→关文件+f_sync→断电),避免电池
  * 保护板/稳压器在写卡途中硬切导致 SD 文件系统损坏(续航测试实测问题)。阈值写死
  * 3.4V(高于常见硬切点 2.4~3.0V,留足关文件时间);每 UC_BAT_CHECK_MS 读一次电压,
- * 连续 UC_BAT_LOW_CONFIRM 次低于才触发(去抖:满载写卡瞬间电压会下陷,防误触发中断
- * 有效录制)。容量无关——按带载电压触发,400mAh/2000mAh 通用。 */
-#define UC_BAT_LOW_MV        3400U
-#define UC_BAT_CHECK_MS      2000U
-#define UC_BAT_LOW_CONFIRM   4U
-/* 有效电压下限:低于此值视为 ADC 读失败(返回0/异常低)而非真实低电量——真到这么低
- * 保护板早已硬切、系统跑不到这里。用它滤掉 ADC 抖动误触发,避免中断有效录制。 */
-#define UC_BAT_MIN_VALID_MV  2500U
+ * 连续 UC_BAT_LOW_CONFIRM 次落在计数带才触发(去抖:满载写卡瞬间电压会下陷,防误触发
+ * 中断有效录制)。容量无关——按带载电压触发,400mAh/2000mAh 通用。 */
+#define UC_BAT_LOW_MV        3400U   /* 低电量带上沿:带载持续低于此 → 优雅关机 */
+#define UC_BAT_CHECK_MS      500U    /* 读电压间隔(原 2000→500,触发提速 4×) */
+#define UC_BAT_LOW_CONFIRM   3U      /* 低带确认次数:3×500ms ≈ 1.5s(原 4×2000≈8s) */
+/* ★ 临界带(B2,实测 96kHz 满配掉电漏关机的补强):真电池垂死时带载电压可能【跳崖】
+ * 式下滑,1.5s 的低带确认窗口可能来不及在硬切点前关好文件。低于 UC_BAT_CRIT_MV 时改用
+ * 更短的确认次数(≈1.0s),抢在断电前完成优雅关机。用短确认(而非纯单次)是为了不被
+ * 满载写卡瞬间的电压下陷误触发中断有效录制——1s 持续 <3.0V 已是真正的供电垂死,非瞬时。 */
+#define UC_BAT_CRIT_MV       3000U   /* 临界带上沿:带载低于此 → 短确认即关机 */
+#define UC_BAT_CRIT_CONFIRM  2U      /* 临界带确认次数:2×500ms ≈ 1.0s */
+/* ADC 故障地板:读数低于此值才视为 ADC 读失败(返回≈0/异常),而非真实低电量。
+ * ★ 关键(实测 CTBX_2026-07-04-17-22 满配 96kHz 掉电未优雅关机的根因修复):
+ * 旧值 2500 太高——真电池垂死时带载电压是【一路向下穿过 2500】掉到硬切点的,一旦
+ * 读到 <2500 旧逻辑就把它当"无效"清零去抖计数,恰在最该关机时把进度丢掉 → 优雅关机
+ * 永不触发 → 硬切损坏。改用远低于任何真实运行电压(系统在保护板硬切点 ~2.4-3.0V 以下
+ * 就断电了)的 1500mV 做地板:计数带拓宽为 [1500, 3400),整个末段下滑区都持续计数,
+ * 只有 ≈0 的真故障读数才清零。 */
+#define UC_BAT_ADC_FAULT_MV  1500U
 
 /* 电量显示：短按电源键后的 LED 快闪参数 */
 #define UC_BAT_FLASH_ON_MS    80U   /* 每次闪亮持续时间 */
@@ -130,11 +141,16 @@ static void Uc_CheckUsbToMsc(void)
  * SD 文件系统一致后再掉电。轮询等待(而非固定延时)确保文件确实关好才断电。 */
 static void Uc_SafeShutdown(void)
 {
+  /* ★取证:确认 SafeShutdown 真被调用了(区分"低电量完全没触发"vs"触发了但收尾没跑完")。
+   * 掉电日志里若有此行=触发了,再看下面 logger closed 结果判断收尾是否完成。 */
+  printf("[LowBat] SafeShutdown enter\r\n");
   if (AppAcqIsRunning() != 0U)
   {
     AppAcqStop();
   }
   Uc_WaitLoggerClosed();  /* 等文件真正关好(WAV finalize + f_sync/f_close)再断电 */
+  printf("[LowBat] logger closed=%u (0=收尾完成)\r\n",
+         (unsigned)FatFs_SD_IsLoggerActive());
   LED_Set(1U);  /* 灭灯(active-low:高=灭) */
   if (BoardIO_IsBatteryLatched())
   {
@@ -171,24 +187,57 @@ void StartUserCtrlTask(void *argument)
     /* path/sd: USB 插入 → 优雅停采收尾 → 复位进 MSC 读卡(优先于按键逻辑) */
     Uc_CheckUsbToMsc();
 
-    /* ── 低电量保护:带载电压持续 < 3.4V → 优雅关机(存好数据再掉电) ──
-     * 仅电池供电时生效(USB 供电不会低电量);每 2s 读一次,连续 4 次(≈8s)
-     * 低于阈值才触发,滤掉满载写卡的瞬时电压下陷。触发即走 Uc_SafeShutdown,不返回。 */
+    /* ── 低电量保护:带载电压持续偏低 → 优雅关机(存好数据再掉电) ──
+     * 仅电池供电时生效(USB 供电不会低电量);每 500ms 读一次电压。两级计数带,共用
+     * 同一去抖计数 s_bat_low_ct:
+     *   · 低带 [1500, 3400):连续 3 次(≈1.5s)触发——正常低电量下滑;
+     *   · 临界带 [1500, 3000):连续 2 次(≈1.0s)即触发——垂死电池跳崖式下滑时抢时间。
+     * 用短确认而非纯单次,避免满载写卡瞬时电压下陷误触发中断有效录制。计数带下探到
+     * 1500(而非 2500)让垂死电池穿过 2500 继续往下的读数仍持续计数(旧逻辑在此丢触发,
+     * 实测 96kHz 掉电损坏)。只有 ≈0 的真故障读数(<1500)才清零。不返回。 */
     if (BoardIO_IsBatteryLatched() && ((int32_t)(now - s_bat_next_check) >= 0))
     {
       s_bat_next_check = now + UC_BAT_CHECK_MS;
       uint32_t mv = BatteryADC_ReadMillivolts();
-      if ((mv >= UC_BAT_MIN_VALID_MV) && (mv < UC_BAT_LOW_MV))
+      if ((mv >= UC_BAT_ADC_FAULT_MV) && (mv < UC_BAT_LOW_MV))
       {
         if (s_bat_low_ct < 255U) { s_bat_low_ct++; }
-        if (s_bat_low_ct >= UC_BAT_LOW_CONFIRM)
+        /* 临界带用更少的确认次数抢时间;低带用标准确认次数 */
+        uint8_t need = (mv < UC_BAT_CRIT_MV) ? UC_BAT_CRIT_CONFIRM : UC_BAT_LOW_CONFIRM;
+        /* ★取证(2026-07-09):满配掉电保护第三次漏,加日志定性"没触发"vs"触发太晚"。
+         * 每次落带都打印电压/计数/阈值,掉电前的串口尾巴能还原检测过程。精简单行、
+         * 尽早刷出(掉电瞬间串口可能来不及,故每次都打而非仅触发时)。 */
+        printf("[LowBat] mv=%lu ct=%u/%u\r\n", (unsigned long)mv,
+               (unsigned)s_bat_low_ct, (unsigned)need);
+        if (s_bat_low_ct >= need)
         {
           Uc_SafeShutdown();  /* 停采→关文件+sync→断电,不返回 */
         }
       }
+      else if (mv < UC_BAT_ADC_FAULT_MV)
+      {
+        /* ADC 真故障(读数<1.5V≈0,非真实运行电压):直接清零。不能把读失败当低电量累积,
+         * 否则 ADC 偶发抽风会误触发优雅关机中断有效录制。 */
+        if (s_bat_low_ct != 0U)
+        {
+          printf("[LowBat] fault mv=%lu (ct %u->0)\r\n",
+                 (unsigned long)mv, (unsigned)s_bat_low_ct);
+        }
+        s_bat_low_ct = 0U;
+      }
       else
       {
-        s_bat_low_ct = 0U;  /* 电压回升或读数无效,清除去抖计数 */
+        /* 电压回升(mv>=UC_BAT_LOW_MV):★去抖改【衰减】而非清零(2026-07-10 修复)。
+         * 实测(CTBX_..00-22)满配大电流下带载电压在阈值(3400)附近反复抖动(3392~3416),旧逻辑
+         * 一次回升就把计数清零 → 计数永远攒不满 → 优雅关机触发全靠运气(第 1-3 次满配掉电就
+         * 因此漏触发损坏)。改为每次回升只 ct-- 递减(滞回):抖动时计数缓慢波动不归零,电压真正
+         * 持续下滑时才能累积到 need 触发。既滤瞬时下陷误触发,又不被回升打断真实低电量累积。 */
+        if (s_bat_low_ct != 0U)
+        {
+          s_bat_low_ct--;
+          printf("[LowBat] rebound mv=%lu (ct->%u)\r\n",
+                 (unsigned long)mv, (unsigned)s_bat_low_ct);
+        }
       }
     }
 

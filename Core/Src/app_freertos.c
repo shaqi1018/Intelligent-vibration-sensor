@@ -90,6 +90,10 @@ static osSemaphoreId_t s_lsm_fifo_sem;  /* released by EXTI0 ISR on PB0 rising e
 static osSemaphoreId_t s_qma_fifo_sem;  /* released by EXTI4 ISR on PC4 rising edge (HW-v2) */
 static osSemaphoreId_t s_h3_drdy_sem;   /* released by EXTI1 ISR on PA1 rising edge (HW-v2) */
 static osSemaphoreId_t s_mag_drdy_sem;  /* released by EXTI13 ISR on PC13 rising edge (LIS2MDL DRDY) */
+/* ★2026-07-09 事件驱动 logger(借鉴 DATALOG1 SDM_Thread):生产者(含 mic SAI ISR)在某个 ring
+ * 攒过唤醒阈值时 osSemaphoreRelease 唤醒 logger,logger 平时阻塞睡(50ms 超时兜底)不再 osDelay(2)
+ * 忙轮询空转。计数信号量(max 大),多次 release 被 logger 一次排空;边沿触发避免淹没。 */
+static osSemaphoreId_t s_logger_wake;   /* 数据就绪 → 唤醒 logger 排空 ring */
 static osMutexId_t     i2c1_mutex;      /* AHT20 + LIS2MDL 共享 I2C1 互斥 */
 static osMutexId_t     i2c2_mutex;      /* ES8311 codec + PCF85063 RTC 共享 I2C2 互斥 (M1) */
 static AppSensorSnapshot_t g_sensor_snapshot;
@@ -246,6 +250,13 @@ const osThreadAttr_t loggerTask_attributes = {
   .stack_size = 1024 * 4  /* 4KB — logger only buffers small line[128] + locals */
 };
 
+osThreadId_t sdWriterTaskHandle;
+const osThreadAttr_t sdWriterTask_attributes = {
+  .name = "sdWriterTask",
+  .priority = (osPriority_t)osPriorityAboveNormal,  /* = 当前 logger,维持"SD写在传感器(High)之下" */
+  .stack_size = 1024 * 4  /* 4KB:f_write/f_sync/WavCheckpoint 调用链 + printf 诊断余量 */
+};
+
 osThreadId_t micTaskHandle;
 const osThreadAttr_t micTask_attributes = {
   .name = "micTask",
@@ -276,7 +287,7 @@ static void     RingBuf_Init(AppRingBuffer_t *rb, uint8_t *data, uint32_t size);
 static void     RingBuf_Reset(AppRingBuffer_t *rb);
 static uint32_t RingBuf_Available(const AppRingBuffer_t *rb);
 static uint32_t RingBuf_Write(AppRingBuffer_t *rb, const uint8_t *src, uint32_t len);
-static uint32_t RingBuf_PeekContiguous(AppRingBuffer_t *rb, const uint8_t **out_ptr, uint32_t *out_len);
+static uint32_t RingBuf_CopyToBounce(AppRingBuffer_t *rb, uint8_t *dst, uint32_t cap);
 static void     RingBuf_Consume(AppRingBuffer_t *rb, uint32_t len);
 static int      LoggerDrainRing(AppRingBuffer_t *rb, uint8_t file_idx, uint32_t min_flush,
                                 uint32_t *rows_since_sync, FRESULT *out_res);
@@ -298,12 +309,39 @@ static uint32_t AppAcqCurrentPeriodMs(void);
 static uint8_t AppAcqIsSdSessionActive(void);
 static void AppFlowStatsSetMode(uint8_t usb_active, uint8_t sd_active);
 static void AppLoggerStopSdSession(uint8_t *sd_file_open, uint32_t *rows_since_sync);
+static void AppSdBlockPoolInit(void);
+static void StartSdWriterTask(void *argument);
 static void AppAcqStopInternal(uint32_t now_ms);
 static void AppAcqCheckAutoStop(void);
 static void AppAcqResetSessionTimer(void);
 uint32_t AppAcqStart(uint8_t sink, uint32_t duration_ms);
 uint32_t AppAcqStop(void);
 static uint32_t AppAcqDrainPendingStop(void);
+static void AppFlowStatsRecordWriteFailure(void);
+
+/* ===== 双缓冲块池 + 双队列(2026-07-14) — 类型/句柄前置(供 AppLoggerStopSdSession 等更早的
+ * 函数引用;存储数组 s_block_pool 与 AppSdBlockPoolInit 定义仍在下方 SD 写区)。 =====
+ * WriteQ 消息类型:写线程是 FatFs 唯一访问者,所有落盘动作都经此队列串行化。 */
+typedef enum {
+  APP_SDMSG_DATA = 0,   /* 写一个数据块到 file_idx,写完归还 block_idx 到 FreeQ */
+  APP_SDMSG_SYNC,       /* FatFs_SD_LoggerSync() */
+  APP_SDMSG_WAVCKPT,    /* FatFs_SD_WavCheckpoint() */
+  APP_SDMSG_STOP,       /* 收尾:FatFs_SD_LoggerStop(),然后 release s_sd_writer_done */
+  APP_SDMSG_APPENDFRAME,/* 逐帧写(LSM温度行到TMP_LOW),携带 msg.frame */
+  APP_SDMSG_DEVCFG      /* 写线程调 DeviceCfg_WriteCurrentToSD(收尾配置快照,FIFO 保证在 STOP 前) */
+} AppSdMsgType_t;
+
+typedef struct {
+  uint8_t  type;        /* AppSdMsgType_t */
+  uint8_t  block_idx;   /* DATA:块索引 0..N-1;其他消息忽略 */
+  uint8_t  file_idx;    /* DATA:目标文件索引;其他忽略 */
+  uint32_t len;         /* DATA:块内有效字节(扇区对齐,末块可非对齐);其他忽略 */
+  AppSensorFrame_t frame;   /* 仅 APP_SDMSG_APPENDFRAME 使用 */
+} AppSdWriteMsg_t;
+
+static osMessageQueueId_t s_free_q;    /* 装空闲 block_idx(uint8_t),容量 N */
+static osMessageQueueId_t s_write_q;   /* 装 AppSdWriteMsg_t,容量 APP_SD_WRITEQ_LEN */
+static osSemaphoreId_t    s_sd_writer_done;  /* 收尾屏障:STOP 处理完后 release */
 
 
 void StartLsm6dsoxTask(void *argument);
@@ -367,6 +405,7 @@ void MX_FREERTOS_Init(void)
   s_h3_drdy_sem  = osSemaphoreNew(1, 0, NULL);
   s_mag_drdy_sem = osSemaphoreNew(1, 0, NULL);
   s_sdmmc_dma_sem = xSemaphoreCreateBinary();
+  s_logger_wake = osSemaphoreNew(16, 0, NULL);  /* 计数,max16/init0:生产者唤醒 logger */
   /* USER CODE END RTOS_SEMAPHORES */
 
   /* Load device config from SD card (DEVCFG.JSN) before tasks start,
@@ -381,6 +420,9 @@ void MX_FREERTOS_Init(void)
   RingBuf_Init(&g_ring_mic,     s_mic_ringbuf,     APP_RING_MIC_SIZE);
   RingBuf_Init(&g_ring_aht_env, s_aht_env_ringbuf, APP_RING_AHT_ENV_SIZE);
   RingBuf_Init(&g_ring_mag,     s_mag_ringbuf,     APP_RING_MAG_SIZE);
+
+  /* 双缓冲块池 + 双队列 + 收尾信号量(必须在写线程/生产者跑之前建好) */
+  AppSdBlockPoolInit();
 
   /* USER CODE BEGIN RTOS_TIMERS */
   /* USER CODE END RTOS_TIMERS */
@@ -401,6 +443,7 @@ void MX_FREERTOS_Init(void)
   h3lis100dlTaskHandle = osThreadNew(StartH3lis100dlTask, NULL, &h3lis100dlTask_attributes);
   qma6100pTaskHandle  = osThreadNew(StartQma6100pTask,  NULL, &qma6100pTask_attributes);
   loggerTaskHandle    = osThreadNew(StartLoggerTask,    NULL, &loggerTask_attributes);
+  sdWriterTaskHandle  = osThreadNew(StartSdWriterTask,  NULL, &sdWriterTask_attributes);
   micTaskHandle       = osThreadNew(StartMicTask,       NULL, &micTask_attributes);
   aht20TaskHandle   = osThreadNew(StartAht20Task,   NULL, &aht20Task_attributes);
   lis2mdlTaskHandle = osThreadNew(StartLis2mdlTask, NULL, &lis2mdlTask_attributes);
@@ -408,6 +451,7 @@ void MX_FREERTOS_Init(void)
   printf("[RTOS] h3lis100dlTask created: %s\r\n", (h3lis100dlTaskHandle != NULL) ? "ok" : "FAILED");
   printf("[RTOS] qma6100pTask created: %s\r\n", (qma6100pTaskHandle != NULL) ? "ok" : "FAILED");
   printf("[RTOS] loggerTask created: %s\r\n", (loggerTaskHandle != NULL) ? "ok" : "FAILED");
+  printf("[RTOS] sdWriterTask created: %s\r\n", (sdWriterTaskHandle != NULL) ? "ok" : "FAILED");
   printf("[RTOS] micTask created: %s\r\n", (micTaskHandle != NULL) ? "ok" : "FAILED");
   printf("[RTOS] aht20Task created: %s\r\n", (aht20TaskHandle != NULL) ? "ok" : "FAILED");
   printf("[RTOS] lis2mdlTask created: %s\r\n", (lis2mdlTaskHandle != NULL) ? "ok" : "FAILED");
@@ -796,9 +840,8 @@ static void AppLoggerStopSdSession(uint8_t *sd_file_open, uint32_t *rows_since_s
 
   if (*sd_file_open != 0U)
   {
-    /* Batching (LoggerDrainRing min_flush) can leave up to ~half a ring of
-     * sub-threshold tail data unwritten. Force-flush every ring (min_flush=0)
-     * before closing files, else the session tail is lost. */
+    /* 1) 强排空每个环的末块(min_flush=0 → 全排空,允许非对齐末块),全部压入 WriteQ。
+     *    LoggerDrainRing 现在是"凑块入队",do/while 直到所有环再无数据可入队。 */
     {
       uint32_t dummy_rss = 0U;
       FRESULT fr;
@@ -814,8 +857,24 @@ static void AppLoggerStopSdSession(uint8_t *sd_file_open, uint32_t *rows_since_s
         if (LoggerDrainRing(&g_ring_mag,     5U, 0U, &dummy_rss, &fr) > 0) { any = 1; }
       } while (any != 0);
     }
-    (void)DeviceCfg_WriteCurrentToSD();
-    FatFs_SD_LoggerStop();
+
+    /* 2) 收尾全部经写线程串行执行(FIFO):先前入队的 DATA/SYNC/APPENDFRAME 都排在前面,
+     *    这里再压 DEVCFG(配置快照)+STOP。写线程按序处理,STOP 时所有数据已落盘、配置已写,
+     *    再 finalize WAV + f_close + unmount,然后 release 信号量。STOP 完成 = 真正收尾完成,
+     *    无需单独的 FreeQ 屏障(块归还是 DATA 处理的副作用,STOP 在其后必然已归还)。 */
+    {
+      AppSdWriteMsg_t m = { 0 };
+      m.type = (uint8_t)APP_SDMSG_DEVCFG;
+      (void)osMessageQueuePut(s_write_q, &m, 0U, osWaitForever);
+
+      m.type = (uint8_t)APP_SDMSG_STOP;
+      (void)osMessageQueuePut(s_write_q, &m, 0U, osWaitForever);
+
+      /* 等写线程处理完 STOP(= 数据/配置全落盘 + 文件 close + 卷 unmount)。超时兜底防卡死。
+       * 最坏:队列里若干 DATA 块 × 单次写<1s + DevCfg + finalize,给足 8s。 */
+      (void)osSemaphoreAcquire(s_sd_writer_done, 8000U);
+    }
+
     SD_PrintWriteStats();   /* route-2: per-session SDMMC write-path health */
     AppPrintRuntimeDiag();  /* route-2: per-task stack margin + ring overrun */
     *sd_file_open = 0U;
@@ -1227,6 +1286,7 @@ static void RingBuf_Init(AppRingBuffer_t *rb, uint8_t *data, uint32_t size)
   rb->rd_idx = 0U;
   rb->dropped = 0U;
   rb->high_watermark = 0U;
+  rb->last_write_tick = 0U;
 }
 
 /* Discard all buffered bytes. Called by the logger when a new SD session
@@ -1239,6 +1299,7 @@ static void RingBuf_Reset(AppRingBuffer_t *rb)
   rb->rd_idx = rb->wr_idx;
   rb->dropped = 0U;
   rb->high_watermark = 0U;   /* per-session peak fill for diagnostics */
+  rb->last_write_tick = 0U;  /* 写时间封顶基准,按会话清零 */
 }
 
 static uint32_t RingBuf_Available(const AppRingBuffer_t *rb)
@@ -1278,6 +1339,22 @@ static uint32_t RingBuf_Write(AppRingBuffer_t *rb, const uint8_t *src, uint32_t 
   rb->wr_idx = wr;
   uint32_t avail = RingBuf_Available(rb);
   if (avail > rb->high_watermark) rb->high_watermark = avail;
+
+  /* ★事件驱动唤醒(边沿触发):本环攒过唤醒阈值时唤醒 logger 排空。阈值=min(WRITE_BLOCK,
+   * 3/4环),与 LoggerDrainRing 的 gate 一致 → logger 醒来即有满块可写。无状态边沿:写前
+   * avail=(avail-len),仅在 未过→过 的那一次 release,避免每次写都 release 淹没信号量。
+   * 计数信号量多余 release 也被 logger 一次排空,故偶发重复无害。s_logger_wake==NULL(初始化
+   * 前)或非会话期的 release 也无害(logger 醒来发现无会话/无数据即继续睡)。mic 走此函数,在
+   * SAI ISR 中 release —— osSemaphoreRelease 是 ISR 安全的(项目 EXTI ISR 已用同款)。 */
+  {
+    uint32_t wake_gate = (rb->size * 3U) / 4U;
+    if (wake_gate > APP_SD_WRITE_BLOCK) wake_gate = APP_SD_WRITE_BLOCK;
+    uint32_t prev = avail - len;
+    if ((prev < wake_gate) && (avail >= wake_gate) && (s_logger_wake != NULL))
+    {
+      (void)osSemaphoreRelease(s_logger_wake);
+    }
+  }
   return len;
 }
 
@@ -1289,21 +1366,37 @@ uint32_t AppRing_WriteMic(const uint8_t *src, uint32_t len)
   return RingBuf_Write(&g_ring_mic, src, len);
 }
 
-/* Return pointer to next contiguous chunk of unread bytes (no wrap), capped
- * at APP_RING_FLUSH_CHUNK. Caller calls RingBuf_Consume after a successful
- * f_write to advance rd_idx. */
-static uint32_t RingBuf_PeekContiguous(AppRingBuffer_t *rb, const uint8_t **out_ptr, uint32_t *out_len)
+/* F1(消除环绕截断,降 PROGRAMMING 次数):把最多 cap 字节从环拷进 dst,**跨越环绕**
+ * (rd 接近环尾时分两段 memcpy 拼成一块),返回实际拷贝字节数。旧 PeekContiguous 只到
+ * 环尾就截断 → wrap 处被迫小写 → 平均每次写仅 11KB(远小于 64KB 上限)→ 写次数暴涨 →
+ * 91.7% 时间耗在每次写的固定 PROGRAMMING 等待(实测诊断,见
+ * docs/.../2026-07-08-dropframe-opportunistic-write.md §8)。跨环绕拷贝后单次写接近满
+ * cap → 写次数大降 → PROGRAMMING 总时间降 → 掉帧降。拷进私有 bounce,IDMA 源静态、
+ * 与生产者解耦(同旧 memcpy 语义)。返回 0 = 环空。 */
+static uint32_t RingBuf_CopyToBounce(AppRingBuffer_t *rb, uint8_t *dst, uint32_t cap)
 {
-  if (rb == NULL || rb->data == NULL || out_ptr == NULL || out_len == NULL) return 0U;
+  if (rb == NULL || rb->data == NULL || dst == NULL || cap == 0U) return 0U;
   uint32_t wr = rb->wr_idx;
   uint32_t rd = rb->rd_idx;
   if (wr == rd) return 0U;
 
-  uint32_t span = (wr > rd) ? (wr - rd) : (rb->size - rd);
-  if (span > APP_RING_FLUSH_CHUNK) span = APP_RING_FLUSH_CHUNK;
-  *out_ptr = &rb->data[rd];
-  *out_len = span;
-  return span;
+  uint32_t avail = (wr > rd) ? (wr - rd) : (rb->size - rd + wr);
+  /* cap = 调用方(LoggerDrainRing)算好的目标字节数,已保证扇区对齐(正常写)或为末块余量
+   * (会话停止)。此处 want=min(avail,cap):正常情况 avail>=cap → want=cap(对齐块);cap 已夹到
+   * WRITE_BLOCK(32KB,=bounce 容量)。avail 与 cap 同为 512 倍时 want 仍 512 倍,保持对齐。 */
+  uint32_t want = (avail > cap) ? cap : avail;
+
+  uint32_t first = rb->size - rd;        /* 环尾前的连续段长度 */
+  if (first >= want)
+  {
+    memcpy(dst, &rb->data[rd], want);    /* 无环绕,一段 */
+  }
+  else
+  {
+    memcpy(dst, &rb->data[rd], first);             /* 环尾段 */
+    memcpy(dst + first, &rb->data[0], want - first); /* 环首段,拼成一块 */
+  }
+  return want;
 }
 
 static void RingBuf_Consume(AppRingBuffer_t *rb, uint32_t len)
@@ -1312,16 +1405,26 @@ static void RingBuf_Consume(AppRingBuffer_t *rb, uint32_t len)
   rb->rd_idx = (rb->rd_idx + len) % rb->size;
 }
 
-/* Private bounce buffer for SD flushes. The logger copies each peeked ring
- * chunk here BEFORE f_write so the SDMMC IDMA never reads directly from the
- * live ring. This decouples SD timing (PROGRAMMING stalls, abort/retry, the
- * DeInit/re-init recovery path) from the producer: the DMA source stays
- * perfectly static for the whole transfer even if the write is retried.
- * One buffer is reused across all files — the logger drains serially and each
- * f_write blocks on the SD DMA-complete semaphore before the next starts. */
-static uint8_t s_sd_bounce[APP_RING_FLUSH_CHUNK];
+/* ===== 双缓冲块池存储(2026-07-14) — 类型/句柄声明已上移到文件前置声明区。 =====
+ * N 个 32KB 连续对齐块。LoggerDrainRing 取空闲块 memcpy 后交写线程落盘。
+ * 32 字节对齐:IDMA 对 SDMMC FIFO 做 32-bit 访问,源缓冲须字长对齐(H2 防护,同旧 bounce)。 */
+static uint8_t s_block_pool[APP_SD_BLOCK_POOL_N][APP_SD_WRITE_BLOCK] __attribute__((aligned(32)));
+/* 写线程句柄 sdWriterTaskHandle 随 sdWriterTask_attributes 一起定义(沿用项目 *TaskHandle 惯例) */
 
-/* Drain one contiguous chunk from a ring to its file via s_sd_bounce.
+/* 创建块池队列 + 收尾信号量,并把 N 个块索引全部塞进 FreeQ。由 MX_FREERTOS_Init 调用。 */
+static void AppSdBlockPoolInit(void)
+{
+  s_free_q  = osMessageQueueNew(APP_SD_BLOCK_POOL_N, sizeof(uint8_t), NULL);
+  s_write_q = osMessageQueueNew(APP_SD_WRITEQ_LEN, sizeof(AppSdWriteMsg_t), NULL);
+  s_sd_writer_done = osSemaphoreNew(1, 0, NULL);
+  for (uint8_t i = 0U; i < APP_SD_BLOCK_POOL_N; i++)
+  {
+    (void)osMessageQueuePut(s_free_q, &i, 0U, 0U);
+  }
+}
+
+/* Drain one contiguous chunk from a ring into a free pool block, then enqueue it
+ * to the writer task (no direct f_write).
  * min_flush = batching threshold: if fewer than min_flush bytes are buffered AND
  * the ring is below half full, skip the write so data accumulates into a large
  * block first. Each SD write carries a big fixed cost (command + card
@@ -1337,34 +1440,144 @@ static uint8_t s_sd_bounce[APP_RING_FLUSH_CHUNK];
 static int LoggerDrainRing(AppRingBuffer_t *rb, uint8_t file_idx, uint32_t min_flush,
                            uint32_t *rows_since_sync, FRESULT *out_res)
 {
-  const uint8_t *p; uint32_t n;
-  /* Batching gate: hold back small writes unless the ring is past half full
-   * (then drain to bound latency / prevent overflow). min_flush==0 bypasses. */
-  if (min_flush != 0U)
-  {
-    uint32_t avail = RingBuf_Available(rb);
-    if (avail < min_flush && avail < (rb->size / 2U)) return 0;
-  }
-  if (RingBuf_PeekContiguous(rb, &p, &n) == 0U) return 0;
+  uint32_t n;
+  uint32_t avail = RingBuf_Available(rb);
+  if (avail == 0U) return 0;
 
-  memcpy(s_sd_bounce, p, n);
-  FRESULT r = FatFs_SD_LoggerWriteFileIndex(file_idx, s_sd_bounce, n);
-  *out_res = r;
-
-  if (r == FR_OK)
+  /* ★2026-07-09 扇区对齐写(借鉴 DATALOG1 每次 f_write 恒为整数扇区块)。取代旧"攒到 gate
+   * 写任意字节数"。核心:除会话停止的末块外,【每次写的字节数恒为 512 的整数倍】→ 写整数个
+   * 扇区,零 FIL 窗口 read-modify-write(_FS_TINY=0 时非对齐尾部会触发回读扇区),f_write 直接
+   * 走 disk_write 多块路径 → 提吞吐、消 IDMA 512 边界复写。
+   * 决策:
+   *  (a) 会话停止(min_flush==0):写全部 avail(末块,允许非对齐——文件收尾,CSV 靠 \n 无害)。
+   *  (b) 否则:aligned = avail 向下取整到 512。gate = min(WRITE_BLOCK, size/2 取整到512)——大环
+   *      攒到 32KB、小环攒到半环才写,减少小写。aligned>=gate 或已超时(低速环)则写 aligned;
+   *      否则继续攒。aligned 恒 512 倍 → 扇区对齐;余量(avail%512)留环里下轮再拼。 */
+  uint32_t want;
+  if (min_flush == 0U)
   {
-    RingBuf_Consume(rb, n);
-    *rows_since_sync += n;
-    return 1;
+    want = avail;                                   /* (a) 会话停止:全排空(末块) */
   }
-  if ((r == FR_NOT_ENABLED) && (file_idx == FATFS_SD_FILE_MIC_WAV))
+  else
   {
-    /* WAV not open but the SAI ISR keeps filling g_ring_mic — drop the audio
-     * and keep the drain loop healthy (matches prior behaviour). */
-    RingBuf_Consume(rb, n);
+    uint32_t aligned = avail - (avail % APP_SD_SECTOR);   /* 向下取整到扇区 */
+    if (aligned == 0U) return 0;                    /* 不足一扇区:继续攒 */
+
+    /* 攒批阈值 gate:恢复为 3/4 环(与扇区对齐前的老逻辑一致),而非半环——半环让小环
+     * (H3 16K/QMA 32K/MAG 16K)只攒到 8-16KB 就写,块太小 → 写次数升、PROGRAMMING 摊薄少
+     * → 吞吐降(实测 22-23 会话块从 13KB→8.5KB、落盘 648→626KB/s、掉帧升)。3/4 环让小环
+     * 攒到 12/24/12KB,大环封顶 FLUSH_CHUNK(64KB)。全部取整到扇区。 */
+    uint32_t gate = (rb->size * 3U) / 4U;
+    /* ★2026-07-13 封顶改 APP_SD_WRITE_BLOCK(32KB),与生产者 wake_gate(RingBuf_Write
+     * 里 min(3/4环,WRITE_BLOCK))【完全一致】。原封顶 FLUSH_CHUNK(64KB)导致大环(QMA扩到
+     * 64KB后 drain_gate=48KB)与 wake_gate(封顶32KB)裂开:环攒到32KB唤醒logger,但logger
+     * 见 aligned(32KB)<gate(48KB)→不写继续攒;而32KB那次wake边沿已用掉,涨到48KB不再唤醒
+     * → QMA卡在48-64KB靠50ms超时兜底,高负载下溢出→实测QMA中段落盘停止掉25-63%。封顶对齐
+     * 后:任何环攒到32KB即写,wake与drain同步,消除"唤醒却不写、不写又不唤醒"窗口。 */
+    if (gate > APP_SD_WRITE_BLOCK) gate = APP_SD_WRITE_BLOCK;  /* 封顶32KB,与wake_gate一致 */
+    gate -= (gate % APP_SD_SECTOR);                 /* 取整到扇区 */
+    if (gate == 0U) gate = APP_SD_SECTOR;           /* 极小环兜底:至少一扇区 */
+
+    uint32_t now = osKernelGetTickCount();
+    uint8_t aged = (uint8_t)((rb->last_write_tick != 0U) &&
+                             ((uint32_t)(now - rb->last_write_tick) >= APP_SD_WRITE_MAX_AGE_TICKS));
+    if (rb->last_write_tick == 0U) rb->last_write_tick = now;  /* 首次起计时 */
+
+    if ((aligned < gate) && !aged) return 0;        /* 不满 gate 且未超时:继续攒 */
+    want = aligned;                                 /* 写扇区对齐块(超时也只写对齐部分) */
+  }
+
+  /* 夹到块容量(32KB,512 倍 → 保持扇区对齐);超出余量下一轮 drain 继续。 */
+  if (want > APP_SD_WRITE_BLOCK) want = APP_SD_WRITE_BLOCK;
+
+  /* 取空闲块(非阻塞)。取不到 = 池空背压 → 本环本轮不写,数据留环靠环兜底(与旧"环满drop"等价)。 */
+  uint8_t blk;
+  if (osMessageQueueGet(s_free_q, &blk, NULL, 0U) != osOK)
+  {
+    return 0;   /* 无空闲块:背压,下轮再来 */
+  }
+
+  n = RingBuf_CopyToBounce(rb, s_block_pool[blk], want);
+  if (n == 0U)
+  {
+    (void)osMessageQueuePut(s_free_q, &blk, 0U, 0U);  /* 空环:归还块 */
     return 0;
   }
-  return -1;
+
+  /* ★消费即释放:memcpy 进块后立即 Consume 腾空环(防溢出的关键动作),不等写成功。
+   * 块此刻成为数据唯一持有者,交给写线程落盘。 */
+  RingBuf_Consume(rb, n);
+  *rows_since_sync += n;
+  rb->last_write_tick = osKernelGetTickCount();
+
+  AppSdWriteMsg_t m = { .type = (uint8_t)APP_SDMSG_DATA, .block_idx = blk,
+                        .file_idx = file_idx, .len = n };
+  /* 压 WriteQ:队列已按 N+余量设深。块数=N≤队列容量,正常不满;用 osWaitForever 兜底保证不丢块。 */
+  (void)osMessageQueuePut(s_write_q, &m, 0U, osWaitForever);
+  *out_res = FR_OK;
+  return 1;
+}
+
+/* 专职 SD 写线程:WriteQ 的唯一消费者,FatFs 的唯一访问者。按 FIFO 串行执行落盘动作,
+ * 保证 FatFs 单线程不变量。写数据块前 __DMB() 确保源块对 IDMA 可见(M33 写缓冲,H1 防护)。 */
+static void StartSdWriterTask(void *argument)
+{
+  (void)argument;
+  AppSdWriteMsg_t msg;
+  for (;;)
+  {
+    if (osMessageQueueGet(s_write_q, &msg, NULL, osWaitForever) != osOK) continue;
+
+    switch ((AppSdMsgType_t)msg.type)
+    {
+      case APP_SDMSG_DATA:
+      {
+        __DMB();   /* H1:源块已落 SRAM,再启动 IDMA(同旧 LoggerDrainRing) */
+        FRESULT r = FatFs_SD_LoggerWriteFileIndex(msg.file_idx,
+                                                  s_block_pool[msg.block_idx], msg.len);
+        /* MIC 文件在 WAV 未打开时返回 FR_NOT_ENABLED:SAI ISR 仍在灌 g_ring_mic,
+         * 属预期的音频丢弃(改造前 LoggerDrainRing 静默消费),不算写失败、不刷屏。 */
+        if ((r != FR_OK) &&
+            !((r == FR_NOT_ENABLED) && (msg.file_idx == FATFS_SD_FILE_MIC_WAV)))
+        {
+          printf("[SdWriter] write fail idx=%u %s (%d)\r\n",
+                 (unsigned int)msg.file_idx, FatFs_SD_ResultToString(r), (int)r);
+          AppFlowStatsRecordWriteFailure();
+        }
+        /* 无论成败(含预期的 MIC 丢弃)都归还块索引,防块泄漏。 */
+        (void)osMessageQueuePut(s_free_q, &msg.block_idx, 0U, 0U);
+        break;
+      }
+      case APP_SDMSG_SYNC:
+        (void)FatFs_SD_LoggerSync();
+        break;
+      case APP_SDMSG_WAVCKPT:
+        (void)FatFs_SD_WavCheckpoint();
+        break;
+      case APP_SDMSG_DEVCFG:
+        (void)DeviceCfg_WriteCurrentToSD();
+        break;
+      case APP_SDMSG_STOP:
+        FatFs_SD_LoggerStop();
+        (void)osSemaphoreRelease(s_sd_writer_done);   /* 解除收尾屏障 */
+        break;
+      case APP_SDMSG_APPENDFRAME:
+      {
+        /* 逐帧路径写 LSM 温度行到 TMP_LOW。改造前 logger 侧写失败会停会话;异步化后与 DATA
+         * 一致:记录写失败并打印(供审计),但不停会话(温度是低价值诊断,不值得因它中止整会话)。 */
+        FRESULT r = FatFs_SD_LoggerAppendFrame(&msg.frame);
+        if (r != FR_OK)
+        {
+          printf("[SdWriter] append fail frame=%lu %s (%d)\r\n",
+                 (unsigned long)msg.frame.frame_id, FatFs_SD_ResultToString(r), (int)r);
+          AppFlowStatsRecordWriteFailure();
+        }
+        break;
+      }
+      default:
+        break;
+    }
+  }
 }
 
 static uint32_t AppSnapshotComputeMaxDeltaMs(const AppSensorSnapshot_t *snapshot)
@@ -1780,6 +1993,29 @@ void StartLsm6dsoxTask(void *argument)
       }
     }
 
+    /* ★2026-07-11 只读诊断(APP_LSM_STALL_PROBE):抓 LSM 链 ~周期性阻塞在哪一步。
+     * 用真实时钟 AppDwtUs()(合成 timestamp 推不出真实阻塞时刻)。测三段:①等信号量
+     * ②读+解析+写环整段 ③本轮总耗时。任一超阈值打印时刻/耗时/两环余量。默认关,零开销。
+     * 测完设 0U 移除。DWT ~26.8s 回绕,单段耗时远小于此,安全。 */
+#ifndef APP_LSM_STALL_PROBE
+#define APP_LSM_STALL_PROBE 1U   /* ★2026-07-14 重开:抓 LSM/MIC ~9-10% 掉帧的 2.5s gap 阻塞源。
+                                  * LSM链本身已确认健康(cyc~23ms/fifoMax~256),真凶在 logger。新增
+                                  * [LoggerLoop] 探针给整个 drain 循环计时(见下),补"千刀万剐"盲区:
+                                  * SLC耗尽后单次写~130ms 卡在 150ms 阈值下,现有 [LoggerBlk] write 不触发,
+                                  * 但多次130ms写连续堆积会撑爆 LSM 环。测完设 0U 移除。 */
+#endif
+#if (APP_LSM_STALL_PROBE != 0U)
+    /* ★2026-07-11 v3:全部改用 HAL_GetTick(ms,TIM6,无回绕)——v2 用 AppDwtUs 每26.8s回绕一次,
+     * 打出 sem=42亿us 假阳性刷屏。1ms 分辨率足够抓 >20ms 阻塞。已确认 LSM 本身健康(cyc~23ms、
+     * fifoMax~256 从不逼近512),故本探针留着只为对照,真凶在 logger(见 [LoggerBlk])。 */
+    uint32_t probe_ms0 = HAL_GetTick();
+    uint32_t probe_t_sem0 = probe_ms0;
+    static uint32_t probe_prev_loop_ms = 0U;
+    uint32_t probe_cyc_ms = (probe_prev_loop_ms == 0U) ? 0U : (probe_ms0 - probe_prev_loop_ms);
+    probe_prev_loop_ms = probe_ms0;
+    uint16_t probe_fifo_max = 0U;
+#endif
+
     /* Block on FIFO watermark interrupt (released by EXTI1 ISR on PB1).
      * Use 100ms timeout so we still poll the FIFO level periodically — this
      * also covers any interrupt we might miss during heavy SPI bus traffic. */
@@ -1789,6 +2025,11 @@ void StartLsm6dsoxTask(void *argument)
       /* Timeout: still check FIFO — sensor may have produced data without us
        * catching the rising edge. */
     }
+
+#if (APP_LSM_STALL_PROBE != 0U)
+    uint32_t probe_sem_ms = HAL_GetTick() - probe_t_sem0;   /* 等信号量耗时(ms) */
+    uint32_t probe_t_drain0 = HAL_GetTick();                /* 排空段起点(ms) */
+#endif
 
     /* Drain FIFO completely — keep reading 256-word chunks until below wtm.
      * Each chunk is parsed into CSV rows and written to the LSM_IMU ring
@@ -1802,6 +2043,9 @@ void StartLsm6dsoxTask(void *argument)
       {
         break;
       }
+#if (APP_LSM_STALL_PROBE != 0U)
+      if (fifo_level > probe_fifo_max) probe_fifo_max = fifo_level;   /* 记录本轮 FIFO 峰值 */
+#endif
       uint16_t to_read = (fifo_level > 256U) ? 256U : fifo_level;
 
       if (LSM6DSOX_FIFO_ReadBlock(fifo_buf, to_read) != HAL_OK)
@@ -1870,20 +2114,30 @@ void StartLsm6dsoxTask(void *argument)
 
           if (output_format == ACQ_OUTPUT_BIN)
           {
-            /* BIN 模式:合并帧不拆(acc+gyr 同一结构),写 acc 环 → LSM_ACC 文件。
-             * gyr 环在 BIN 模式不用。 */
-            SensorBinFrame_LSM_t bin_frame;
-            bin_frame.frame_id = fid;
-            bin_frame.timestamp_us = lsm_ts_us;
-            bin_frame.acc_x = cur_acc[0];
-            bin_frame.acc_y = cur_acc[1];
-            bin_frame.acc_z = cur_acc[2];
-            bin_frame.gyr_x = cur_gyr[0];
-            bin_frame.gyr_y = cur_gyr[1];
-            bin_frame.gyr_z = cur_gyr[2];
-            bin_frame.crc32 = SensorBin_CalcCRC32(&bin_frame, sizeof(bin_frame) - 4U);
+            /* BIN 模式:acc/gyr 拆两条独立记录(各 22B、各自带 timestamp,自包含),
+             * 共用同一 frame_id 做对齐键 → ACC_LOW / GYR_LOW 两文件(与 CSV 拆分一致)。
+             * ★ 对齐保护(A2):仅当两环都有空间时才双写,否则整对丢弃。满配溢出时若
+             * 只丢一侧会破坏 frame_id 成对性(实测两文件 frame_id 集合发散上万条),
+             * 原子成对写保证两文件 frame_id 集合恒等——与环尺寸无关。 */
+            if ((RingBuf_FreeSpace(&g_ring_lsm_acc) >= sizeof(SensorBinFrame_LSMAcc_t)) &&
+                (RingBuf_FreeSpace(&g_ring_lsm_gyr) >= sizeof(SensorBinFrame_LSMGyr_t)))
+            {
+              SensorBinFrame_LSMAcc_t acc_frame;
+              acc_frame.frame_id = fid;   /* ts 已去除:PC 端由 base+fid×interval 还原 */
+              acc_frame.acc_x = cur_acc[0];
+              acc_frame.acc_y = cur_acc[1];
+              acc_frame.acc_z = cur_acc[2];
+              acc_frame.crc32 = SensorBin_CalcCRC32(&acc_frame, sizeof(acc_frame) - 4U);
+              RingBuf_Write(&g_ring_lsm_acc, (const uint8_t *)&acc_frame, sizeof(acc_frame));
 
-            RingBuf_Write(&g_ring_lsm_acc, (const uint8_t *)&bin_frame, sizeof(bin_frame));
+              SensorBinFrame_LSMGyr_t gyr_frame;
+              gyr_frame.frame_id = fid;   /* ts 已去除:PC 端由 base+fid×interval 还原 */
+              gyr_frame.gyr_x = cur_gyr[0];
+              gyr_frame.gyr_y = cur_gyr[1];
+              gyr_frame.gyr_z = cur_gyr[2];
+              gyr_frame.crc32 = SensorBin_CalcCRC32(&gyr_frame, sizeof(gyr_frame) - 4U);
+              RingBuf_Write(&g_ring_lsm_gyr, (const uint8_t *)&gyr_frame, sizeof(gyr_frame));
+            }
           }
           else
           {
@@ -1918,11 +2172,15 @@ void StartLsm6dsoxTask(void *argument)
             gyrbuf[goff++] = '\n';
 
             /* Guard: acc 行须 4 逗号(5列)、gyr 行须 3 逗号(4列)。~0.5% 行会莫名多/
-             * 缺逗号,双写前都校验;任一坏则整对丢弃(宁可丢一对也不破坏对齐/文件)。 */
+             * 缺逗号,双写前都校验;任一坏则整对丢弃(宁可丢一对也不破坏对齐/文件)。
+             * ★ 对齐保护(A2):再加两环空间检查,仅当两环都容得下才双写,否则整对丢弃
+             * ——满配溢出时只丢一侧会使 ACC_LOW/GYR_LOW 的 frame_id 集合发散。 */
             uint32_t anc = 0U, gnc = 0U;
             for (uint32_t k = 0U; k < aoff - 2U; k++) { if (rowbuf[k] == ',') anc++; }
             for (uint32_t k = 0U; k < goff - 2U; k++) { if (gyrbuf[k] == ',') gnc++; }
-            if (anc == 4U && gnc == 3U)
+            if (anc == 4U && gnc == 3U &&
+                (RingBuf_FreeSpace(&g_ring_lsm_acc) >= aoff) &&
+                (RingBuf_FreeSpace(&g_ring_lsm_gyr) >= goff))
             {
               RingBuf_Write(&g_ring_lsm_acc, (const uint8_t *)rowbuf, aoff);
               RingBuf_Write(&g_ring_lsm_gyr, (const uint8_t *)gyrbuf, goff);
@@ -1982,6 +2240,26 @@ void StartLsm6dsoxTask(void *argument)
         (void)AppFrameBufferPush(&push_frame);
       }
     }
+
+#if (APP_LSM_STALL_PROBE != 0U)
+    /* 只读诊断收尾:本轮 drain 段耗时 + 整轮耗时。任一超阈值(排空>30ms 或整轮>60ms,
+     * 6664Hz 下正常一轮 <~5ms)打印:相对启动秒 / 等信号量us / 排空us / 整轮us / 两环余量。
+     * ★关键判据:若阻塞在"等信号量"(probe_sem_us 大)→ LSM 没被调度到(CPU饿死/被抢);
+     * 若阻塞在"排空"(drain_us 大)→ FIFO读/解析/RingBuf_Write 里某步慢(SPI?环满自旋?)。 */
+    uint32_t probe_drain_ms = HAL_GetTick() - probe_t_drain0;
+    /* v3 触发:①相邻两轮间隔 cyc>50ms(正常~23ms,超说明LSM整轮被延迟)②FIFO峰值>480(逼近512满
+     * →硬件FIFO溢出)③排空>50ms。全 ms 制,无回绕假阳性。 */
+    if ((probe_cyc_ms > 50U) || (probe_fifo_max > 480U) || (probe_drain_ms > 50U))
+    {
+      printf("[LSMstall] t=%lu.%03lus cyc=%lums fifoMax=%u sem=%lums drain=%lums accFree=%lu gyrFree=%lu\r\n",
+             (unsigned long)(probe_ms0 / 1000U),
+             (unsigned long)(probe_ms0 % 1000U),
+             (unsigned long)probe_cyc_ms, (unsigned)probe_fifo_max,
+             (unsigned long)probe_sem_ms, (unsigned long)probe_drain_ms,
+             (unsigned long)RingBuf_FreeSpace(&g_ring_lsm_acc),
+             (unsigned long)RingBuf_FreeSpace(&g_ring_lsm_gyr));
+    }
+#endif
   }
 #endif
 }
@@ -2097,8 +2375,7 @@ void StartH3lis100dlTask(void *argument)
       {
         /* BIN 模式:构建二进制帧(使用原始 int16_t,避免 float 精度损失) */
         SensorBinFrame_H3_t bin_frame;
-        bin_frame.frame_id = fid;
-        bin_frame.timestamp_us = h3_ts_us;
+        bin_frame.frame_id = fid;   /* ts 已去除:PC 端由 base+fid×interval 还原 */
         bin_frame.acc_x = (int16_t)data.acc_mg[0];  /* mg → int16_t */
         bin_frame.acc_y = (int16_t)data.acc_mg[1];
         bin_frame.acc_z = (int16_t)data.acc_mg[2];
@@ -2303,8 +2580,7 @@ void StartQma6100pTask(void *argument)
       {
         /* BIN 模式:构建二进制帧 */
         SensorBinFrame_QMA_t bin_frame;
-        bin_frame.frame_id = fid;
-        bin_frame.timestamp_us = qma_ts_us;
+        bin_frame.frame_id = fid;   /* ts 已去除:PC 端由 base+fid×interval 还原 */
         bin_frame.acc_x = rx;
         bin_frame.acc_y = ry;
         bin_frame.acc_z = rz;
@@ -2584,6 +2860,8 @@ void StartLoggerTask(void *argument)
   FRESULT result;
   uint32_t rows_since_sync = 0U;
   uint8_t sd_file_open = 0U;
+  uint32_t wav_next_ckpt = 0U;  /* B3: 下次 WAV 头 checkpoint 的 tick */
+  uint32_t s_temp_last_tick = 0U;  /* ★2026-07-15 温度(TMP_LOW)限流:上次入队 APPENDFRAME 的 tick */
   AppSensorFrame_t frame;
 
   (void)argument;
@@ -2607,16 +2885,48 @@ void StartLoggerTask(void *argument)
    * with zero ring drops, so the PIO path sustains throughput here.
    * NOTE: the polling write path masks IRQs for the transfer + PROGRAMMING wait
    * (see SD_disk_write); fine with this card/clock, watch it on slower cards. */
-  SD_SetDmaMode(0U);
+  /* A/B 开关:默认 0=轮询(零损坏已验证 CKBX0080/0081)。
+   * ★2026-07-09 新试点 = IDMA + HWFC 组合(1U):调研查明 IDMA 损坏机制 = TX FIFO underrun
+   * (IDMA 走 AHB 总线搬数据进发送 FIFO,满配时总线/中断挤占让 IDMA 送晚一拍→FIFO 空→卡仍按
+   *  SDMMC_CK 收→错位字节;只在满配+高速通道损坏,完美对上 underrun 负载相关特征)。HWFC
+   * (SDMMC_CLKCR 硬件流控,fbeb5c3 才加,当年 IDMA 测试时是关的!)会在 FIFO 将欠载时自动
+   *  暂停 SDMMC_CK 等 IDMA 补上——正是硬件级根治 underrun 的机制。故"IDMA + HWFC 开"这个组合
+   *  历史从未测过。H1 __DMB + H2 32B 对齐仍在(与本假设正交,保留)。
+   * 测法:满配96k长录≥30min,读卡逐行比对坏行率(对照 CKBX0079 的 0.40%)。=0 → 损坏根治,
+   *  IDMA 可安全用(注:仍不解决掉帧,掉帧瓶颈是卡 PROGRAMMING 非传输)。仍坏 → 彻底钉死。
+   * 测完按结论决定是否保留;宏改回 0U 即恢复零损坏轮询路径。 */
+#ifndef APP_SD_USE_IDMA
+#define APP_SD_USE_IDMA 1U   /* ★IDMA+HWFC 损坏判别试点开启中(2026-07-09)。测完按结论回退/保留 */
+#endif
+  SD_SetDmaMode(APP_SD_USE_IDMA);
   HAL_NVIC_SetPriority(SDMMC1_IRQn, 6, 0);
   HAL_NVIC_EnableIRQ(SDMMC1_IRQn);
-  printf("[Logger] SDMMC POLLING mode (corruption-free SD writes)\r\n");
+  printf("[Logger] SDMMC %s mode\r\n",
+         (APP_SD_USE_IDMA != 0U) ? "IDMA + HWFC (underrun-fix test)"
+                                 : "POLLING (corruption-free SD writes)");
+
+  /* ★SD 写吞吐基准(默认关):开 APP_SD_BENCH=1 时,logger 启动即跑一次裸卡写基准,
+   * 打印各块大小×sync策略 MB/s 后死循环挂起(不进采集)。测完关此宏恢复正常。
+   * 用于钉死"0.65MB/s 是卡物理墙 还是 我们写太碎/f_sync 拖累"。 */
+#ifndef APP_SD_BENCH
+#define APP_SD_BENCH 0U   /* 基准已测完(2026-07-10):卡6MB/s、交织5.8、f_sync无影响 → SD写不是瓶颈。恢复正常采集。 */
+#endif
+#if (APP_SD_BENCH != 0U)
+  FatFs_SD_RunWriteBenchmark(s_block_pool[0], APP_SD_WRITE_BLOCK);   /* 复用块池[0]做源,内部死循环不返回 */
+#endif
 
   for (;;)
   {
     AppAcqControl_t acq;
     uint8_t sd_session_active;
     uint8_t acq_running;
+
+    /* ★事件驱动:阻塞等"数据就绪"唤醒,50ms 超时兜底。取代旧的 osDelay(2) 忙轮询 —— logger
+     * 平时睡,生产者(RingBuf_Write 跨阈值,含 mic ISR)唤醒它。50ms 超时保证:低速环(env/mag)
+     * 攒不满唤醒阈值时靠超时被扫到(走 LoggerDrainRing aged 分支)、周期 sync/WAV checkpoint、
+     * 会话启停检测都不饿死(这些本是秒级周期,50ms 足够)。空闲期也靠超时每 50ms 醒一次跑会话
+     * 检查(替代原 idle 的 osDelay(10))。借鉴 DATALOG1 SDM_Thread osMessageGet 阻塞唤醒。 */
+    (void)osSemaphoreAcquire(s_logger_wake, 50U);
 
     AppAcqCheckAutoStop();
     AppAcqGetCopy(&acq);
@@ -2686,6 +2996,8 @@ void StartLoggerTask(void *argument)
 
         sd_file_open = 1U;
         rows_since_sync = 0U;
+        wav_next_ckpt = osKernelGetTickCount() + 30000U;  /* B3: 首个 WAV checkpoint 在 ~30s 后 */
+        s_temp_last_tick = 0U;   /* ★温度限流按会话清零:0=首帧立即写(会话起点留一条温度) */
         SD_ResetWriteStats();   /* route-2: count SDMMC write events per session */
         s_session_start_us = AppTime_GetEpochUs();  /* route-2: real-ODR measurement base */
         s_qma_prev_valid = 0U;  /* reset QMA dedup state for the new session */
@@ -2705,154 +3017,220 @@ void StartLoggerTask(void *argument)
       }
     }
 
-    /* Round-robin drain of the four ring buffers. Each chunk is copied into the
-     * private s_sd_bounce buffer (inside LoggerDrainRing) before f_write, so the
-     * SDMMC IDMA never reads from a live ring — see the helper's comment. Every
+    /* 机会式写入门控(SdFat 思路,降满配掉帧):卡在 PROGRAMMING/GC 忙时,发起 SD 写会
+     * 死等其退出(掉帧根因——drain 串行堆积、慢通道环溢出)。改为:写前先查 SD_IsCardBusy()
+     * (读 BUSYD0 硬件位,非阻塞),卡忙则本轮不写、短让出让传感器继续把数据攒进环,只在卡
+     * 空闲的间隙 drain → 消除"等卡"浪费。默认开启;定 APP_SD_OPPORTUNISTIC=0 可回退到原
+     * 无条件 drain 做 A/B 对照。见 docs/.../2026-07-08-dropframe-opportunistic-write.md。 */
+/* ★ 实测已证无效(2026-07-09):满配持续高压下卡几乎一直忙,门控只是频繁 break+osDelay
+ * 空转,反让掉帧更差(H3 13→15%/QMA 19→22%)。默认关闭。真根因是写太碎→PROGRAMMING
+ * 次数多(见 F1/F3),不是"等卡浪费 CPU"。保留开关供参考,勿开。 */
+#ifndef APP_SD_OPPORTUNISTIC
+#define APP_SD_OPPORTUNISTIC 0U
+#endif
+
+    /* Round-robin drain of the four ring buffers. Each chunk is copied into a
+     * free pool block (inside LoggerDrainRing) then handed to the writer task, so
+     * the SDMMC IDMA never reads from a live ring — see the helper's comment. Every
      * ring is checked each cycle so no stream starves under heavy load. */
     {
+      /* 表驱动 round-robin drain(消除 7 处重复,并支持每个 ring 写前的机会式门控)。
+       * 顺序与原实现一致:LSM_ACC, LSM_GYR, QMA, H3, MIC, AHT_ENV, MAG。 */
+      static const struct { AppRingBuffer_t *rb; uint8_t file_idx; const char *name; }
+        k_drain_list[] = {
+          { &g_ring_lsm_acc, 0U,                     "LSM_ACC" },
+          { &g_ring_lsm_gyr, FATFS_SD_FILE_LSM_GYR,  "LSM_GYR" },
+          { &g_ring_qma_acc, 3U,                     "QMA_ACC" },
+          { &g_ring_h3_acc,  2U,                     "H3_ACC"  },
+          { &g_ring_mic,     FATFS_SD_FILE_MIC_WAV,  "MIC.WAV" },
+          { &g_ring_aht_env, 4U,                     "AHT_ENV" },
+          { &g_ring_mag,     5U,                     "MAG"     },
+        };
+      const uint32_t k_drain_n = sizeof(k_drain_list) / sizeof(k_drain_list[0]);
+
       uint8_t did_work = 1;
+      uint8_t write_failed = 0;
+#if (APP_LSM_STALL_PROBE != 0U)
+      /* ★2026-07-14 整个 drain 循环计时(补"千刀万剐"盲区)。SLC耗尽后单次写~130ms 卡在
+       * [LoggerBlk] 的 150ms 阈值下不触发,但一轮里多次 130ms 写连续堆积(logger 在此 while
+       * 里连写不睡)会占住数百 ms~秒级,期间 LSM 环无人排空→溢出。这里统计本轮:总耗时/
+       * 写次数/写字节数,并记录 LSM 两环进入时的余量。判据:
+       *   loop耗时大 + 写多次/字节多 → 千刀万剐持续慢写(带宽缺口,治标只能降产出/换卡);
+       *   loop耗时大 + 写极少/字节少 → logger 被高优先级任务抢占饿死(治标提 logger 优先级)。*/
+      uint32_t probe_loop0 = HAL_GetTick();
+      uint32_t probe_loop_writes = 0U;             /* 本轮实际 f_write 次数(dr>0) */
+      uint32_t probe_loop_rss0 = rows_since_sync;  /* 进入本轮的累计字节基准(LoggerDrainRing 每写 +=n) */
+      uint32_t probe_loop_acc_free0 = RingBuf_FreeSpace(&g_ring_lsm_acc);
+      uint32_t probe_loop_gyr_free0 = RingBuf_FreeSpace(&g_ring_lsm_gyr);
+#endif
       while (did_work && (sd_file_open != 0U) && (AppAcqIsSdSessionActive() != 0U))
       {
-        int dr;
         did_work = 0;
-
-        dr = LoggerDrainRing(&g_ring_lsm_acc, 0U, APP_RING_FLUSH_CHUNK, &rows_since_sync, &result);
-        if (dr < 0)
+        for (uint32_t i = 0U; i < k_drain_n; i++)
         {
-          printf("[Logger] LSM_ACC write fail %s (%d)\r\n",
-                 FatFs_SD_ResultToString(result), (int)result);
-          AppFlowStatsRecordWriteFailure();
-          break;
+#if (APP_SD_OPPORTUNISTIC != 0U)
+          /* 机会式门控:每个 ring 发起写前查卡忙(读 BUSYD0 硬件位,非阻塞)。卡在 GC/
+           * PROGRAMMING 忙时不阻塞式发起写(那会死等,是掉帧根因),直接跳出本轮 drain,
+           * 数据留在环里,下方 osDelay 短让出后重来。逐 ring 查(非仅轮首)可避免"上一次
+           * 写的 PROGRAMMING 未完就阻塞发起下一 ring 写"。绝不 spin 空转等卡。 */
+          if (SD_IsCardBusy() != 0U)
+          {
+            break;
+          }
+#endif
+          /* V2 判别实验(默认关):把所有 ring 的写强制指向同一个普通文件(idx 0),
+           * 总产出满配不变、文件数 7→1 → 隔离"多文件交织 vs 单文件顺序"这一个变量。
+           * 若 V2 下掉帧清零 → 坐实 648KB/s 是交织退化成随机写、非卡物理上限。
+           * ⚠️ 数据是 7 路混写的乱数据,仅测吞吐,不可留用;测完把 APP_SD_V2 设 0 回退。
+           * 见 docs/.../2026-07-08-dropframe-opportunistic-write.md §10。 */
+#ifndef APP_SD_V2
+#define APP_SD_V2 0U   /* V2判别实验已结束(2026-07-09满配):证伪交织假设,单文件顺序写下
+                        * h3/qma/mic 照样重丢 → 648KB/s 是真实持续写上限,非交织退化。已回退。
+                        * 详见 docs/.../2026-07-08-dropframe-opportunistic-write.md §10。 */
+#endif
+#if (APP_SD_V2 != 0U)
+          uint8_t v2_idx = 0U;   /* 全写 g_log_files[0] 单文件 */
+          int dr = LoggerDrainRing(k_drain_list[i].rb, v2_idx,
+                                   APP_RING_FLUSH_CHUNK, &rows_since_sync, &result);
+#else
+#if (APP_LSM_STALL_PROBE != 0U)
+          uint32_t probe_wr0 = HAL_GetTick();
+#endif
+          int dr = LoggerDrainRing(k_drain_list[i].rb, k_drain_list[i].file_idx,
+                                   APP_RING_FLUSH_CHUNK, &rows_since_sync, &result);
+#if (APP_LSM_STALL_PROBE != 0U)
+          uint32_t probe_wr_ms = HAL_GetTick() - probe_wr0;
+          if (probe_wr_ms > 150U)   /* 单次 f_write(≤64KB)阻塞——正常几ms,>150ms=卡在这次写 */
+            printf("[LoggerBlk] %s write %lums @t=%lu.%03lus\r\n",
+                   k_drain_list[i].name, (unsigned long)probe_wr_ms,
+                   (unsigned long)(probe_wr0 / 1000U), (unsigned long)(probe_wr0 % 1000U));
+#endif
+#endif  /* APP_SD_V2 */
+          if (dr < 0)
+          {
+            printf("[Logger] %s write fail %s (%d)\r\n",
+                   k_drain_list[i].name, FatFs_SD_ResultToString(result), (int)result);
+            AppFlowStatsRecordWriteFailure();
+            write_failed = 1;
+            break;
+          }
+          if (dr > 0) did_work = 1;
+#if (APP_LSM_STALL_PROBE != 0U)
+          if (dr > 0) probe_loop_writes++;
+#endif
         }
-        if (dr > 0) did_work = 1;
-
-        dr = LoggerDrainRing(&g_ring_lsm_gyr, FATFS_SD_FILE_LSM_GYR, APP_RING_FLUSH_CHUNK, &rows_since_sync, &result);
-        if (dr < 0)
-        {
-          printf("[Logger] LSM_GYR write fail %s (%d)\r\n",
-                 FatFs_SD_ResultToString(result), (int)result);
-          AppFlowStatsRecordWriteFailure();
-          break;
-        }
-        if (dr > 0) did_work = 1;
-
-        dr = LoggerDrainRing(&g_ring_qma_acc, 3U, APP_RING_FLUSH_CHUNK, &rows_since_sync, &result);
-        if (dr < 0)
-        {
-          printf("[Logger] QMA_ACC write fail %s (%d)\r\n",
-                 FatFs_SD_ResultToString(result), (int)result);
-          AppFlowStatsRecordWriteFailure();
-          break;
-        }
-        if (dr > 0) did_work = 1;
-
-        dr = LoggerDrainRing(&g_ring_h3_acc, 2U, APP_RING_FLUSH_CHUNK, &rows_since_sync, &result);
-        if (dr < 0)
-        {
-          printf("[Logger] H3_ACC write fail %s (%d)\r\n",
-                 FatFs_SD_ResultToString(result), (int)result);
-          AppFlowStatsRecordWriteFailure();
-          break;
-        }
-        if (dr > 0) did_work = 1;
-
-        dr = LoggerDrainRing(&g_ring_mic, FATFS_SD_FILE_MIC_WAV, APP_RING_FLUSH_CHUNK, &rows_since_sync, &result);
-        if (dr < 0)
-        {
-          printf("[Logger] MIC.WAV write fail %s (%d)\r\n",
-                 FatFs_SD_ResultToString(result), (int)result);
-          AppFlowStatsRecordWriteFailure();
-          break;
-        }
-        if (dr > 0) did_work = 1;
-
-        dr = LoggerDrainRing(&g_ring_aht_env, 4U, APP_RING_FLUSH_CHUNK, &rows_since_sync, &result);
-        if (dr < 0)
-        {
-          printf("[Logger] AHT_ENV write fail %s (%d)\r\n",
-                 FatFs_SD_ResultToString(result), (int)result);
-          AppFlowStatsRecordWriteFailure();
-          break;
-        }
-        if (dr > 0) did_work = 1;
-
-        dr = LoggerDrainRing(&g_ring_mag, 5U, APP_RING_FLUSH_CHUNK, &rows_since_sync, &result);
-        if (dr < 0)
-        {
-          printf("[Logger] MAG write fail %s (%d)\r\n",
-                 FatFs_SD_ResultToString(result), (int)result);
-          AppFlowStatsRecordWriteFailure();
-          break;
-        }
-        if (dr > 0) did_work = 1;
+        if (write_failed) break;
       }
-
-      /* 攒批节奏：本轮已把所有达阈值(或半满)的 ring 写完，其余在攒批。让出 CPU 并
-       * 给 ring 时间积累成大块，把每次写的固定开销(命令+PROGRAMMING+关中断)摊薄；
-       * 同时避免 logger 空转占满自己的时间片。数轮 2ms 即可攒到 ~16KB，ring 半满
-       * override 保证不溢出。会话停止时由 AppLoggerStopSdSession 强制 flush 尾部。 */
-      if ((sd_file_open != 0U) && (AppAcqIsSdSessionActive() != 0U))
+#if (APP_LSM_STALL_PROBE != 0U)
+      /* 整轮 drain 结束:超 200ms 打印(6664Hz 下 LSM 环 160KB=1.0s 缓冲,一轮>200ms 就吃掉
+       * 20% 余量,连续几轮就溢出)。writes/bytes 区分"持续慢写堆积" vs "被抢占饿死"。
+       * accFree/gyrFree 打进入本轮时的余量,gap 前应看到余量骤降。 */
       {
-        osDelay(2U);
+        uint32_t probe_loop_ms = HAL_GetTick() - probe_loop0;
+        uint32_t probe_loop_bytes = rows_since_sync - probe_loop_rss0;  /* 本轮写出字节(rss 单调增,循环内不清零) */
+        if (probe_loop_ms > 200U)
+          printf("[LoggerLoop] %lums writes=%lu bytes=%lu accFree0=%lu gyrFree0=%lu @t=%lu.%03lus\r\n",
+                 (unsigned long)probe_loop_ms,
+                 (unsigned long)probe_loop_writes, (unsigned long)probe_loop_bytes,
+                 (unsigned long)probe_loop_acc_free0, (unsigned long)probe_loop_gyr_free0,
+                 (unsigned long)(probe_loop0 / 1000U), (unsigned long)(probe_loop0 % 1000U));
       }
+#endif
+
+      /* ★事件驱动:原 osDelay(2) 攒批节奏已移除。本轮 while(did_work) 把所有达阈值的环
+       * 写完后自然退出,落到下方周期 sync/checkpoint,再回到循环顶部 osSemaphoreAcquire 阻塞
+       * 睡 → 由生产者跨阈值唤醒或 50ms 超时唤醒。攒批仍由 LoggerDrainRing 的 3/4环 gate 保证
+       * (不满阈值不写,继续攒),不再靠固定延时。ring 溢出由生产者侧 drop 统计。 */
     }
 
-    /* Periodic metadata flush: commit FAT + directory entries every ~1 MB of
-     * payload so an extreme-load write-integrity failure (the 6664+96k FAT/dir
-     * loss — empty session dir) can't orphan the whole session. rows_since_sync
-     * accumulates drained bytes (LoggerDrainRing += n); ~1 MB ≈ 2.3 s at full
-     * load, rare enough not to add meaningful write overhead. */
-    if ((sd_file_open != 0U) && (rows_since_sync >= (1024U * 1024U)))
+    /* Periodic metadata flush: commit FAT + directory entries every
+     * APP_SD_SYNC_INTERVAL_BYTES of payload so an extreme-load write-integrity
+     * failure (the 6664+96k FAT/dir loss — empty session dir) can't orphan the
+     * whole session. rows_since_sync accumulates drained bytes (LoggerDrainRing
+     * += n).
+     * ★2026-07-12 回退到 1MB(原值)。曾于 07-10 改 16MB 想减 FAT 碎写降掉帧,但实测
+     * (CTBX_2026-07-12-04-16)酿成严重数据安全 bug:长录 3.79h 写 9.5GB 后低电量关机,
+     * 目录项/FAT 元数据提交太稀疏 → 掉电前来不及补写整会话的目录+FAT(15万簇~600KB) →
+     * 半提交 → 整会话目录 0 文件项、9.5GB 全成孤儿簇丢失。
+     * ★2026-07-13 1MB→4MB 实验【已证伪并回退到 1MB】。原以为 1MB sync 的 FAT/目录碎写吃带宽
+     * 是掉帧主因,改 4MB 想回收带宽。但 CTBX-13-05(4MB)对照 02-55(1MB)实测:掉帧无改善反略升
+     * (LSM 9.5%→10.1% / QMA 5.5%→6.1%),实效写速 726→714KB/s 未升。审计揭真相:cnt=1 碎写
+     * 598 次里 539 次是【高地址数据区写】,仅 59 次是低地址 FAT/目录——sync 只影响那 59 次,杯水
+     * 车薪。因果是反的:不是碎写拖慢卡,是卡 SLC 缓存耗尽后持续写速仅 ~714KB/s < CSV 满载生成
+     * 730KB/s,产出比卡能写的多 16KB/s → logger 被每次写阻塞 125ms、环攒不满 32KB 就超时兜底写
+     * 小块。这是带宽物理缺口,调度层动不了。掉帧真解只有 BIN 降产出(519KB/s,富余 195)或换更快卡。
+     * 故回退 1MB:sync 间隔既不是掉帧因,就选掉电更安全的 1MB(硬掉电最多丢 2s 元数据)。 */
+#ifndef APP_SD_SYNC_INTERVAL_BYTES
+#define APP_SD_SYNC_INTERVAL_BYTES  (1U * 1024U * 1024U)
+#endif
+    if ((sd_file_open != 0U) && (rows_since_sync >= APP_SD_SYNC_INTERVAL_BYTES))
     {
-      (void)FatFs_SD_LoggerSync();
+      AppSdWriteMsg_t m = { 0 };
+      m.type = (uint8_t)APP_SDMSG_SYNC;
+      (void)osMessageQueuePut(s_write_q, &m, 0U, osWaitForever);
       rows_since_sync = 0U;
     }
 
+    /* B3: 每 ~30s 回填一次 WAV 头(chunk_size/data_size)并 f_sync,使 MIC.WAV 在任意
+     * 时刻都是可播放的合法文件。硬掉电(低电量漏检测)时音频最多丢最后 ~30s——独立于
+     * 电压检测的保险。计时用 tick(慢 ~19% → 实际约 37s,不影响保险功能)。 */
+    if ((sd_file_open != 0U) && ((int32_t)(osKernelGetTickCount() - wav_next_ckpt) >= 0))
+    {
+      AppSdWriteMsg_t m = { 0 };
+      m.type = (uint8_t)APP_SDMSG_WAVCKPT;
+      (void)osMessageQueuePut(s_write_q, &m, 0U, osWaitForever);
+      wav_next_ckpt = osKernelGetTickCount() + 30000U;
+    }
+
+    /* ★2026-07-15 温度(TMP_LOW)限流到 ~1Hz。逐帧路径原本每次 LSM FIFO drain(6664Hz链)都
+     * 压一帧→写线程 f_write 一行 ~15B 温度 CSV→FatFs 每攒 512B 刷一个扇区→海量 cnt=1 单扇区写
+     * (实测占 52% SD写预算、437s)。温度恒变极慢(37℃级),1Hz 足够。门控:距上次入队<1s 的帧仍
+     * pop 排空缓冲(防积压)但不入队、不落盘。cnt=1 碎写由此几乎消失,SD 写带宽回收给数据通道。 */
     while ((sd_file_open != 0U) && (AppAcqIsSdSessionActive() != 0U) && (AppFrameBufferPop(&frame) != 0U))
     {
-      result = FatFs_SD_LoggerAppendFrame(&frame);
-      if (result != FR_OK)
+      uint32_t now_tick = osKernelGetTickCount();
+      if ((s_temp_last_tick == 0U) ||
+          ((uint32_t)(now_tick - s_temp_last_tick) >= APP_TEMP_LOG_INTERVAL_TICKS))
       {
-        printf("[Logger] append fail frame=%lu err=%s (%d)\r\n",
-               (unsigned long)frame.frame_id,
-               FatFs_SD_ResultToString(result),
-               (int)result);
-        AppFlowStatsRecordWriteFailure();
-        AppLoggerStopSdSession(&sd_file_open, &rows_since_sync);
-        AppFlowStatsSetMode(0U, 0U);
-        osDelay(LOGGER_RETRY_DELAY_MS);
-        break;
+        s_temp_last_tick = now_tick;
+        AppSdWriteMsg_t m;
+        m.type = (uint8_t)APP_SDMSG_APPENDFRAME;
+        m.block_idx = 0U; m.file_idx = 0U; m.len = 0U;
+        m.frame = frame;
+        (void)osMessageQueuePut(s_write_q, &m, 0U, osWaitForever);
+        rows_since_sync++;
+        AppFlowStatsRecordFrameWrite(&frame);
       }
-      rows_since_sync++;
-      AppFlowStatsRecordFrameWrite(&frame);
+      /* else: 帧已 pop(排空缓冲),温度这行丢弃——1Hz 之间的温度无价值 */
     }
 
     if ((sd_file_open != 0U) && (AppAcqDrainPendingStop() != 0U))
     {
+      /* 收尾排空帧缓冲:同样限流温度(缓冲可能积压上千帧,不限流会在停止时突发写上千行温度,
+       * 重现 cnt=1 碎写)。仍 pop 排空,只是 1Hz 之外的温度行不入队。 */
       while (AppFrameBufferPop(&frame) != 0U)
       {
-        result = FatFs_SD_LoggerAppendFrame(&frame);
-        if (result != FR_OK)
+        uint32_t now_tick = osKernelGetTickCount();
+        if ((s_temp_last_tick == 0U) ||
+            ((uint32_t)(now_tick - s_temp_last_tick) >= APP_TEMP_LOG_INTERVAL_TICKS))
         {
-          printf("[Logger] drain fail frame=%lu err=%s (%d)\r\n",
-                 (unsigned long)frame.frame_id,
-                 FatFs_SD_ResultToString(result),
-                 (int)result);
-          AppFlowStatsRecordWriteFailure();
-          break;
+          s_temp_last_tick = now_tick;
+          AppSdWriteMsg_t m;
+          m.type = (uint8_t)APP_SDMSG_APPENDFRAME;
+          m.block_idx = 0U; m.file_idx = 0U; m.len = 0U;
+          m.frame = frame;
+          (void)osMessageQueuePut(s_write_q, &m, 0U, osWaitForever);
+          rows_since_sync++;
+          AppFlowStatsRecordFrameWrite(&frame);
         }
-        rows_since_sync++;
-        AppFlowStatsRecordFrameWrite(&frame);
       }
 
-      result = FatFs_SD_LoggerSync();
-      if (result != FR_OK)
+      /* final sync 经队列(会在 STOP 前被写线程按 FIFO 执行);随后 AppLoggerStopSdSession
+       * 会做屏障+STOP 完成真正收尾。 */
       {
-        printf("[Logger] final sync fail rows=%lu err=%s (%d)\r\n",
-               (unsigned long)rows_since_sync,
-               FatFs_SD_ResultToString(result),
-               (int)result);
-        AppFlowStatsRecordWriteFailure();
+        AppSdWriteMsg_t m = { 0 };
+        m.type = (uint8_t)APP_SDMSG_SYNC;
+        (void)osMessageQueuePut(s_write_q, &m, 0U, osWaitForever);
       }
 
       {

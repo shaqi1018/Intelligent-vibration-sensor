@@ -62,6 +62,18 @@ void SD_SetDmaMode(unsigned char enable)
   g_sd_use_dma = enable;
 }
 
+/* 非阻塞查卡忙(SdFat isBusy() 的 U5 等价物,用于 logger 机会式写入门控)。
+ * SDMMC_FLAG_BUSYD0 = SDMMC_D0 忙信号线电平的反值(硬件位),纯读寄存器、零命令
+ * 开销、不阻塞。返回 1=卡忙(PROGRAMMING/GC 中,此刻发写会死等)、0=空闲(可写)。
+ * 掉帧根因是每次写死等卡退出 PROGRAMMING;logger 写前先查此位,忙则跳过让数据继续
+ * 攒环,只在卡空闲的间隙写 → 消除等卡浪费(见 docs/.../2026-07-08-dropframe-opportunistic-write.md)。
+ * 注意:仅在 DPSM 空闲(无传输在途)时该位才反映"卡编程忙";传输途中另有含义,故本
+ * 函数用于"下一次写发起前"的门控是准确的。 */
+unsigned char SD_IsCardBusy(void)
+{
+  return (__HAL_SD_GET_FLAG(&hsd1, SDMMC_FLAG_BUSYD0) != 0U) ? 1U : 0U;
+}
+
 /* 清理轮询操作后的残留状态，防止 IDMA/Context/Flags 污染后续 DMA 操作。 */
 static void SD_CleanupAfterOp(void)
 {
@@ -215,6 +227,14 @@ DRESULT SD_disk_write(BYTE pdrv, const BYTE *buff, DWORD sector, UINT count)
         HAL_NVIC_EnableIRQ(SDMMC1_IRQn);
         continue;
       }
+      /* ★2026-07-12 拆分计时(SD_WR_SPLIT_PROBE):把"DMA传输(等信号量)"与"PROGRAMMING等待"
+       * 分开计时,确认那280ms尖峰到底耗在哪——这是设计读写解耦方案的前提数据。默认关。 */
+#ifndef SD_WR_SPLIT_PROBE
+#define SD_WR_SPLIT_PROBE 1U
+#endif
+#if (SD_WR_SPLIT_PROBE != 0U)
+      uint32_t probe_dma0 = HAL_GetTick();
+#endif
       if (xSemaphoreTake(s_sdmmc_dma_sem, pdMS_TO_TICKS(5000)) == pdTRUE)
       {
         /* Only trust the transfer if it completed WITHOUT an error callback.
@@ -224,13 +244,26 @@ DRESULT SD_disk_write(BYTE pdrv, const BYTE *buff, DWORD sector, UINT count)
          * corruption). On error, fall through to Abort + DeInit + retry. */
         if (g_sd_dma_error == 0U)
         {
+#if (SD_WR_SPLIT_PROBE != 0U)
+          uint32_t probe_dma_ms = HAL_GetTick() - probe_dma0;   /* DMA传输段(到DATAEND) */
+          uint32_t probe_prog0 = HAL_GetTick();
+#endif
           /* Wait for card to exit PROGRAMMING state. The SDMMC transfer is
            * done (DATAEND fired) but the card may still be writing to flash. */
           uint32_t t0 = xTaskGetTickCount();
           HAL_SD_CardStateTypeDef cs;
           do {
             cs = HAL_SD_GetCardState(&hsd1);
-            if (cs == HAL_SD_CARD_TRANSFER) { return RES_OK; }
+            if (cs == HAL_SD_CARD_TRANSFER) {
+#if (SD_WR_SPLIT_PROBE != 0U)
+              uint32_t probe_prog_ms = HAL_GetTick() - probe_prog0;
+              if ((probe_dma_ms + probe_prog_ms) > 30U)
+                printf("[SDwr] dma=%lums prog=%lums cnt=%lu sec=%lu\r\n",
+                       (unsigned long)probe_dma_ms, (unsigned long)probe_prog_ms,
+                       (unsigned long)count, (unsigned long)sector);
+#endif
+              return RES_OK;
+            }
             if ((xTaskGetTickCount() - t0) > pdMS_TO_TICKS(500)) { g_sd_wstats.prog_timeouts++; break; }
             vTaskDelay(1U); /* yield while card programs — don't starve other tasks */
           } while (cs == HAL_SD_CARD_PROGRAMMING);

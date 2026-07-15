@@ -212,6 +212,11 @@ static FRESULT FatFs_SD_OpenCsvFile(FIL *file, const char *dir, const char *fnam
     return r;
   }
 
+  /* 【已回退 f_expand 预分配】曾试图开段时 f_expand 整段(512MB)消 FAT 停顿,但实测:
+   * (1) 对满配掉帧零帮助(根因是 SD 卡 GC 周期性内部忙,非 FAT 链更新);
+   * (2) 开录一次性预分配 7×512MB=3.5GB FAT 簇链,非优雅结束时半提交 FAT → 整盘损坏、
+   *     零可恢复数据(实测 CTBX_..14-53 新卡整盘 corrupt)。无收益+放大损坏 → 移除。 */
+
   /* CSV 模式写表头,BIN 模式跳过 */
   if (output_format == ACQ_OUTPUT_CSV && header != NULL)
   {
@@ -443,7 +448,7 @@ FRESULT FatFs_SD_LoggerAppendFrame(const AppSensorFrame_t *frame)
   }
 
   /* 高量程与中量程加速度经各自的 ring buffer 写出,
-   * 见 StartLoggerTask 里的 RingBuf_PeekContiguous + LoggerWriteFileIndex。 */
+   * 见 StartLoggerTask 里的 RingBuf_CopyToBounce + LoggerWriteFileIndex。 */
 
   g_logger_rows_written++;
   return FR_OK;
@@ -555,6 +560,30 @@ FRESULT FatFs_SD_WavFinalize(void)
   return (r1 == FR_OK) ? r2 : r1;
 }
 
+/* MIC.WAV 录制途中周期性 checkpoint(B3,防硬掉电音频不可播的保险)。
+ * 用当前 g_wav_bytes 回填 chunk_size(@4)/data_size(@40) 并 f_sync,使文件在任意时刻
+ * 都是一个头部有效、可播放的合法 WAV(最多丢 checkpoint 之后未回填的尾部)。★ 回填后
+ * 文件指针停在偏移 44,必须 seek 回数据尾(44+g_wav_bytes)再返回,否则后续 PCM 写入会
+ * 覆盖已录音频。不 close——录制继续。独立于低电量电压检测:即便漏检测硬掉电,音频也只
+ * 丢最后一个 checkpoint 周期(~30s)且能正常播放。 */
+FRESULT FatFs_SD_WavCheckpoint(void)
+{
+  if (g_wav_open == 0U) return FR_OK;
+  if (SDMMC1_IsCardDetected() == 0U) return FR_NOT_READY;
+
+  uint32_t chunk_size = 36U + g_wav_bytes;
+  FRESULT r = f_lseek(&g_wav_file, 4U);
+  if (r == FR_OK) r = FatFs_SD_WriteExact(&g_wav_file, &chunk_size, 4U);
+  if (r == FR_OK) r = f_lseek(&g_wav_file, 40U);
+  if (r == FR_OK) r = FatFs_SD_WriteExact(&g_wav_file, &g_wav_bytes, 4U);
+  if (r == FR_OK) (void)f_sync(&g_wav_file);
+
+  /* ★ 关键:回填后指针在 44,必须 seek 回数据尾,否则下一次写 PCM 会覆盖音频 */
+  FRESULT rs = f_lseek(&g_wav_file, (FSIZE_t)(44U + g_wav_bytes));
+  if (r == FR_OK) r = rs;
+  return r;
+}
+
 FRESULT FatFs_SD_LoggerSync(void)
 {
   FRESULT result = FR_OK;
@@ -597,13 +626,26 @@ void FatFs_SD_LoggerStop(void)
       (void)f_close(&g_log_files[i]);
     }
 
+    /* ★2026-07-12 顺序修正:先 f_mount(NULL) 卸载(flush 残留 FS 状态)再清
+     * g_logger_active。原顺序在 f_mount 之前就把 active 清 0,导致优雅关机的
+     * Uc_WaitLoggerClosed(等 IsLoggerActive()==0)可能在 f_mount 还没跑完时就
+     * 放行断电 → FS 未完全卸载。现在 IsLoggerActive()==0 严格代表"文件已 close
+     * 且卷已 unmount",断电前一定 flush 完成。 */
     printf("[FatFs] logger stop rows=%lu dir=%s\r\n",
            (unsigned long)g_logger_rows_written,
            g_session_dir);
 
-    g_logger_active = 0U;
     g_logger_rows_written = 0U;
     g_session_dir[0] = '\0';
+
+    if (g_sd_mounted != 0U)
+    {
+      (void)f_mount(NULL, "0:", 1U);
+      g_sd_mounted = 0U;
+    }
+
+    g_logger_active = 0U;   /* 最后置 0:此后 IsLoggerActive()==0 = 全部收尾+卸载完成 */
+    return;
   }
 
   if (g_sd_mounted != 0U)
@@ -612,6 +654,213 @@ void FatFs_SD_LoggerStop(void)
     g_sd_mounted = 0U;
   }
 }
+
+/* ============================================================================
+ * SD 写吞吐基准(sdbench)—— 隔离测卡的裸顺序写能力,与采集路径完全无关。
+ * 目的:钉死"~0.65MB/s 是卡物理墙 还是 我们写模式的浪费"。SDMMC 配置为
+ * 24MHz×4bit=12MB/s 理论带宽,满配实测只推 ~0.65MB/s(5%)。本基准不跑任何
+ * 传感器,单文件连续写固定字节流,分别测不同块大小 × 不同 f_sync 策略的 MB/s。
+ *
+ * 计时用 HAL_GetTick()(TIM6 硬件 1ms,精确;RTOS tick 慢 ~19% 不能用于计时)。
+ * 由 APP_SD_BENCH 编译开关在 logger 任务启动时调用一次,打印后死循环停住
+ *(不进采集)。开关默认 0 → 零影响、完全可逆。
+ *
+ * 输出每行:块大小 | sync策略 | 写字节 | 耗时ms | MB/s。三种可能结果:
+ *  (1) 各块大小都≈0.65MB/s        → 真卡墙,环/块调优无用,只能砍mic或换卡。
+ *  (2) MB/s 随块增大明显上升       → 我们写太碎,加大写块能真降掉帧。
+ *  (3) 小块也能 >2MB/s + sync明显拖 → 瓶颈是 f_sync/交织,解耦写线程能救。
+ * ==========================================================================*/
+#ifndef APP_SD_BENCH
+#define APP_SD_BENCH 0U   /* 基准已测完(2026-07-10):见 app_freertos.c 同名宏。已恢复正常采集。 */
+#endif
+
+#if (APP_SD_BENCH != 0U)
+
+#define SDBENCH_TOTAL_BYTES   (8U * 1024U * 1024U)   /* 每组固定写 8MB */
+
+/* 跑一组:块大小 block、每 sync_every 字节 f_sync 一次(0=整程不 sync,仅收尾 close)。
+ * src/src_cap = 调用方传入的源缓冲(复用 logger 的 s_sd_bounce,不再单独占 RAM)。
+ * 返回落盘 MB/s×100(定点,避免浮点格式化);<0 表示出错。 */
+static int32_t SdBench_RunOne(uint32_t block, uint32_t sync_every,
+                              const uint8_t *src, uint32_t src_cap)
+{
+  if (block > src_cap) block = src_cap;   /* 块不能超过源缓冲容量 */
+  FIL f;
+  FRESULT r;
+  UINT wr = 0U;
+  uint32_t written = 0U;
+  uint32_t since_sync = 0U;
+
+  r = f_open(&f, "0:/SDBENCH.BIN", FA_CREATE_ALWAYS | FA_WRITE);
+  if (r != FR_OK) { printf("[SdBench] open fail %s\r\n", FatFs_SD_ResultToString(r)); return -1; }
+
+  uint32_t t0 = HAL_GetTick();
+  while (written < SDBENCH_TOTAL_BYTES)
+  {
+    uint32_t n = block;
+    if ((written + n) > SDBENCH_TOTAL_BYTES) n = SDBENCH_TOTAL_BYTES - written;
+
+    __DMB();   /* 与真实写路径一致:启动 IDMA 前确保源缓冲已落 SRAM */
+    r = f_write(&f, src, (UINT)n, &wr);
+    if ((r != FR_OK) || (wr != n))
+    {
+      printf("[SdBench] write fail %s wr=%u\r\n", FatFs_SD_ResultToString(r), (unsigned)wr);
+      (void)f_close(&f);
+      return -2;
+    }
+    written   += n;
+    since_sync += n;
+
+    if ((sync_every != 0U) && (since_sync >= sync_every))
+    {
+      (void)f_sync(&f);
+      since_sync = 0U;
+    }
+  }
+  (void)f_close(&f);   /* close 收尾:提交 FAT+目录(这部分不计入吞吐,与 DATALOG1 一致) */
+  uint32_t dt = HAL_GetTick() - t0;
+  if (dt == 0U) dt = 1U;
+
+  /* MB/s×100 = 字节/(1MB) / (dt/1000) × 100 = 字节×100000 /(dt×1048576)。
+   * 用 uint64_t 防溢出(8MB×100000 = 8e11)。 */
+  uint32_t mbps100 = (uint32_t)(((uint64_t)written * 100000ULL) / ((uint64_t)dt * 1048576ULL));
+  return (int32_t)mbps100;
+}
+
+/* 多文件交织跑测:nfiles 个文件同时打开,round-robin 每文件写 block 字节,直到
+ * 累计写满 SDBENCH_TOTAL_BYTES。模拟真实工况的"7 文件交织",隔离交织对吞吐的影响。
+ * 固定不 sync(仅收尾 close),块大小固定(调用方给已知最优 64KB)。
+ * 返回聚合落盘 MB/s×100;<0 出错。 */
+static int32_t SdBench_RunMulti(uint32_t nfiles, uint32_t block,
+                                const uint8_t *src, uint32_t src_cap)
+{
+  static FIL fs[8];   /* static:每 FIL 含 512B 扇区缓冲,8 个放栈上(4KB)会溢出 logger 栈 */
+  uint8_t opened = 0U;
+  int32_t rc = -1;
+  uint32_t written = 0U;
+  uint32_t t0;
+  uint32_t dt;
+
+  if (nfiles > 8U) nfiles = 8U;
+  if (block > src_cap) block = src_cap;
+
+  for (uint32_t i = 0U; i < nfiles; i++)
+  {
+    char path[24];
+    (void)snprintf(path, sizeof(path), "0:/SDBM_%u.BIN", (unsigned)i);
+    if (f_open(&fs[i], path, FA_CREATE_ALWAYS | FA_WRITE) != FR_OK)
+    { printf("[SdBench] multi open%u fail\r\n", (unsigned)i); goto multi_close; }
+    opened++;
+  }
+
+  t0 = HAL_GetTick();
+  while (written < SDBENCH_TOTAL_BYTES)
+  {
+    for (uint32_t i = 0U; (i < nfiles) && (written < SDBENCH_TOTAL_BYTES); i++)
+    {
+      UINT wr = 0U;
+      uint32_t n = block;
+      if ((written + n) > SDBENCH_TOTAL_BYTES) n = SDBENCH_TOTAL_BYTES - written;
+      __DMB();
+      if ((f_write(&fs[i], src, (UINT)n, &wr) != FR_OK) || (wr != n))
+      { printf("[SdBench] multi write fail f%u\r\n", (unsigned)i); goto multi_close; }
+      written += n;
+    }
+  }
+  dt = HAL_GetTick() - t0;
+  if (dt == 0U) dt = 1U;
+  rc = (int32_t)((uint32_t)(((uint64_t)written * 100000ULL) / ((uint64_t)dt * 1048576ULL)));
+
+multi_close:
+  for (uint32_t i = 0U; i < opened; i++) (void)f_close(&fs[i]);
+  for (uint32_t i = 0U; i < opened; i++)
+  {
+    char path[24];
+    (void)snprintf(path, sizeof(path), "0:/SDBM_%u.BIN", (unsigned)i);
+    (void)f_unlink(path);
+  }
+  return rc;
+}
+
+/* 打印一行结果(MB/s 用 定点×100 拆成整数.两位小数,避免 microLIB %f 依赖)。 */
+static void SdBench_PrintRow(const char *tag, uint32_t block, int32_t mbps100, uint32_t dt_ms)
+{
+  if (mbps100 < 0) { printf("[SdBench] %-10s blk=%5uB  ERROR\r\n", tag, (unsigned)block); return; }
+  printf("[SdBench] %-10s blk=%5uB  %ums  %u.%02u MB/s\r\n",
+         tag, (unsigned)block, (unsigned)dt_ms,
+         (unsigned)(mbps100 / 100), (unsigned)(mbps100 % 100));
+}
+
+void FatFs_SD_RunWriteBenchmark(uint8_t *scratch, uint32_t scratch_cap)
+{
+  static const uint32_t k_blocks[] = { 4096U, 16384U, 32768U, 65536U };
+  const uint32_t k_nblk = sizeof(k_blocks) / sizeof(k_blocks[0]);
+  uint8_t bench_ok = 1U;
+
+  printf("\r\n[SdBench] ===== SD 写吞吐基准开始 (8MB/组, 24MHz x4bit=12MB/s 理论) =====\r\n");
+
+  if ((scratch == NULL) || (scratch_cap == 0U))
+  { printf("[SdBench] 无源缓冲,跳过\r\n"); bench_ok = 0U; }
+  else if (SDMMC1_IsCardDetected() == 0U)
+  { printf("[SdBench] 无卡,跳过\r\n"); bench_ok = 0U; }
+  else if (disk_initialize(SDDISKIO_DRIVE_NUM) & STA_NOINIT)
+  { printf("[SdBench] disk_initialize 失败\r\n"); bench_ok = 0U; }
+  else if ((g_sd_mounted == 0U) && (FatFs_SD_Mount() != FR_OK))
+  { printf("[SdBench] 挂载失败\r\n"); bench_ok = 0U; }
+
+  if (bench_ok != 0U)
+  {
+  memset(scratch, 0x5A, scratch_cap);   /* 填非零可辨识图案(复用 logger bounce,基准独占) */
+
+  /* 两个总表:两种 IDMA/轮询模式 × 四种块大小 × 两种 sync 策略。
+   * 通过 SD_SetDmaMode 切模式(基准独占卡,无并发,切换安全)。 */
+  for (uint32_t m = 0U; m < 2U; m++)
+  {
+    SD_SetDmaMode((uint8_t)m);   /* 0=轮询 1=IDMA+HWFC */
+    printf("[SdBench] ---- 模式: %s ----\r\n", (m != 0U) ? "IDMA+HWFC" : "POLLING");
+
+    for (uint32_t i = 0U; i < k_nblk; i++)
+    {
+      /* A) 整程不 sync(仅 close 收尾)—— DATALOG1 策略,测卡纯顺序写上限。 */
+      uint32_t t0 = HAL_GetTick();
+      int32_t a = SdBench_RunOne(k_blocks[i], 0U, scratch, scratch_cap);
+      SdBench_PrintRow("nosync", k_blocks[i], a, HAL_GetTick() - t0);
+
+      /* B) 每 1MB f_sync 一次 —— 我们当前策略,测 f_sync(FAT随机写) 拖了多少。 */
+      t0 = HAL_GetTick();
+      int32_t b = SdBench_RunOne(k_blocks[i], 1024U * 1024U, scratch, scratch_cap);
+      SdBench_PrintRow("sync1MB", k_blocks[i], b, HAL_GetTick() - t0);
+    }
+  }
+
+  (void)f_unlink("0:/SDBENCH.BIN");
+
+  /* ★交织基准:固定 IDMA+64KB(单文件已测最优 6MB/s),把 8MB 分摊到 N 个文件
+   * round-robin 写,看聚合吞吐随文件数塌到多少。真实工况开 7+1 文件,疑"多文件交织
+   * → 卡写位置盘上跳变 → 无法保持 AU 连续写 → 6MB/s 打成 <0.7"。若 N=7 塌到 ~0.6
+   * → 坐实交织是 9 倍浪费的元凶,解法=合并文件/每文件攒更大块再切。 */
+  printf("[SdBench] ---- 交织(IDMA+64KB,8MB 分摊到 N 文件 round-robin) ----\r\n");
+  SD_SetDmaMode(1U);
+  static const uint32_t k_nfiles[] = { 1U, 2U, 4U, 7U };
+  for (uint32_t i = 0U; i < (sizeof(k_nfiles)/sizeof(k_nfiles[0])); i++)
+  {
+    uint32_t t0 = HAL_GetTick();
+    int32_t v = SdBench_RunMulti(k_nfiles[i], 65536U, scratch, scratch_cap);
+    uint32_t dt = HAL_GetTick() - t0;
+    if (v < 0) { printf("[SdBench] nfiles=%u  ERROR\r\n", (unsigned)k_nfiles[i]); }
+    else printf("[SdBench] nfiles=%u  blk=65536B  %ums  %u.%02u MB/s\r\n",
+                (unsigned)k_nfiles[i], (unsigned)dt,
+                (unsigned)(v / 100), (unsigned)(v % 100));
+  }
+
+  printf("[SdBench] ===== 基准结束 =====\r\n");
+  }  /* bench_ok */
+
+  printf("[SdBench] 基准模式挂起(不进采集)。复位并关 APP_SD_BENCH 恢复正常。\r\n");
+  for (;;) { HAL_Delay(1000); }
+}
+
+#endif /* APP_SD_BENCH */
 
 void FatFs_SD_RunPhaseBSmokeTest(void)
 {

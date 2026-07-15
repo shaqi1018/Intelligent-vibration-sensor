@@ -30,12 +30,18 @@ FRESULT FatFs_SD_LoggerWriteFileIndex(uint8_t idx, const uint8_t *data, uint32_t
 #define FATFS_SD_FILE_MIC_WAV   7U
 FRESULT FatFs_SD_WavCreate(uint32_t sample_rate_hz, uint16_t bits);
 FRESULT FatFs_SD_WavFinalize(void);
+/* 录制途中周期性回填 WAV 头(chunk_size/data_size)+f_sync,不关闭文件;硬掉电保险。 */
+FRESULT FatFs_SD_WavCheckpoint(void);
 
 FRESULT FatFs_SD_LoggerSync(void);
 void FatFs_SD_LoggerStop(void);
 /* 1=logger 仍持有打开文件;0=全部文件已 finalize/sync/close(可安全断电/复位)。 */
 uint8_t FatFs_SD_IsLoggerActive(void);
 void FatFs_SD_RunPhaseBSmokeTest(void);
+/* SD 写吞吐基准:仅在 APP_SD_BENCH 编译开关开时由 logger 任务启动调用;打印
+ * 各块大小×sync策略的 MB/s 后死循环挂起(不进采集)。用于隔离测卡裸写能力。
+ * scratch/scratch_cap = 调用方提供的源缓冲(复用 logger 的 s_sd_bounce,免单独占 RAM)。 */
+void FatFs_SD_RunWriteBenchmark(uint8_t *scratch, uint32_t scratch_cap);
 
 #ifdef __cplusplus
 }

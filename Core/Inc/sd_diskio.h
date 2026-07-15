@@ -16,6 +16,9 @@ DRESULT SD_disk_read(BYTE pdrv, BYTE *buff, DWORD sector, UINT count);
 DRESULT SD_disk_write(BYTE pdrv, const BYTE *buff, DWORD sector, UINT count);
 DRESULT SD_disk_ioctl(BYTE pdrv, BYTE cmd, void *buff);
 void SD_SetDmaMode(unsigned char enable);
+/* 非阻塞查卡忙(读 SDMMC_FLAG_BUSYD0):1=忙(此刻发写会死等 PROGRAMMING)、0=空闲可写。
+ * 用于 logger 机会式写入门控,消除"死等卡"的掉帧根因。 */
+unsigned char SD_IsCardBusy(void);
 
 /* Route-2 SDMMC write-path diagnostics. SD_ResetWriteStats clears the counters
  * (call at SD session start); SD_PrintWriteStats emits a one-line [SDstat]
