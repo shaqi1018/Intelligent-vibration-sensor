@@ -1245,7 +1245,10 @@ static inline uint32_t AppU64ToDec(char *out, uint64_t v)
 
 /* 把 Unix 纪元秒格式化为 12 位 YYMMDDHHMMSS（定长，无分隔符，UTC 无时区）。
  * 返回写入字节数（固定 12）。秒级精度：同一秒内的多个样本时间戳相同，
- * 秒内顺序靠连续递增的 frame_id 区分。 */
+ * 秒内顺序靠连续递增的 frame_id 区分。
+ * 注：CSV 行已全部去除 datetime(改用 CONFIG.JSN timebase 还原),此函数暂无调用者,
+ * 保留备用(调试/未来格式);加 unused 属性避免 -Wunused-function。 */
+__attribute__((unused))
 static uint32_t AppFmtDateTime12(char *out, uint32_t epoch_s)
 {
   Pcf85063_Time_t t;
@@ -1556,6 +1559,16 @@ static void StartSdWriterTask(void *argument)
         break;
       case APP_SDMSG_DEVCFG:
         (void)DeviceCfg_WriteCurrentToSD();
+        /* 会话时长补写：此刻仍在 STOP 之前，会话目录未关闭。算出本会话时长(s)后
+         * 重写会话目录 CONFIG.JSN，把 timebase.duration_s 从占位 0 更新为真实值。
+         * 单次调用，非高频，AppTime 限流无碍。 */
+        {
+          uint64_t now_us = AppTime_GetEpochUs();
+          uint32_t dur_s = (s_session_start_us != 0ULL && now_us > s_session_start_us)
+                           ? (uint32_t)((now_us - s_session_start_us) / 1000000ULL) : 0U;
+          DeviceCfg_SetSessionDuration(dur_s);
+          (void)DeviceCfg_WriteConfigToDir(FatFs_SD_GetSessionDir());
+        }
         break;
       case APP_SDMSG_STOP:
         FatFs_SD_LoggerStop();
@@ -2084,17 +2097,8 @@ void StartLsm6dsoxTask(void *argument)
       float xl_s = AppLsmXlSensitivity(lcfg.lsm6dsox.range);
       float g_s  = AppLsmGyrSensitivity(lcfg.lsm6dsox.range2);
 
-      /* Fetch timestamp once per batch: epoch_s is 1-second resolution,
-       * same value for all ~256 samples. Avoids concurrent GetEpochUs()
-       * calls from multiple tasks racing on s_dwt_prev / s_wrap_count. */
-      uint32_t epoch_s_batch = (uint32_t)(AppTime_GetEpochUs() / 1000000ULL);
-      /* Format the datetime ONCE per FIFO batch — the epoch is 1-second
-       * resolution so it is identical for every row in the batch, and the
-       * epoch→Y/M/D/H/M/S conversion is the heaviest per-row op at 6664 Hz.
-       * AppFmtDateTime12 always writes exactly 12 chars (YYMMDDHHMMSS). */
-      char dt_batch[12];
-      (void)AppFmtDateTime12(dt_batch, epoch_s_batch);
-
+      /* datetime 已从 CSV 行去除(降产出),不再需要每 batch 格式化时间戳。
+       * PC 端由 CONFIG.JSN timebase 还原:t_us = start_epoch_us + frame_id × interval_us。 */
       char rowbuf[160];
       for (uint16_t i = 0; i < to_read; i++)
       {
@@ -2142,15 +2146,15 @@ void StartLsm6dsoxTask(void *argument)
           else
           {
             /* CSV 模式:acc/gyr 拆两行,共用同一 frame_id 做对齐键。
-             *   acc 行: frame_id,datetime,ax,ay,az   (4 逗号) → g_ring_lsm_acc
-             *   gyr 行: frame_id,gx,gy,gz             (3 逗号) → g_ring_lsm_gyr
+             *   acc 行: frame_id,ax,ay,az   (3 逗号) → g_ring_lsm_acc
+             *   gyr 行: frame_id,gx,gy,gz    (3 逗号) → g_ring_lsm_gyr
+             * datetime 已去除(降产出):PC 端由 CONFIG.JSN timebase 还原
+             *   t_us = start_epoch_us + frame_id × interval_us。
              * 只有两行逗号数都正确才双写,保证每个 frame_id 在两文件里成对出现
              * (否则一坏一好会破坏 join 对齐)。 */
             char gyrbuf[96];
             uint32_t aoff = 0;
             aoff += AppU32ToDec(&rowbuf[aoff], fid);
-            rowbuf[aoff++] = ',';
-            memcpy(&rowbuf[aoff], dt_batch, 12U); aoff += 12U;
             rowbuf[aoff++] = ',';
             aoff += AppF1ToDec(&rowbuf[aoff], (float)cur_acc[0] * xl_s);
             rowbuf[aoff++] = ',';
@@ -2171,14 +2175,14 @@ void StartLsm6dsoxTask(void *argument)
             gyrbuf[goff++] = '\r';
             gyrbuf[goff++] = '\n';
 
-            /* Guard: acc 行须 4 逗号(5列)、gyr 行须 3 逗号(4列)。~0.5% 行会莫名多/
-             * 缺逗号,双写前都校验;任一坏则整对丢弃(宁可丢一对也不破坏对齐/文件)。
+            /* Guard: acc 行须 3 逗号(4列:frame_id,ax,ay,az)、gyr 行须 3 逗号(4列)。
+             * ~0.5% 行会莫名多/缺逗号,双写前都校验;任一坏则整对丢弃(宁可丢一对也不破坏对齐/文件)。
              * ★ 对齐保护(A2):再加两环空间检查,仅当两环都容得下才双写,否则整对丢弃
              * ——满配溢出时只丢一侧会使 ACC_LOW/GYR_LOW 的 frame_id 集合发散。 */
             uint32_t anc = 0U, gnc = 0U;
             for (uint32_t k = 0U; k < aoff - 2U; k++) { if (rowbuf[k] == ',') anc++; }
             for (uint32_t k = 0U; k < goff - 2U; k++) { if (gyrbuf[k] == ',') gnc++; }
-            if (anc == 4U && gnc == 3U &&
+            if (anc == 3U && gnc == 3U &&
                 (RingBuf_FreeSpace(&g_ring_lsm_acc) >= aoff) &&
                 (RingBuf_FreeSpace(&g_ring_lsm_gyr) >= goff))
             {
@@ -2369,7 +2373,6 @@ void StartH3lis100dlTask(void *argument)
       h3_ts_us += s_h3_odr_interval_us;
 
       uint32_t fid = ++g_h3_frame_id_counter;
-      uint32_t epoch_s_i = (uint32_t)(AppTime_GetEpochUs() / 1000000ULL);
 
       if (output_format == ACQ_OUTPUT_BIN)
       {
@@ -2385,12 +2388,11 @@ void StartH3lis100dlTask(void *argument)
       }
       else
       {
-        /* CSV 模式:构建文本行 */
+        /* CSV 模式:构建文本行。datetime 已去除(降产出 + 免去 400Hz 每帧 epoch 调用),
+         * PC 端由 CONFIG.JSN timebase 还原。行: frame_id,ax,ay,az (3 逗号)。 */
         char rowbuf[96];
         uint32_t off = 0;
         off += AppU32ToDec(&rowbuf[off], fid);
-        rowbuf[off++] = ',';
-        off += AppFmtDateTime12(&rowbuf[off], epoch_s_i);
         rowbuf[off++] = ',';
         off += AppF1ToDec(&rowbuf[off], data.acc_mg[0]);
         rowbuf[off++] = ',';
@@ -2399,7 +2401,11 @@ void StartH3lis100dlTask(void *argument)
         off += AppF1ToDec(&rowbuf[off], data.acc_mg[2]);
         rowbuf[off++] = '\r';
         rowbuf[off++] = '\n';
-        RingBuf_Write(&g_ring_h3_acc, (const uint8_t *)rowbuf, off);
+        /* ★行原子 guard:环放不下就整行丢弃,绝不写半行(消除字节截断畸形)。 */
+        if (RingBuf_FreeSpace(&g_ring_h3_acc) >= off)
+        {
+          RingBuf_Write(&g_ring_h3_acc, (const uint8_t *)rowbuf, off);
+        }
       }
     }
 
@@ -2547,11 +2553,7 @@ void StartQma6100pTask(void *argument)
       default: qma_lsb1g = 4096U; break;
     }
     float qma_scale = 1000.0f / (float)qma_lsb1g;
-    uint32_t epoch_s_batch_qma = (uint32_t)(AppTime_GetEpochUs() / 1000000ULL);
-    /* Datetime formatted once per batch (1-second resolution) — see LSM. */
-    char dt_batch_qma[12];
-    (void)AppFmtDateTime12(dt_batch_qma, epoch_s_batch_qma);
-
+    /* datetime 已从 CSV 行去除,PC 端由 CONFIG.JSN timebase 还原,不再格式化时间戳。 */
     char rowbuf[96];
     for (uint8_t i = 0; i < fifo_level; i++)
     {
@@ -2590,11 +2592,11 @@ void StartQma6100pTask(void *argument)
       }
       else
       {
-        /* CSV 模式:构建文本行 */
+        /* CSV 模式:构建文本行。datetime 已去除(降产出),PC 端由 CONFIG.JSN
+         * timebase 还原 t_us = start_epoch_us + frame_id × interval_us。
+         * 行: frame_id,ax,ay,az (3 逗号)。 */
         uint32_t off = 0;
         off += AppU32ToDec(&rowbuf[off], fid);
-        rowbuf[off++] = ',';
-        memcpy(&rowbuf[off], dt_batch_qma, 12U); off += 12U;
         rowbuf[off++] = ',';
         off += AppF1ToDec(&rowbuf[off], (float)rx * qma_scale);
         rowbuf[off++] = ',';
@@ -2603,7 +2605,11 @@ void StartQma6100pTask(void *argument)
         off += AppF1ToDec(&rowbuf[off], (float)rz * qma_scale);
         rowbuf[off++] = '\r';
         rowbuf[off++] = '\n';
-        RingBuf_Write(&g_ring_qma_acc, (const uint8_t *)rowbuf, off);
+        /* ★行原子 guard:环放不下就整行丢弃,绝不写半行(消除字节截断畸形)。 */
+        if (RingBuf_FreeSpace(&g_ring_qma_acc) >= off)
+        {
+          RingBuf_Write(&g_ring_qma_acc, (const uint8_t *)rowbuf, off);
+        }
       }
     }
   }
@@ -2653,11 +2659,8 @@ void StartAht20Task(void *argument)
     osMutexRelease(i2c1_mutex);
     if (rr != HAL_OK) { osDelay(1000U); continue; }
 
-    uint32_t epoch_s = (uint32_t)(AppTime_GetEpochUs() / 1000000ULL);
-    char dt[12];
-    (void)AppFmtDateTime12(dt, epoch_s);
     uint32_t fid = ++g_aht_frame_id_counter;
-    uint64_t ts_us = AppTime_GetEpochUs();
+    uint64_t ts_us = AppTime_GetEpochUs();  /* BIN 帧仍带逐帧 timestamp_us */
 
     if (output_format == ACQ_OUTPUT_BIN)
     {
@@ -2673,14 +2676,18 @@ void StartAht20Task(void *argument)
     }
     else
     {
-      /* CSV 模式:构建文本行 */
+      /* CSV 模式:构建文本行。datetime 已去除(全通道统一 timebase 还原)。
+       * 行: frame_id,temp_C,humidity_pct (2 逗号)。 */
       uint32_t off = 0;
       off += AppU32ToDec(&rowbuf[off], fid);          rowbuf[off++] = ',';
-      memcpy(&rowbuf[off], dt, 12U); off += 12U;       rowbuf[off++] = ',';
       off += AppF1ToDec(&rowbuf[off], temp_c);         rowbuf[off++] = ',';
       off += AppF1ToDec(&rowbuf[off], hum);
       rowbuf[off++] = '\r'; rowbuf[off++] = '\n';
-      RingBuf_Write(&g_ring_aht_env, (const uint8_t *)rowbuf, off);
+      /* ★行原子 guard:环放不下就整行丢弃(ENV 慢通道几乎不触发,格式统一)。 */
+      if (RingBuf_FreeSpace(&g_ring_aht_env) >= off)
+      {
+        RingBuf_Write(&g_ring_aht_env, (const uint8_t *)rowbuf, off);
+      }
     }
 
     osDelay(1000U);   /* ~1Hz（手册要求采集周期≥1s） */
@@ -2710,12 +2717,9 @@ void StartLis2mdlTask(void *argument)
     for (;;) { osDelay(1000U); }
   }
 
-  /* rowbuf 容量：fid(≤10) + ',' + dt(12) + ',' + 3×mg(±50000mG→≤8 "-50000.0") + 2×','
-   * + "\r\n" = 最坏 52 字节，取 64 留余量（QMA 同类用 96）。 */
+  /* rowbuf 容量：fid(≤10) + ',' + 3×mg(±50000mG→≤8 "-50000.0") + 2×','
+   * + "\r\n" = 最坏 39 字节，取 64 留余量（datetime 已去除）。 */
   char rowbuf[64];
-  char dt[12];
-  uint8_t  dt_valid = 0U;
-  uint32_t dt_last_tick = 0U;
 
   for (;;)
   {
@@ -2723,7 +2727,7 @@ void StartLis2mdlTask(void *argument)
     uint8_t output_format = ACQ_OUTPUT_CSV;  /* 默认 CSV */
     {
       AcqConfig_t cfg; AcqConfig_GetCopy(&cfg);
-      if ((AppAcqIsRunning() == 0U) || (cfg.lis2mdl.enabled == 0U)) { dt_valid = 0U; osDelay(APP_ACQ_IDLE_DELAY_MS); continue; }
+      if ((AppAcqIsRunning() == 0U) || (cfg.lis2mdl.enabled == 0U)) { osDelay(APP_ACQ_IDLE_DELAY_MS); continue; }
       /* output_format 仅对 SD 存储生效,USB 传输始终用 CSV */
       if (AppAcqIsSdSessionActive() != 0U)
       {
@@ -2756,19 +2760,8 @@ void StartLis2mdlTask(void *argument)
     osMutexRelease(i2c1_mutex);
     if (rr != HAL_OK) { continue; }
 
-    /* datetime 限流：AppTime_GetEpochUs 不宜 100Hz 调用；分辨率本就 1s，
-     * 每 ~0.5s（500 tick）刷新一次，期间复用缓存字符串。 */
-    uint32_t now_tick = osKernelGetTickCount();
-    if (dt_valid == 0U || (now_tick - dt_last_tick) >= 500U)
-    {
-      uint32_t epoch_s = (uint32_t)(AppTime_GetEpochUs() / 1000000ULL);
-      (void)AppFmtDateTime12(dt, epoch_s);
-      dt_last_tick = now_tick;
-      dt_valid = 1U;
-    }
-
     uint32_t fid = ++g_mag_frame_id_counter;
-    uint64_t ts_us = AppTime_GetEpochUs();
+    uint64_t ts_us = AppTime_GetEpochUs();  /* BIN 帧仍带逐帧 timestamp_us */
 
     if (output_format == ACQ_OUTPUT_BIN)
     {
@@ -2785,15 +2778,19 @@ void StartLis2mdlTask(void *argument)
     }
     else
     {
-      /* CSV 模式:构建文本行 */
+      /* CSV 模式:构建文本行。datetime 已去除(降产出),PC 端由 CONFIG.JSN
+       * timebase 还原。行: frame_id,mx,my,mz (3 逗号)。 */
       uint32_t off = 0;
       off += AppU32ToDec(&rowbuf[off], fid);     rowbuf[off++] = ',';
-      memcpy(&rowbuf[off], dt, 12U); off += 12U;  rowbuf[off++] = ',';
       off += AppF1ToDec(&rowbuf[off], mg[0]);    rowbuf[off++] = ',';
       off += AppF1ToDec(&rowbuf[off], mg[1]);    rowbuf[off++] = ',';
       off += AppF1ToDec(&rowbuf[off], mg[2]);
       rowbuf[off++] = '\r'; rowbuf[off++] = '\n';
-      RingBuf_Write(&g_ring_mag, (const uint8_t *)rowbuf, off);
+      /* ★行原子 guard:环放不下就整行丢弃,绝不写半行(消除字节截断畸形)。 */
+      if (RingBuf_FreeSpace(&g_ring_mag) >= off)
+      {
+        RingBuf_Write(&g_ring_mag, (const uint8_t *)rowbuf, off);
+      }
     }
   }
 }
@@ -2959,6 +2956,18 @@ void StartLoggerTask(void *argument)
       result = FatFs_SD_LoggerStart();
       if (result == FR_OK)
       {
+        /* CSV 去逐行 datetime 后，写 timebase 供 PC 端还原逐帧时间：
+         * t_us = start_epoch_us + frame_id × interval_us。会话启动即锁定起始锚 +
+         * 各通道采样间隔（MAG/ENV 无专用 interval 变量，从 odr_hz 现算，防除零）。*/
+        {
+          AcqConfig_t tbcfg; AcqConfig_GetCopy(&tbcfg);
+          uint32_t iv_mag = (tbcfg.lis2mdl.odr_hz > 0U) ? (1000000U / tbcfg.lis2mdl.odr_hz) : 0U;
+          uint32_t iv_env = (tbcfg.aht20.odr_hz   > 0U) ? (1000000U / tbcfg.aht20.odr_hz)   : 0U;
+          DeviceCfg_SetTimebase(AppTime_GetEpochUs(),
+                                s_lsm_odr_interval_us, s_qma_odr_interval_us,
+                                s_h3_odr_interval_us, iv_mag, iv_env);
+        }
+
         /* 将当前配置快照写入会话目录 */
         (void)DeviceCfg_WriteConfigToDir(FatFs_SD_GetSessionDir());
 

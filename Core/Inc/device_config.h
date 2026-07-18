@@ -54,6 +54,28 @@ FRESULT DeviceCfg_WriteCurrentToSD(void);
  */
 FRESULT DeviceCfg_WriteConfigToDir(const char *dir);
 
+/**
+ * @brief 设置会话时间基准（写入 CONFIG.JSN 的 timebase 段，供 PC 端还原每帧墙钟时间）。
+ *
+ *        CSV 去掉每行 datetime 后，PC 端靠 t = start_epoch_us + frame_id × interval_us
+ *        还原各帧时间。会话启动时调用（WriteConfigToDir 之前）。
+ *
+ * @param start_epoch_us  会话起始的 Unix 纪元微秒（AppTime_GetEpochUs()）
+ * @param iv_low_us   低量程加速度(六轴)采样间隔(us)
+ * @param iv_mid_us   中量程加速度采样间隔(us)
+ * @param iv_high_us  高量程加速度采样间隔(us)
+ * @param iv_mag_us   磁力计采样间隔(us)
+ * @param iv_env_us   温湿度采样间隔(us)
+ */
+void DeviceCfg_SetTimebase(uint64_t start_epoch_us,
+                           uint32_t iv_low_us, uint32_t iv_mid_us, uint32_t iv_high_us,
+                           uint32_t iv_mag_us, uint32_t iv_env_us);
+
+/**
+ * @brief 设置本次会话采集时长(秒)。会话结束时调用，随后重写 CONFIG.JSN 带上 duration。
+ */
+void DeviceCfg_SetSessionDuration(uint32_t duration_s);
+
 #ifdef __cplusplus
 }
 #endif

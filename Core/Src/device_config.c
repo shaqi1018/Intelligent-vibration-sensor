@@ -32,6 +32,37 @@
 #define DEV_CFG_READ_BUF_SZ    6144U     /* 配置文件读取缓冲区字节数（新模板带中文说明+分段，需 >文件大小，否则尾部字段被截断丢解析） */
 #define DEV_CFG_OBJ_BUF_SZ     512U      /* 子对象提取缓冲区字节数   */
 
+/* ============================================================================
+ *  会话时间基准（timebase）——写进每会话 CONFIG.JSN，供 PC 端还原逐帧墙钟时间。
+ *  CSV 去掉每行 datetime 后：t_frame = start_epoch_us + frame_id × interval_us。
+ *  start/interval 存微秒，duration 存秒（人读“采了多久”）。
+ * ========================================================================= */
+static uint64_t s_tb_start_epoch_us = 0ULL;  /* 会话起始 Unix 纪元(us) */
+static uint32_t s_tb_duration_s     = 0U;    /* 会话时长(s)，结束时补写 */
+static uint32_t s_tb_iv_low_us      = 0U;    /* 各通道采样间隔(us) */
+static uint32_t s_tb_iv_mid_us      = 0U;
+static uint32_t s_tb_iv_high_us     = 0U;
+static uint32_t s_tb_iv_mag_us      = 0U;
+static uint32_t s_tb_iv_env_us      = 0U;
+
+void DeviceCfg_SetTimebase(uint64_t start_epoch_us,
+                           uint32_t iv_low_us, uint32_t iv_mid_us, uint32_t iv_high_us,
+                           uint32_t iv_mag_us, uint32_t iv_env_us)
+{
+    s_tb_start_epoch_us = start_epoch_us;
+    s_tb_duration_s     = 0U;             /* 新会话起始清零，结束时补写 */
+    s_tb_iv_low_us      = iv_low_us;
+    s_tb_iv_mid_us      = iv_mid_us;
+    s_tb_iv_high_us     = iv_high_us;
+    s_tb_iv_mag_us      = iv_mag_us;
+    s_tb_iv_env_us      = iv_env_us;
+}
+
+void DeviceCfg_SetSessionDuration(uint32_t duration_s)
+{
+    s_tb_duration_s = duration_s;
+}
+
 /* 上电写入的默认模板（与解析器所支持的字段保持一致）
  * _doc / _options_* 等以 _ 开头的键仅作文档用途，解析器会自动忽略。 */
 static const char kCfgTemplate[] =
@@ -782,7 +813,7 @@ FRESULT DeviceCfg_WriteConfigToDir(const char *dir)
     FIL         file;
     AcqConfig_t cfg;
     char        path[48];
-    static char s_line[1024];
+    static char s_line[1536];   /* 加 timebase 段(含中文说明)后 >1024，扩容留余量 */
     int         line_len;
 
     if (dir == NULL) return FR_INVALID_PARAMETER;
@@ -821,6 +852,19 @@ FRESULT DeviceCfg_WriteConfigToDir(const char *dir)
         "  \"mag\": {\r\n"
         "    \"enabled\": %u,\r\n"
         "    \"odr_hz\": %u\r\n"
+        "  },\r\n"
+        "  \"_s_timebase\": \"CSV 无逐行时间戳，PC 端还原：t_us = start_epoch_us + frame_id*interval_us；start=start_epoch_s*1e6+start_epoch_frac_us；duration_s 会话结束补写\",\r\n"
+        "  \"timebase\": {\r\n"
+        "    \"start_epoch_s\": %lu,\r\n"
+        "    \"start_epoch_frac_us\": %lu,\r\n"
+        "    \"duration_s\": %lu,\r\n"
+        "    \"interval_us\": {\r\n"
+        "      \"accel_low\": %lu,\r\n"
+        "      \"accel_mid\": %lu,\r\n"
+        "      \"accel_high\": %lu,\r\n"
+        "      \"mag\": %lu,\r\n"
+        "      \"env\": %lu\r\n"
+        "    }\r\n"
         "  }\r\n"
         "}\r\n",
         (unsigned int)cfg.lsm6dsox.enabled,
@@ -840,7 +884,15 @@ FRESULT DeviceCfg_WriteConfigToDir(const char *dir)
         (unsigned int)cfg.aht20.enabled,
         (unsigned int)cfg.aht20.odr_hz,
         (unsigned int)cfg.lis2mdl.enabled,
-        (unsigned int)cfg.lis2mdl.odr_hz);
+        (unsigned int)cfg.lis2mdl.odr_hz,
+        (unsigned long)(s_tb_start_epoch_us / 1000000ULL),
+        (unsigned long)(s_tb_start_epoch_us % 1000000ULL),
+        (unsigned long)s_tb_duration_s,
+        (unsigned long)s_tb_iv_low_us,
+        (unsigned long)s_tb_iv_mid_us,
+        (unsigned long)s_tb_iv_high_us,
+        (unsigned long)s_tb_iv_mag_us,
+        (unsigned long)s_tb_iv_env_us);
 
     if ((line_len < 0) || ((size_t)line_len >= sizeof(s_line)))
         return FR_INT_ERR;
