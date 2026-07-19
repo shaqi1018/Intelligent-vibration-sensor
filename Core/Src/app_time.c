@@ -2,11 +2,15 @@
 #include "rtc_pcf85063.h"
 #include "stm32u5xx_hal.h"
 #include "app_locks.h"
+#include <stdio.h>  /* for printf */
 
-/* DWT µs 读取（160MHz → 每 tick = 6.25ns，除以 160 得 µs） */
+/* DWT µs 读取（160MHz → 每 tick = 6.25ns，除以 160 得 µs）
+ * ★2026-07-20 硬编码 160MHz：实测 SystemCoreClock 变量在运行时不稳定，
+ * 导致 duration_s 虚高 12.9%（242s vs 214.357s MIC.WAV 实际）。硬编码避免运行时
+ * SystemCoreClock 变化影响 DWT 计时精度。 */
 static inline uint32_t DwtUs(void)
 {
-  return DWT->CYCCNT / (SystemCoreClock / 1000000U);
+  return DWT->CYCCNT / 160U;  /* 硬编码 160MHz，不依赖 SystemCoreClock 变量 */
 }
 
 static uint32_t s_anchor_epoch_s  = 0U;
@@ -20,6 +24,10 @@ uint8_t AppTime_Sync(void)
   /* 确保 DWT 已启用 */
   CoreDebug->DEMCR |= CoreDebug_DEMCR_TRCENA_Msk;
   DWT->CTRL        |= DWT_CTRL_CYCCNTENA_Msk;
+
+  /* ★2026-07-20 诊断：打印 SystemCoreClock 实际值，验证 DWT 计时精度 */
+  printf("[AppTime] SystemCoreClock=%lu Hz, DWT_divisor=%lu\r\n",
+         (unsigned long)SystemCoreClock, (unsigned long)(SystemCoreClock / 1000000U));
 
   Pcf85063_Time_t t;
   /* I2C2 is shared with the ES8311 codec — serialize the whole RTC read so it

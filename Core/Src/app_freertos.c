@@ -185,6 +185,7 @@ static volatile uint32_t g_h3_irq_count;
 static volatile uint32_t g_h3_timeout_count;
 static uint64_t s_session_start_us;   /* AppTime µs at SD-session start (route-2 real-ODR diag) */
 static uint32_t s_session_start_rtc_epoch;  /* RTC epoch秒 at SD-session start (用于准确的 duration_s) */
+static uint32_t s_session_end_rtc_epoch;    /* RTC epoch秒 at SD-session end (用于准确的 duration_s) */
 /* QMA FIFO over-read dedup: last emitted raw sample, to drop byte-identical stale repeats. */
 static int16_t s_qma_prev_x, s_qma_prev_y, s_qma_prev_z;
 static uint8_t s_qma_prev_valid;
@@ -901,6 +902,16 @@ static void AppAcqStopInternal(uint32_t now_ms)
     g_acq_ctrl.stop_tick_ms = now_ms;
     g_acq_ctrl.last_stop_tick_ms = now_ms;
     g_acq_ctrl.stop_pending = 1U;
+
+    /* ★2026-07-20 立即读取 RTC 结束时间戳：必须在停止信号发出时立即捕获，
+     * 而不是等到 DEVCFG 消息处理时（那时 MIC 已停止 ~30s，导致 duration_s 虚高）。
+     * 此处读取的时间戳与 MIC 实际停止时间一致（MicTask 在 ~20ms 内响应停止）。 */
+    Pcf85063_Time_t rtc_time;
+    if (Pcf85063_GetTime(&rtc_time) == 0U) {
+      s_session_end_rtc_epoch = Pcf85063_ToEpochSeconds(&rtc_time);
+    } else {
+      s_session_end_rtc_epoch = 0U;  /* RTC 读取失败，退化为 0 */
+    }
   }
   osMutexRelease(acq_ctrl_mutex);
 }
@@ -1562,16 +1573,15 @@ static void StartSdWriterTask(void *argument)
         (void)DeviceCfg_WriteCurrentToSD();
         /* 会话时长补写：此刻仍在 STOP 之前，会话目录未关闭。算出本会话时长(s)后
          * 重写会话目录 CONFIG.JSN，把 timebase.duration_s 从占位 0 更新为真实值。
-         * 单次调用，非高频，AppTime 限流无碍。
-         * ★2026-07-19 改用 RTC epoch 秒差计算 duration_s，消除 AppTime_GetEpochUs() 的
-         * RTOS tick 慢~19% 误差。实测：CONFIG.JSN 记录 37s 但 MIC.WAV 实际 35.16s，造成
-         * 审计工具掉帧率虚高 5%。从 AppTime_GetEpochUs() 提取秒数，走硬件 DWT 时钟，
-         * 不受 RTOS tick 影响。 */
+         * ★2026-07-20 使用 AppAcqStopInternal 中预先捕获的 RTC 结束时间戳：
+         * 结束时间戳必须在停止信号发出时立即读取（与 MIC 实际停止同步），而不是在
+         * 此处读取（此时已经过了 Ring 排空、文件写入等操作，比 MIC 停止晚 ~30s）。 */
         {
-          uint64_t now_us = AppTime_GetEpochUs();
-          uint32_t now_epoch_s = (uint32_t)(now_us / 1000000ULL);
-          uint32_t dur_s = (s_session_start_rtc_epoch != 0U && now_epoch_s > s_session_start_rtc_epoch)
-                           ? (now_epoch_s - s_session_start_rtc_epoch) : 0U;
+          uint32_t dur_s = 0U;
+          /* 使用预先捕获的 s_session_end_rtc_epoch，不再调用 Pcf85063_GetTime() */
+          if (s_session_start_rtc_epoch != 0U && s_session_end_rtc_epoch > s_session_start_rtc_epoch) {
+            dur_s = s_session_end_rtc_epoch - s_session_start_rtc_epoch;
+          }
           DeviceCfg_SetSessionDuration(dur_s);
           (void)DeviceCfg_WriteConfigToDir(FatFs_SD_GetSessionDir());
         }
@@ -3015,7 +3025,16 @@ void StartLoggerTask(void *argument)
         s_temp_last_tick = 0U;   /* ★温度限流按会话清零:0=首帧立即写(会话起点留一条温度) */
         SD_ResetWriteStats();   /* route-2: count SDMMC write events per session */
         s_session_start_us = AppTime_GetEpochUs();  /* route-2: real-ODR measurement base */
-        s_session_start_rtc_epoch = (uint32_t)(s_session_start_us / 1000000ULL);  /* ★2026-07-19 用 DWT 硬件时钟计算准确的 duration_s */
+        /* ★2026-07-20 改用 RTC 硬件时钟计算 duration_s：独立晶振(±20ppm)，不受 CPU/DWT 影响。
+         * 直接读取 RTC epoch 秒，避免 DWT 溢出检测、SystemCoreClock 变化等问题。 */
+        {
+          Pcf85063_Time_t rtc_time;
+          if (Pcf85063_GetTime(&rtc_time) == 0U) {
+            s_session_start_rtc_epoch = Pcf85063_ToEpochSeconds(&rtc_time);
+          } else {
+            s_session_start_rtc_epoch = 0U;  /* RTC 读取失败，退化为 0 */
+          }
+        }
         s_qma_prev_valid = 0U;  /* reset QMA dedup state for the new session */
         AppAcqResetSessionTimer();
         AppFlowStatsSetMode(0U, 1U);

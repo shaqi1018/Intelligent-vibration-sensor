@@ -120,6 +120,9 @@ const char *FatFs_SD_ResultToString(FRESULT result)
   }
 }
 
+/* ★2026-07-20 前向声明：通过 SETTIME.TXT 设置 RTC 时间 */
+static void FatFs_SD_CheckAndSetRTC(void);
+
 static FRESULT FatFs_SD_WriteExact(FIL *file, const void *buffer, UINT length)
 {
   FRESULT result;
@@ -1020,5 +1023,82 @@ void FatFs_SD_RunPhaseBSmokeTest(void)
   }
 
   printf("[FatFs] 阶段B测试成功: 挂载/写入/关闭/回读 已通过\r\n");
+
+  /* ★2026-07-20 删除测试文件，避免 U 盘中一直存在 PHASEB.TXT */
+  f_unlink("0:/PHASEB.TXT");
+
+  /* ★2026-07-20 检查 SetRTC.txt 文件，如果存在则设置 RTC 时间。
+   * 用户通过 USB MSC 在 SD 卡根目录创建 SetRTC.txt，内容格式：
+   *   2026-07-20 10:30:00
+   * 设备启动时读取该文件，设置 RTC，然后删除文件。
+   * 注意：文件创建到设备读取有时间差（几秒到十几秒），会产生对应误差。 */
+  FatFs_SD_CheckAndSetRTC();
+
   FatFs_SD_Unmount();
 }
+
+/* ★2026-07-20 通过 SetRTC.txt 文件设置 RTC 时间
+ * 文件格式：YYYY-MM-DD HH:MM:SS (例如：2026-07-20 10:30:00)
+ * 成功后删除文件，避免重复设置。 */
+static void FatFs_SD_CheckAndSetRTC(void)
+{
+  FIL file;
+  char buffer[32];
+  UINT bytes_read;
+
+  /* 尝试打开 SetRTC.txt */
+  FRESULT res = f_open(&file, "0:/SetRTC.txt", FA_READ);
+  if (res != FR_OK) {
+    return;  /* 文件不存在或打开失败，静默返回 */
+  }
+
+  /* 读取文件内容 */
+  res = f_read(&file, buffer, sizeof(buffer) - 1, &bytes_read);
+  f_close(&file);
+
+  if (res != FR_OK || bytes_read == 0) {
+    return;
+  }
+
+  buffer[bytes_read] = '\0';  /* 确保字符串结尾 */
+
+  /* 去除尾部换行符 */
+  for (UINT i = 0; i < bytes_read; i++) {
+    if (buffer[i] == '\r' || buffer[i] == '\n') {
+      buffer[i] = '\0';
+      break;
+    }
+  }
+
+  /* 解析时间：YYYY-MM-DD HH:MM:SS */
+  Pcf85063_Time_t rtc_time;
+  int year, month, day, hour, minute, second;
+
+  int parsed = sscanf(buffer, "%d-%d-%d %d:%d:%d",
+                      &year, &month, &day, &hour, &minute, &second);
+
+  if (parsed != 6) {
+    return;
+  }
+
+  /* 验证范围 */
+  if (year < 2000 || year > 2099 || month < 1 || month > 12 ||
+      day < 1 || day > 31 || hour < 0 || hour > 23 ||
+      minute < 0 || minute > 59 || second < 0 || second > 59) {
+    return;
+  }
+
+  /* 设置 RTC */
+  rtc_time.year = (uint8_t)(year - 2000);
+  rtc_time.month = (uint8_t)month;
+  rtc_time.day = (uint8_t)day;
+  rtc_time.hour = (uint8_t)hour;
+  rtc_time.minute = (uint8_t)minute;
+  rtc_time.second = (uint8_t)second;
+
+  if (Pcf85063_SetTime(&rtc_time) == PCF85063_OK) {
+    /* 删除文件，避免重复设置 */
+    f_unlink("0:/SetRTC.txt");
+  }
+}
+
