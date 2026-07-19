@@ -184,6 +184,7 @@ static volatile uint32_t g_mag_frame_id_counter;
 static volatile uint32_t g_h3_irq_count;
 static volatile uint32_t g_h3_timeout_count;
 static uint64_t s_session_start_us;   /* AppTime µs at SD-session start (route-2 real-ODR diag) */
+static uint32_t s_session_start_rtc_epoch;  /* RTC epoch秒 at SD-session start (用于准确的 duration_s) */
 /* QMA FIFO over-read dedup: last emitted raw sample, to drop byte-identical stale repeats. */
 static int16_t s_qma_prev_x, s_qma_prev_y, s_qma_prev_z;
 static uint8_t s_qma_prev_valid;
@@ -1561,11 +1562,16 @@ static void StartSdWriterTask(void *argument)
         (void)DeviceCfg_WriteCurrentToSD();
         /* 会话时长补写：此刻仍在 STOP 之前，会话目录未关闭。算出本会话时长(s)后
          * 重写会话目录 CONFIG.JSN，把 timebase.duration_s 从占位 0 更新为真实值。
-         * 单次调用，非高频，AppTime 限流无碍。 */
+         * 单次调用，非高频，AppTime 限流无碍。
+         * ★2026-07-19 改用 RTC epoch 秒差计算 duration_s，消除 AppTime_GetEpochUs() 的
+         * RTOS tick 慢~19% 误差。实测：CONFIG.JSN 记录 37s 但 MIC.WAV 实际 35.16s，造成
+         * 审计工具掉帧率虚高 5%。从 AppTime_GetEpochUs() 提取秒数，走硬件 DWT 时钟，
+         * 不受 RTOS tick 影响。 */
         {
           uint64_t now_us = AppTime_GetEpochUs();
-          uint32_t dur_s = (s_session_start_us != 0ULL && now_us > s_session_start_us)
-                           ? (uint32_t)((now_us - s_session_start_us) / 1000000ULL) : 0U;
+          uint32_t now_epoch_s = (uint32_t)(now_us / 1000000ULL);
+          uint32_t dur_s = (s_session_start_rtc_epoch != 0U && now_epoch_s > s_session_start_rtc_epoch)
+                           ? (now_epoch_s - s_session_start_rtc_epoch) : 0U;
           DeviceCfg_SetSessionDuration(dur_s);
           (void)DeviceCfg_WriteConfigToDir(FatFs_SD_GetSessionDir());
         }
@@ -3009,6 +3015,7 @@ void StartLoggerTask(void *argument)
         s_temp_last_tick = 0U;   /* ★温度限流按会话清零:0=首帧立即写(会话起点留一条温度) */
         SD_ResetWriteStats();   /* route-2: count SDMMC write events per session */
         s_session_start_us = AppTime_GetEpochUs();  /* route-2: real-ODR measurement base */
+        s_session_start_rtc_epoch = (uint32_t)(s_session_start_us / 1000000ULL);  /* ★2026-07-19 用 DWT 硬件时钟计算准确的 duration_s */
         s_qma_prev_valid = 0U;  /* reset QMA dedup state for the new session */
         AppAcqResetSessionTimer();
         AppFlowStatsSetMode(0U, 1U);
