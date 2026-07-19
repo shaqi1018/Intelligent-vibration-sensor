@@ -219,50 +219,66 @@ static FRESULT FatFs_SD_OpenCsvFile(FIL *file, const char *dir, const char *fnam
    * (2) 开录一次性预分配 7×512MB=3.5GB FAT 簇链,非优雅结束时半提交 FAT → 整盘损坏、
    *     零可恢复数据(实测 CTBX_..14-53 新卡整盘 corrupt)。无收益+放大损坏 → 移除。 */
 
-  /* CSV 模式写表头,BIN 模式跳过。
-   * ★2026-07-17 表头填满【一整簇】使数据从簇边界开始——这是消 cnt=1 碎写的关键。
-   * 机制(读 FatFs ff.c f_write 源码 3674-3678 确认):FatFs 每次 disk_write【绝不跨簇边界】
-   *   cc = btw/512; if (csect + cc > csize) cc = csize - csect;   // 裁到簇边界
-   * 卡簇 = 64KB = 128 扇区。若数据从簇内偏移起(如表头占簇第0扇区、数据从偏移512起),则每个
-   * 64KB 攒批写恰好横跨簇边界 → 被切成 cnt=127(补齐本簇)+ cnt=1(下一簇头扇区)。每次写恒
-   * ~125ms 固定成本,那多余的 cnt=1 白吃 ~32% 写时间(实测)。BIN 无表头→数据从簇偏移0起→
-   * 每写贴合整簇→干净 cnt=128,这正是 BIN 只丢 3-4% 而 CSV 丢 13-20% 的直接原因。
-   * 修法:表头 + '#' 注释填充凑满【一整簇】(用挂载后真实 csize,自适应格式化簇大小),数据从
-   * 下一簇边界(偏移=簇大小)开始 → 之后每个写只在簇边界切成整簇块,消除中途 cnt=1。
-   * 填充行用 '#' 起头(消费方 pandas 加 comment='#' 忽略);一次性/文件,不在热路径。 */
+  /* CSV 模式写表头并填充到簇边界,BIN 模式跳过。
+   * ★2026-07-19 表头 + '#' 填充到当前簇结束,使数据从下一簇边界开始——这是消除
+   *   cnt=127+cnt=1 碎写的唯一解法。
+   *
+   * 根因:FatFs 的 f_write 在簇边界强制切块(ff.c:3674-3678):
+   *   cc = btw/512;
+   *   if (csect + cc > fs->csize) cc = fs->csize - csect;  // 裁到簇边界,绝不跨簇
+   *
+   * 若表头只写40B,数据从文件偏移40开始 → 文件指针永久处于簇内偏移 → 每次写64KB
+   * (128扇区)时,FatFs发现会跨簇边界,强制切成:
+   *   - cnt=127(补齐当前簇) + cnt=1(新簇首扇区)
+   *   - 每次写耗时翻倍:127扇区+1扇区各吃一次~125ms固定开销 → 掉帧严重
+   *
+   * 解法:表头写完后,用'#'注释行填充到当前簇结束(填充量 = csize×512 - 表头字节数),
+   * 使后续数据写从下一个簇边界(文件偏移 = csize×512)开始 → 之后每个64KB写恰好
+   * 对齐一个簇 → FatFs 输出干净的 cnt=128,无碎写。
+   *
+   * csize 从挂载后的 g_sd_fatfs.csize 读取(常见64KB簇=128扇区);异常时退回
+   * APP_SD_WRITE_BLOCK(64KB)兜底。填充内容为一行"# <spaces...>\r\n",pandas
+   * 读CSV时加 comment='#' 自动忽略。 */
   if (output_format == ACQ_OUTPUT_CSV && header != NULL)
   {
     uint32_t hlen = (uint32_t)strlen(header);
-    /* 目标:表头+填充 = 一整簇字节。csize=每簇扇区数,×512=簇字节。挂载失败/异常时退回
-     * APP_SD_WRITE_BLOCK(64KB,与写块同)兜底,仍保证 512 对齐。 */
-    uint32_t clus_bytes = (uint32_t)g_sd_fatfs.csize * APP_SD_SECTOR;
-    if (clus_bytes == 0U) clus_bytes = APP_SD_WRITE_BLOCK;
 
+    /* 获取真实簇大小(字节);csize=0时用64KB兜底 */
+    uint32_t clus_bytes = (uint32_t)g_sd_fatfs.csize * APP_SD_SECTOR;
+    if (clus_bytes == 0U || clus_bytes > (4U * 1024U * 1024U))
+    {
+      clus_bytes = APP_SD_WRITE_BLOCK;  /* 异常时用64KB */
+    }
+
+    /* 写表头 */
     r = FatFs_SD_WriteExact(file, header, (UINT)hlen);
     if (r != FR_OK) { (void)f_close(file); return r; }
 
-    /* 填充总量 = 簇字节 - 表头,构成一行 '#' + 空格... + "\r\n"。大块(64KB)不能放栈上
-     * (logger 栈仅 4KB),用 512B 空格缓冲循环写;此为开文件一次性动作,非热路径。 */
-    if (hlen + 3U <= clus_bytes)
+    /* 填充到簇边界:总量 = clus_bytes - hlen,格式为 "# <spaces>\r\n"
+     * 用512B栈缓冲循环写(logger栈只有4KB,64KB填充不能放栈上) */
+    if (hlen < clus_bytes)
     {
-      char sp[APP_SD_SECTOR];
-      memset(sp, ' ', sizeof(sp));
-      uint32_t pad = clus_bytes - hlen;      /* 含 "#...\r\n" 的总填充字节 */
+      uint32_t pad_total = clus_bytes - hlen;  /* 总填充字节(含"#\r\n") */
 
-      char hash = '#';
-      r = FatFs_SD_WriteExact(file, &hash, 1U);         /* 行首 '#' */
+      /* 写行首'#' */
+      r = FatFs_SD_WriteExact(file, "#", 1U);
       if (r != FR_OK) { (void)f_close(file); return r; }
 
-      uint32_t sp_left = pad - 3U;                       /* 中间空格数(减去 '#' 与 "\r\n") */
-      while (sp_left > 0U)
+      /* 写中间空格:total - '#'(1) - '\r\n'(2) = total - 3 */
+      uint32_t spaces_left = (pad_total >= 3U) ? (pad_total - 3U) : 0U;
+      char sp[APP_SD_SECTOR];
+      memset(sp, ' ', sizeof(sp));
+
+      while (spaces_left > 0U)
       {
-        uint32_t chunk = (sp_left > (uint32_t)sizeof(sp)) ? (uint32_t)sizeof(sp) : sp_left;
+        uint32_t chunk = (spaces_left > (uint32_t)sizeof(sp)) ? (uint32_t)sizeof(sp) : spaces_left;
         r = FatFs_SD_WriteExact(file, sp, (UINT)chunk);
         if (r != FR_OK) { (void)f_close(file); return r; }
-        sp_left -= chunk;
+        spaces_left -= chunk;
       }
 
-      r = FatFs_SD_WriteExact(file, "\r\n", 2U);         /* 行尾 CRLF */
+      /* 写行尾CRLF */
+      r = FatFs_SD_WriteExact(file, "\r\n", 2U);
       if (r != FR_OK) { (void)f_close(file); return r; }
     }
   }
