@@ -3169,11 +3169,12 @@ void StartLoggerTask(void *argument)
      * 730KB/s,产出比卡能写的多 16KB/s → logger 被每次写阻塞 125ms、环攒不满 32KB 就超时兜底写
      * 小块。这是带宽物理缺口,调度层动不了。掉帧真解只有 BIN 降产出(519KB/s,富余 195)或换更快卡。
      * 故回退 1MB:sync 间隔既不是掉帧因,就选掉电更安全的 1MB(硬掉电最多丢 2s 元数据)。
-     * ★2026-07-19 保持 1MB。真正的 cnt=127+cnt=1 碎写根因是表头未填充到簇边界 → 数据从簇内
-     * 偏移开始,每个 64KB 写都跨簇被切两半。已修复:表头填充到当前簇结束,数据从下一簇边界开始,
-     * 之后 FatFs 输出干净的 cnt=128。sync 间隔对数据区碎写无影响,保持 1MB 优先掉电安全。 */
+     * ★2026-07-19 1MB→4MB 重试。表头填充到簇边界已消除数据区 cnt=127+cnt=1 碎写,掉帧从 45%
+     * 降至 6-10%。现在瓶颈是 FAT 更新的 cnt=1(占 42% 写时间)。4MB sync 可将 FAT 更新从
+     * 每 16 次写触发降为每 64 次,摊销成本。权衡:硬掉电最多丢 ~6s 元数据,但低电量保护已覆盖
+     * 99% 关机,可接受。f_expand 预分配失败(设置 objsize 但不设置 fptr 导致表头碎写),放弃。 */
 #ifndef APP_SD_SYNC_INTERVAL_BYTES
-#define APP_SD_SYNC_INTERVAL_BYTES  (1U * 1024U * 1024U)
+#define APP_SD_SYNC_INTERVAL_BYTES  (4U * 1024U * 1024U)
 #endif
     if ((sd_file_open != 0U) && (rows_since_sync >= APP_SD_SYNC_INTERVAL_BYTES))
     {
