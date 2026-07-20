@@ -441,9 +441,43 @@ FRESULT FatFs_SD_LoggerStart(void)
     g_seg_max_bytes = mb * 1024U * 1024U;   /* 4000*1MiB=4194304000 < UINT32_MAX */
   }
 
-  /* 打开 6 个数据文件的首段(CSV 或 BIN)，并根据格式写入表头 */
+  /* 打开数据文件的首段(CSV 或 BIN)，仅为 enabled 的传感器创建文件 */
   for (uint32_t i = 0U; i < FATFS_SD_NUM_FILES; i++)
   {
+    uint8_t should_create = 0U;
+
+    /* 根据索引判断对应传感器是否 enabled */
+    switch (i)
+    {
+      case 0U: /* ACC_LOW */
+      case 1U: /* TMP_LOW */
+      case 6U: /* GYR_LOW */
+        should_create = cfg.lsm6dsox.enabled;
+        break;
+      case 2U: /* ACC_HIGH */
+        should_create = cfg.h3lis100dl.enabled;
+        break;
+      case 3U: /* ACC_MID */
+        should_create = cfg.qma6100p.enabled;
+        break;
+      case 4U: /* ENV */
+        should_create = cfg.aht20.enabled;
+        break;
+      case 5U: /* MAG */
+        should_create = cfg.lis2mdl.enabled;
+        break;
+      default:
+        break;
+    }
+
+    if (should_create == 0U)
+    {
+      /* 传感器未启用，跳过文件创建 */
+      g_file_seg[i]   = 0U;
+      g_file_bytes[i] = 0U;
+      continue;
+    }
+
     g_file_seg[i]   = 1U;
     g_file_bytes[i] = 0U;
     result = FatFs_SD_OpenLogSegment((uint8_t)i);
@@ -452,7 +486,10 @@ FRESULT FatFs_SD_LoggerStart(void)
       /* 关闭已打开的文件 */
       for (uint32_t j = 0U; j < i; j++)
       {
-        (void)f_close(&g_log_files[j]);
+        if (g_file_seg[j] != 0U)  /* 只关闭已创建的文件 */
+        {
+          (void)f_close(&g_log_files[j]);
+        }
       }
       FatFs_SD_Unmount();
       return result;
@@ -578,6 +615,9 @@ FRESULT FatFs_SD_LoggerWriteFileIndex(uint8_t idx, const uint8_t *data, uint32_t
   if (g_logger_active == 0U) return FR_NOT_ENABLED;
   if (SDMMC1_IsCardDetected() == 0U) return FR_NOT_READY;
 
+  /* 如果该索引对应的传感器未启用（文件未创建），静默跳过 */
+  if (g_file_seg[idx] == 0U) return FR_OK;
+
   /* 分段：本段已写 g_file_bytes[idx]，若再写 len 会超过上限就先滚动到下一段。
    * 在写入前滚动可保证“整块写入”不跨文件，每段大小始终 ≤ g_seg_max_bytes
    * (误差 < 一次 flush 块 16KB)。g_file_bytes!=0 的判定避免首块即滚动。*/
@@ -684,8 +724,12 @@ void FatFs_SD_LoggerStop(void)
   {
     for (uint32_t i = 0U; i < FATFS_SD_NUM_FILES; i++)
     {
-      (void)f_sync(&g_log_files[i]);
-      (void)f_close(&g_log_files[i]);
+      /* 只同步和关闭已创建的文件（g_file_seg != 0 表示文件已创建） */
+      if (g_file_seg[i] != 0U)
+      {
+        (void)f_sync(&g_log_files[i]);
+        (void)f_close(&g_log_files[i]);
+      }
     }
 
     /* ★2026-07-12 顺序修正:先 f_mount(NULL) 卸载(flush 残留 FS 状态)再清
