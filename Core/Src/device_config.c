@@ -69,11 +69,7 @@ static const char kCfgTemplate[] =
 "{\r\n"
 "  \"_file\": \"Sensor Box 设备配置；开机读取并应用。下划线开头的键是注释，解析器忽略。\",\r\n"
 "\r\n"
-"  \"_s1\": \"==================== 开机行为 ====================\",\r\n"
-"  \"boot_acquire\": 0,\r\n"
-"  \"_doc_boot_acquire\": \"开机是否自动开始采集：1=自动采，0=需按键/上位机手动启动\",\r\n"
-"  \"_options_boot_acquire\": [0, 1],\r\n"
-"\r\n"
+"  \"_s1\": \"==================== 数据采集配置 ====================\",\r\n"
 "  \"sink\": \"SD\",\r\n"
 "  \"_doc_sink\": \"数据出口：SD=存卡(无人值守) / USB=传上位机。开机即采推荐 SD\",\r\n"
 "  \"_options_sink\": [\"SD\", \"USB\"],\r\n"
@@ -682,17 +678,13 @@ FRESULT DeviceCfg_WriteCurrentToSD(void)
         "{\r\n"
         "  \"_file\": \"Sensor Box 设备配置；开机读取并应用。下划线开头的键是注释，解析器忽略。\",\r\n"
         "\r\n"
-        "  \"_s1\": \"==================== 开机行为 ====================\",\r\n"
-        "  \"boot_acquire\": %u,\r\n"
-        "  \"_doc_boot_acquire\": \"开机是否自动开始采集：1=自动采，0=需按键/上位机手动启动\",\r\n"
-        "  \"_options_boot_acquire\": [0, 1],\r\n"
-        "\r\n"
+        "  \"_s1\": \"==================== 数据采集配置 ====================\",\r\n"
         "  \"output_format\": \"%s\",\r\n"
         "  \"_doc_output_format\": \"SD 卡数据格式：CSV=文本(兼容既有) / BIN=二进制(体积小,需解析工具)。USB传输始终用CSV\",\r\n"
         "  \"_options_output_format\": [\"CSV\", \"BIN\"],\r\n"
         "\r\n"
         "  \"duration_ms\": %lu,\r\n"
-        "  \"_doc_duration_ms\": \"单次采集时长(ms)，到点自动停；0=一直采到关机或手动停\",\r\n"
+        "  \"_doc_duration_ms\": \"单次采集时长(毫秒)，到点自动停；0=无限期采集(手动停止)。示例: 60000=1分钟, 3600000=1小时\",\r\n"
         "\r\n"
         "  \"seg_size_mb\": %lu,\r\n"
         "  \"_doc_seg_size_mb\": \"SD每个数据文件分段大小(MB)：单文件写满即新建续段(ACC_LOW001.BIN→ACC_LOW002.BIN...)，各文件独立计数；0=不分段。MIC.WAV不分段\",\r\n"
@@ -756,7 +748,6 @@ FRESULT DeviceCfg_WriteCurrentToSD(void)
         "    \"_doc_full_mv\": \"电池满电电压(mV)，充满静置10分钟后用万用表测量填入\"\r\n"
         "  }\r\n"
         "}\r\n",
-        (unsigned int)cfg.boot_acquire,
         format_name,
         (unsigned long)cfg.duration_ms,
         (unsigned long)cfg.seg_size_mb,

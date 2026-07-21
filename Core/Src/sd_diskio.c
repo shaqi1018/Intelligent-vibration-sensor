@@ -230,7 +230,7 @@ DRESULT SD_disk_write(BYTE pdrv, const BYTE *buff, DWORD sector, UINT count)
       /* ★2026-07-12 拆分计时(SD_WR_SPLIT_PROBE):把"DMA传输(等信号量)"与"PROGRAMMING等待"
        * 分开计时,确认那280ms尖峰到底耗在哪——这是设计读写解耦方案的前提数据。默认关。 */
 #ifndef SD_WR_SPLIT_PROBE
-#define SD_WR_SPLIT_PROBE 1U
+#define SD_WR_SPLIT_PROBE 0U
 #endif
 #if (SD_WR_SPLIT_PROBE != 0U)
       uint32_t probe_dma0 = HAL_GetTick();

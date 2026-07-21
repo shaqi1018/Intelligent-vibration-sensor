@@ -809,12 +809,7 @@ static void AppPrintRuntimeDiag(void)
          (unsigned long)osThreadGetStackSpace(qma6100pTaskHandle),
          (unsigned long)osThreadGetStackSpace(loggerTaskHandle),
          (unsigned long)osThreadGetStackSpace(micTaskHandle));
-  printf("[Ring] lsmA drop=%lu hwm=%lu/%lu | lsmG drop=%lu hwm=%lu/%lu | h3 drop=%lu hwm=%lu/%lu | qma drop=%lu hwm=%lu/%lu | mic drop=%lu hwm=%lu/%lu\r\n",
-         (unsigned long)g_ring_lsm_acc.dropped, (unsigned long)g_ring_lsm_acc.high_watermark, (unsigned long)g_ring_lsm_acc.size,
-         (unsigned long)g_ring_lsm_gyr.dropped, (unsigned long)g_ring_lsm_gyr.high_watermark, (unsigned long)g_ring_lsm_gyr.size,
-         (unsigned long)g_ring_h3_acc.dropped,  (unsigned long)g_ring_h3_acc.high_watermark,  (unsigned long)g_ring_h3_acc.size,
-         (unsigned long)g_ring_qma_acc.dropped, (unsigned long)g_ring_qma_acc.high_watermark, (unsigned long)g_ring_qma_acc.size,
-         (unsigned long)g_ring_mic.dropped,     (unsigned long)g_ring_mic.high_watermark,     (unsigned long)g_ring_mic.size);
+  /* [Ring] 统计已注释 — 去除冗余调试信息 */
 
   /* Route-2 real-ODR measurement: per-sensor session sample counts (the frame_id
    * counters, reset to 0 at session start) + AppTime-measured session seconds.
@@ -2967,8 +2962,7 @@ void StartLoggerTask(void *argument)
 
     if (sd_file_open == 0U)
     {
-      printf("[Logger] starting SD session (acq running=%u sink=%u)...\r\n",
-             (unsigned int)acq.running, (unsigned int)acq.sink);
+      /* [Logger] starting SD session 已注释 — 去除冗余调试信息 */
       result = FatFs_SD_LoggerStart();
       if (result == FR_OK)
       {
@@ -3038,7 +3032,7 @@ void StartLoggerTask(void *argument)
         s_qma_prev_valid = 0U;  /* reset QMA dedup state for the new session */
         AppAcqResetSessionTimer();
         AppFlowStatsSetMode(0U, 1U);
-        printf("[Logger] SD logging resumed\r\n");
+        /* [Logger] SD logging resumed 已注释 — 去除冗余调试信息 */
       }
       else
       {

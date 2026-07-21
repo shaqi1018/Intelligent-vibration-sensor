@@ -496,15 +496,7 @@ FRESULT FatFs_SD_LoggerStart(void)
     }
   }
 
-  if (g_seg_max_bytes == 0U)
-  {
-    printf("[FatFs] 会话目录已创建: %s (不分段)\r\n", g_session_dir);
-  }
-  else
-  {
-    printf("[FatFs] 会话目录已创建: %s (每文件分段 %luMB)\r\n",
-           g_session_dir, (unsigned long)(g_seg_max_bytes / (1024U * 1024U)));
-  }
+  /* [FatFs] 会话目录已创建 已注释 — 去除冗余调试信息 */
   g_logger_active = 1U;
   g_logger_rows_written = 0U;
   return FR_OK;
