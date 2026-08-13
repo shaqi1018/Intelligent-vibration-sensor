@@ -29,7 +29,9 @@
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
+/* DISABLED: SD card functionality removed in path/usb branch
 #include "fatfs_sd.h"
+*/
 #include "sensor_snapshot.h"
 #include "sensor_bin.h"
 #include "lsm6dsox.h"
@@ -38,10 +40,14 @@
 #include "aht20.h"
 #include "lis2mdl.h"
 #include "acq_config.h"
+/* DISABLED: device_config removed — USB branch uses runtime commands only
 #include "device_config.h"
+*/
 #include "boot_mode.h"
+/* DISABLED: SD card low-level drivers removed
 #include "sd_diskio.h"
 #include "sdmmc.h"
+*/
 #include "usbd_wcid_app.h"
 #include "usbd_wcid_streaming.h"
 #include "usbd_core.h"
@@ -96,7 +102,10 @@ static osMutexId_t snapshot_mutex;
 static volatile uint8_t s_usb_done_armed;
 static osMutexId_t frame_buffer_mutex;
 static osMutexId_t acq_ctrl_mutex;
-SemaphoreHandle_t s_sdmmc_dma_sem;  /* signaled by HAL SD DMA completion ISR */
+/* SD card DMA semaphore: Keep declaration for sd_diskio.c linkage even though
+ * path/usb doesn't use SD card functionality. sd_diskio.c is compiled but not
+ * actively called in USB streaming mode. */
+SemaphoreHandle_t s_sdmmc_dma_sem = NULL;
 static osSemaphoreId_t s_lsm_fifo_sem;  /* released by EXTI0 ISR on PB0 rising edge (HW-v2) */
 static osSemaphoreId_t s_qma_fifo_sem;  /* released by EXTI4 ISR on PC4 rising edge (HW-v2) */
 static osSemaphoreId_t s_h3_drdy_sem;   /* released by EXTI1 ISR on PA1 rising edge (HW-v2) */
@@ -305,8 +314,10 @@ static uint32_t RingBuf_Available(const AppRingBuffer_t *rb);
 static uint32_t RingBuf_Write(AppRingBuffer_t *rb, const uint8_t *src, uint32_t len);
 static uint32_t RingBuf_PeekContiguous(AppRingBuffer_t *rb, const uint8_t **out_ptr, uint32_t *out_len);
 static void     RingBuf_Consume(AppRingBuffer_t *rb, uint32_t len);
+/* DISABLED: LoggerDrainRing removed in path/usb — SD card logger functionality not used
 static int      LoggerDrainRing(AppRingBuffer_t *rb, uint8_t file_idx, uint32_t min_flush,
                                 uint32_t *rows_since_sync, FRESULT *out_res);
+*/
 static inline uint32_t AppU32ToDec(char *out, uint32_t v);
 static inline uint32_t AppI32ToDec(char *out, int32_t v);
 static inline uint32_t AppU64ToDec(char *out, uint64_t v);
@@ -400,6 +411,8 @@ void MX_FREERTOS_Init(void)
   s_qma_fifo_sem = osSemaphoreNew(1, 0, NULL);
   s_h3_drdy_sem  = osSemaphoreNew(1, 0, NULL);
   s_mag_drdy_sem = osSemaphoreNew(1, 0, NULL);
+  /* SD card DMA semaphore: Keep for sd_diskio.c linkage, but not used in path/usb.
+   * MSC mode (U-disk) is disabled, but sd_diskio.c is still compiled. */
   s_sdmmc_dma_sem = xSemaphoreCreateBinary();
   /* USER CODE END RTOS_SEMAPHORES */
 
@@ -834,6 +847,10 @@ static void AppLoggerStopSdSession(uint8_t *sd_file_open, uint32_t *rows_since_s
 
   if (*sd_file_open != 0U)
   {
+    /* DISABLED: SD card logger drain removed in path/usb branch — USB streaming only.
+     * In SD mode, this section would flush remaining ring buffer data before closing files.
+     * USB mode streams directly to endpoints without file I/O. */
+    #if 0
     /* Batching (LoggerDrainRing min_flush) can leave up to ~half a ring of
      * sub-threshold tail data unwritten. Force-flush every ring (min_flush=0)
      * before closing files, else the session tail is lost. */
@@ -851,9 +868,12 @@ static void AppLoggerStopSdSession(uint8_t *sd_file_open, uint32_t *rows_since_s
         if (LoggerDrainRing(&g_ring_mag,     5U, 0U, &dummy_rss, &fr) > 0) { any = 1; }
       } while (any != 0);
     }
+    /* DISABLED: SD card write-back removed in path/usb branch
     (void)DeviceCfg_WriteCurrentToSD();
     FatFs_SD_LoggerStop();
-    SD_PrintWriteStats();   /* route-2: per-session SDMMC write-path health */
+    SD_PrintWriteStats();
+    */
+    #endif
     AppPrintRuntimeDiag();  /* route-2: per-task stack margin + ring overrun */
     *sd_file_open = 0U;
   }
@@ -1498,6 +1518,10 @@ static uint8_t s_sd_bounce[APP_RING_FLUSH_CHUNK];
  * Returns:  1 = wrote a chunk (caller keeps looping),
  *           0 = nothing to do / accumulating / audio dropped (no progress),
  *          -1 = write error (caller breaks; *out_res holds the FRESULT). */
+/* DISABLED in path/usb: SD card logger drain function removed — USB streaming only.
+ * LoggerDrainRing was used to write ring buffer data to SD card files.
+ * In USB mode, data goes directly to USB endpoints via UsbWcidApp_Write. */
+#if 0
 static int LoggerDrainRing(AppRingBuffer_t *rb, uint8_t file_idx, uint32_t min_flush,
                            uint32_t *rows_since_sync, FRESULT *out_res)
 {
@@ -1530,6 +1554,7 @@ static int LoggerDrainRing(AppRingBuffer_t *rb, uint8_t file_idx, uint32_t min_f
   }
   return -1;
 }
+#endif
 
 static uint32_t AppSnapshotComputeMaxDeltaMs(const AppSensorSnapshot_t *snapshot)
 {
@@ -1733,7 +1758,9 @@ static void UsbCmd_SetSensor(const char *cmd)
                      (unsigned)mcfg.es8311.enabled,
                      (unsigned long)mcfg.es8311.sample_rate_hz,
                      (unsigned)mcfg.es8311.gain_db);
+      /* DISABLED: SD card write-back removed in path/usb branch
       (void)DeviceCfg_WriteCurrentToSD();
+      */
     }
     else
     {
@@ -1857,11 +1884,16 @@ static void UsbCmd_SetSensor(const char *cmd)
   }
   UsbCdcService_Write((const uint8_t *)line, (uint32_t)len);
 
-  /* 同步写回 SD 卡 + 立即配置传感器硬件 */
+  /* DISABLED: SD card write-back removed in path/usb branch — runtime config only
   if (updated)
   {
     (void)DeviceCfg_WriteCurrentToSD();
     AppApplySensorConfig();
+  }
+  */
+  if (updated)
+  {
+    AppApplySensorConfig();  /* Apply sensor config immediately, no SD write */
   }
 }
 
@@ -1939,6 +1971,8 @@ static void UsbCmd_Process(const char *cmd)
   }
   else if (strcmp(cmd, "boot_msc") == 0)
   {
+    /* DISABLED: MSC mode removed in path/usb branch — pure USB streaming only */
+    /*
     printf("Switching to USB MSC mode...\r\n");
     UsbCmd_AcqStop();
     osDelay(500U);
@@ -1948,6 +1982,9 @@ static void UsbCmd_Process(const char *cmd)
     printf("BootMode flag written, readback=%d, resetting...\r\n", (int)verify);
     osDelay(200U);
     NVIC_SystemReset();
+    */
+    const char *msg = "ERR: boot_msc disabled in path/usb branch\r\n";
+    UsbCdcService_Write((const uint8_t *)msg, (uint32_t)strlen(msg));
   }
   else if (strncmp(cmd, "set_time ", 9U) == 0)
   {

@@ -22,8 +22,10 @@
 #include "icache.h"
 #include "usart.h"
 #include "gpio.h"
+/* DISABLED: SD card functionality removed in path/usb branch
 #include "sdmmc.h"
 #include "fatfs_sd.h"
+*/
 #include "usb_otg.h"
 
 /* Private includes ----------------------------------------------------------*/
@@ -137,7 +139,9 @@ int main(void)
 
   if (g_boot_mode == BOOT_MODE_USB_MSC)
   {
-    /* No hardware detect pin on HW-v2. Try init; failure = no card. */
+    /* DISABLED: MSC mode removed in path/usb — pure USB streaming only.
+     * No U-disk mode, no SD card access. */
+    /*
     if (MX_SDMMC1_SD_Init() != HAL_OK)
     {
       BootMode_Write(BOOT_MODE_WCID_BULK);
@@ -152,8 +156,6 @@ int main(void)
       NVIC_SystemReset();
     }
 
-    /* Bare polling loop: when host disconnects (was configured, now not),
-     * arm WCID flag and reset so next boot resumes streaming. */
     uint8_t was_configured = 0U;
     for (;;)
     {
@@ -169,14 +171,19 @@ int main(void)
       }
       HAL_Delay(20U);
     }
+    */
+    printf("[BOOT] MSC mode disabled in path/usb, forcing WCID streaming\r\n");
+    BootMode_Write(BOOT_MODE_WCID_BULK);
+    NVIC_SystemReset();
     /* not reached */
   }
 
   printf("[初始化] GPIO/ICACHE/UART1 初始化完成\r\n");
   printf("[BOOT] path/usb mode=%d (0=WCID Bulk, 1=MSC U-disk)\r\n", (int)g_boot_mode);
 
-  /* path/usb: SD card optional — used only to read DEVCFG.JSN at boot for default
-   * sensor config. Runtime config comes from USB commands and overrides defaults. */
+  /* path/usb: SD card functionality disabled — USB branch no longer uses SD card.
+   * All configuration comes from USB commands at runtime. */
+  /* DISABLED: SD card initialization and config loading
   {
     HAL_StatusTypeDef sd_st = MX_SDMMC1_SD_Init();
     if (sd_st == HAL_OK)
@@ -189,6 +196,8 @@ int main(void)
       printf("[初始化] 未检测到 SD 卡 (跳过默认配置，使用内置默认值)\r\n");
     }
   }
+  */
+  printf("[初始化] SD 卡功能已禁用 (USB 分支纯流式传输模式)\r\n");
 
   /* path/usb: 按键/电池管理已删除 — USB 总线供电，上位机指令驱动 */
 
