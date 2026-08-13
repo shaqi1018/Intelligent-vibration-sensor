@@ -416,9 +416,10 @@ void MX_FREERTOS_Init(void)
   s_sdmmc_dma_sem = xSemaphoreCreateBinary();
   /* USER CODE END RTOS_SEMAPHORES */
 
-  /* Load device config from SD card (DEVCFG.JSN) before tasks start,
-   * so sensor tasks read the correct ODR/range/enabled values. */
-  (void)DeviceCfg_LoadFromSD();
+  /* DISABLED: SD card config loading removed in path/usb branch.
+   * All sensor configuration comes from USB CDC commands at runtime.
+   * Default values are already set in AcqConfig_Init() called above. */
+  /* (void)DeviceCfg_LoadFromSD(); */
 
   /* Initialise SPSC ring buffers (data arrays are static, no allocation). */
   RingBuf_Init(&g_ring_lsm_imu, s_lsm_imu_ringbuf, APP_RING_LSM_IMU_SIZE);
